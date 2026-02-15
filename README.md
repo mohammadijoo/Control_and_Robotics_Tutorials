@@ -24,7 +24,7 @@ This repository is the **code companion** for a comprehensive, course-based tuto
 
 ## Course playlists (thumbnail links)
 
-Each item below is a clickable thumbnail (YouTube video thumbnail) that links to the course playlist (when available).
+Each item below is a clickable link to the course playlist.
 
 ### Introduction to Robotics Course
 [![Introduction to Robotics Course](https://img.youtube.com/vi/YPi2bmG81AY/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Byl-yaGk9VjoEXadCEGWsjm)
@@ -36,16 +36,11 @@ Each item below is a clickable thumbnail (YouTube video thumbnail) that links to
 [![Robotics Kinematics and Dynamics Course](https://img.youtube.com/vi/miyV8Msk0qU/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByUYXn64GUrAuZVK6CRNZO1)
 
 ### Robot Control Course
-[![Robot Control Course](https://img.youtube.com/vi/I2R7Ub7wEXw/hqdefault.jpg)](https://www.youtube.com/watch?v=I2R7Ub7wEXw)
-
-> **Note:** A public YouTube playlist link for this course was not discoverable via web search at the time this README was generated.  
-> The thumbnail currently links to a representative course video; replace the link with the playlist URL if/when you publish it.
+[![Robot Control Course](https://img.youtube.com/vi/I2R7Ub7wEXw/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BwDBehZ0f8VrDXO9dWZHIFm)
 
 ### Advanced Robotics Course
-[![Advanced Robotics Course](https://img.youtube.com/vi/TWp_wrDlkKg/hqdefault.jpg)](https://www.youtube.com/@abolfazlmohammadijoo)
+[![Advanced Robotics Course](https://img.youtube.com/vi/TWp_wrDlkKg/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH)
 
-> **Note:** A public YouTube playlist link for this course was not discoverable via web search at the time this README was generated.  
-> The thumbnail currently links to the channel; replace it with the course playlist URL if/when you publish it.
 
 ---
 
@@ -117,8 +112,8 @@ If you find issues (bugs, typos, broken links), feel free to open an issue or su
 
 ## License
 
-No license file is currently included in the repository.  
-If you want, add a `LICENSE` file (e.g., MIT / Apache-2.0 / GPL-3.0) to clarify reuse terms.
+This project is released under the **MIT License** (see the `LICENSE` file).  
+You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, provided the copyright notice and this permission notice are included in all copies or substantial portions of the software.
 
 ---
 
