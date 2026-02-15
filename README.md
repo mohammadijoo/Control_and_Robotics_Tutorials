@@ -26,27 +26,20 @@ This repository is the **code companion** for a comprehensive, course-based tuto
 
 Each item below is a clickable link to the course playlist.
 
-### Introduction to Robotics Course
-[![Introduction to Robotics Course](https://img.youtube.com/vi/YPi2bmG81AY/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Byl-yaGk9VjoEXadCEGWsjm)
+# Introduction to Robotics Course
+[![Introduction to Robotics Course](https://i.ytimg.com/vi/YPi2bmG81AY/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Byl-yaGk9VjoEXadCEGWsjm)
 
-### Linear Control Course
-[![Linear Control Course](https://img.youtube.com/vi/zDp0WnA2908/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BzT3USdTYfK-ZP9OBTYZjaf)
+# Linear Control Course
+[![Linear Control Course](https://i.ytimg.com/vi/m-bV-HJoaus/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BzT3USdTYfK-ZP9OBTYZjaf)
 
-### Robotics Kinematics and Dynamics Course
-[![Robotics Kinematics and Dynamics Course](https://img.youtube.com/vi/miyV8Msk0qU/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByUYXn64GUrAuZVK6CRNZO1)
+# Robotics Kinematics and Dynamics Course
+[![Robotics Kinematics and Dynamics Course](https://i.ytimg.com/vi/miyV8Msk0qU/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByUYXn64GUrAuZVK6CRNZO1)
 
-### Robot Control Course
+# Robot Control Course
 [![Robot Control Course](https://i.ytimg.com/vi/PKK8vkFVd14/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BwDBehZ0f8VrDXO9dWZHIFm)
 
-### Advanced Robotics Course
+# Advanced Robotics Course
 [![Advanced Robotics Course](https://i.ytimg.com/vi/EGmB-qn23wY/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH)
-<a href="https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH" target="_blank">
-  <img
-    src="https://i.ytimg.com/vi/EGmB-qn23wY/maxresdefault.jpg"
-    alt="Advanced Robotics Course"
-    style="max-width: 800px; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,0.18); margin-top: 0.5rem;"
-  />
-</a>
 
 ---
 
