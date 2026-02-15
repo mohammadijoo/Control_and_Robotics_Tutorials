@@ -1,0 +1,129 @@
+# Control & Robotics Tutorials — Code Repository
+
+This repository is the **code companion** for a comprehensive, course-based tutorial series in **Control Engineering** and **Robotics Engineering**.
+
+- 🎥 **Video lectures:** Published on YouTube (course playlists / videos linked below)
+- 💻 **Source code + materials:** Organized per course inside this repository
+- 🧩 **Growth roadmap:** This repo will keep expanding — the full series is planned to reach **35 courses** in total
+
+---
+
+## Repository status (today)
+
+✅ **Courses currently included (5):**
+
+- **Advanced Robotics Course** — [`./Advanced%20Robotics%20Course`](./Advanced%20Robotics%20Course)
+- **Introduction to Robotics Course** — [`./Introduction%20to%20Robotics%20Course`](./Introduction%20to%20Robotics%20Course)
+- **Linear Control Course** — [`./Linear%20Control%20Course`](./Linear%20Control%20Course)
+- **Robot Control Course** — [`./Robot%20Control%20Course`](./Robot%20Control%20Course)
+- **Robotics Kinematics and Dynamics Course** — [`./Robotics%20Kinematics%20and%20Dynamics%20Course`](./Robotics%20Kinematics%20and%20Dynamics%20Course)
+
+> More courses will be added over time until the series reaches **35 courses**.
+
+---
+
+## Course playlists (thumbnail links)
+
+Each item below is a clickable thumbnail (YouTube video thumbnail) that links to the course playlist (when available).
+
+### Introduction to Robotics Course
+[![Introduction to Robotics Course](https://img.youtube.com/vi/YPi2bmG81AY/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Byl-yaGk9VjoEXadCEGWsjm)
+
+### Linear Control Course
+[![Linear Control Course](https://img.youtube.com/vi/zDp0WnA2908/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BzT3USdTYfK-ZP9OBTYZjaf)
+
+### Robotics Kinematics and Dynamics Course
+[![Robotics Kinematics and Dynamics Course](https://img.youtube.com/vi/miyV8Msk0qU/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByUYXn64GUrAuZVK6CRNZO1)
+
+### Robot Control Course
+[![Robot Control Course](https://img.youtube.com/vi/I2R7Ub7wEXw/hqdefault.jpg)](https://www.youtube.com/watch?v=I2R7Ub7wEXw)
+
+> **Note:** A public YouTube playlist link for this course was not discoverable via web search at the time this README was generated.  
+> The thumbnail currently links to a representative course video; replace the link with the playlist URL if/when you publish it.
+
+### Advanced Robotics Course
+[![Advanced Robotics Course](https://img.youtube.com/vi/TWp_wrDlkKg/hqdefault.jpg)](https://www.youtube.com/@abolfazlmohammadijoo)
+
+> **Note:** A public YouTube playlist link for this course was not discoverable via web search at the time this README was generated.  
+> The thumbnail currently links to the channel; replace it with the course playlist URL if/when you publish it.
+
+---
+
+## Folder conventions
+
+At the top level, **each course lives in its own directory**, e.g.
+
+- `Introduction to Robotics Course/`
+- `Linear Control Course/`
+- `Robot Control Course/`
+- ...
+
+Inside each course directory you can expect typical items such as:
+
+- **chapter / lesson code**
+- **examples / exercises**
+- **supporting scripts**
+- **notes / references** (when applicable)
+
+> Exact internal structure may vary by course, but the organizing principle is always:  
+> **Course → Chapters/Lessons → Code + Examples + Resources**
+
+---
+
+## Languages & tools
+
+The repository contains a multi-language codebase (depending on the course topic), including:
+
+- Python
+- C++
+- Java
+- MATLAB
+- Wolfram Language (Mathematica)
+
+---
+
+## How to use
+
+Clone the repository:
+
+```bash
+git clone https://github.com/mohammadijoo/Control_and_Robotics_Tutorials.git
+cd Control_and_Robotics_Tutorials
+```
+
+Then enter a course directory and follow its code/materials.
+
+---
+
+## Roadmap: 35-course series
+
+This repository is the central hub for a larger educational program planned to reach **35 courses** across:
+
+- classical & modern control
+- robotics foundations
+- robot modeling, kinematics, dynamics
+- control of manipulators (model-based, robust, adaptive, optimal, MPC, etc.)
+- advanced robotics topics
+
+New courses will be added as they are produced (videos + code).
+
+---
+
+## Contributing
+
+If you find issues (bugs, typos, broken links), feel free to open an issue or submit a pull request.
+
+---
+
+## License
+
+No license file is currently included in the repository.  
+If you want, add a `LICENSE` file (e.g., MIT / Apache-2.0 / GPL-3.0) to clarify reuse terms.
+
+---
+
+## Author
+
+**Abolfazl Mohammadijoo**  
+GitHub: https://github.com/mohammadijoo  
+YouTube: https://www.youtube.com/@abolfazlmohammadijoo
