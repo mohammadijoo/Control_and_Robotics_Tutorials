@@ -36,11 +36,17 @@ Each item below is a clickable link to the course playlist.
 [![Robotics Kinematics and Dynamics Course](https://img.youtube.com/vi/miyV8Msk0qU/hqdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByUYXn64GUrAuZVK6CRNZO1)
 
 ### Robot Control Course
-[![Robot Control Course](https://i.ytimg.com/vi/PKK8vkFVd14&t/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BwDBehZ0f8VrDXO9dWZHIFm)
+[![Robot Control Course](https://i.ytimg.com/vi/PKK8vkFVd14/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BwDBehZ0f8VrDXO9dWZHIFm)
 
 ### Advanced Robotics Course
-[![Advanced Robotics Course](https://i.ytimg.com/vi/EGmB-qn23wY&t/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH)
-
+[![Advanced Robotics Course](https://i.ytimg.com/vi/EGmB-qn23wY/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH)
+<a href="https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH" target="_blank">
+  <img
+    src="https://i.ytimg.com/vi/EGmB-qn23wY/maxresdefault.jpg"
+    alt="Advanced Robotics Course"
+    style="max-width: 800px; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,0.18); margin-top: 0.5rem;"
+  />
+</a>
 
 ---
 
