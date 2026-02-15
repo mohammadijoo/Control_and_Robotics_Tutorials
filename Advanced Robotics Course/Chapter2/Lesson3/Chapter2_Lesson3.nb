@@ -1,0 +1,120 @@
+(* Discretization parameters *)
+dx = 1.0; dy = 1.0; nTheta = 16;
+v = 1.0; L = 2.0; dt = 1.0;
+
+angleIndex[theta_] := Module[{th = Mod[theta + 2. Pi, 2. Pi]},
+  Mod[Round[th/(2. Pi) nTheta], nTheta]
+];
+
+angleFromIndex[k_] := 2. Pi k/nTheta;
+
+(* Reference motion primitives *)
+steerAngles = {-0.4, 0., 0.4};
+
+makePrimitive[phi_] := Module[{kappa, dth, thEnd, dxRef, dyRef, len},
+  kappa = Tan[phi]/L;
+  If[Abs[kappa] < 10^-6,
+    dxRef = v dt; dyRef = 0.; dth = 0.; len = v dt,
+    dth = v kappa dt;
+    thEnd = dth;
+    dxRef = (1./kappa) Sin[thEnd];
+    dyRef = -(1./kappa) (Cos[thEnd] - 1.);
+    len = Abs[dth/kappa];
+  ];
+  <<|"dxRef" -> dxRef, "dyRef" -> dyRef, "dthRef" -> dth, "len" -> len|>>
+];
+
+primitives = makePrimitive /@ steerAngles;
+
+(* Successor generation from state {ix, iy, kth} *)
+successors[{ix_, iy_, kth_}] := Module[
+  {theta, gx, gy, succs},
+  theta = angleFromIndex[kth];
+  gx = ix dx; gy = iy dy;
+  succs = Table[
+    With[{p = primitives[[i]]},
+      Module[{dxg, dyg, gx2, gy2, th2, ix2, iy2, kth2},
+        dxg = Cos[theta] p["dxRef"] - Sin[theta] p["dyRef"];
+        dyg = Sin[theta] p["dxRef"] + Cos[theta] p["dyRef"];
+        gx2 = gx + dxg; gy2 = gy + dyg;
+        th2 = theta + p["dthRef"];
+        ix2 = Round[gx2/dx];
+        iy2 = Round[gy2/dy];
+        kth2 = angleIndex[th2];
+        { {ix2, iy2, kth2}, p["len"] }
+      ]
+    ],
+    {i, Length[primitives]}
+  ];
+  succs
+];
+
+heuristic[{ix_, iy_, _}, {gx_, gy_, _}] :=
+  Module[{x, y, xg, yg},
+    x = ix dx; y = iy dy;
+    xg = gx dx; yg = gy dy;
+    Sqrt[(x - xg)^2 + (y - yg)^2]
+  ];
+
+(* A* implemented with a simple loop and Association-based priority queue. *)
+astar[start_, goal_] := Module[
+  {open, g, parent, closed, popMin, pushNode, kStart, path},
+  open = Association[];
+  g = Association[];
+  parent = Association[];
+  closed = Association[];
+
+  kStart = start;
+  g[kStart] = 0.;
+  parent[kStart] = None;
+  open[kStart] = heuristic[start, goal];
+
+  popMin[] := Module[{kmin},
+    If[Length[open] == 0, Return[None]];
+    kmin = First@First@SortBy[Normal[open], Last];
+    open = KeyDrop[open, kmin];
+    kmin
+  ];
+
+  pushNode[s_, f_] := (open[s] = f);
+
+  While[Length[open] > 0,
+    Module[{cur = popMin[], gcurr, s, th, succ},
+      If[cur === None, Break[]];
+      If[KeyExistsQ[closed, cur], Continue[]];
+      closed[cur] = True;
+      If[cur[[1 ;; 2]] === goal[[1 ;; 2]],
+        (* reconstruct path *)
+        path = {cur};
+        s = cur;
+        While[parent[s] =!= None,
+          s = parent[s];
+          path = Prepend[path, s];
+        ];
+        Return[{path, g[cur]}];
+      ];
+      gcurr = g[cur];
+      succ = successors[cur];
+      Do[
+        Module[{s2 = succ[[i, 1]], cost = succ[[i, 2]], key2, newg, f},
+          key2 = s2;
+          newg = gcurr + cost;
+          If[!KeyExistsQ[g, key2] || newg < g[key2],
+            g[key2] = newg;
+            parent[key2] = cur;
+            f = newg + heuristic[s2, goal];
+            pushNode[key2, f];
+          ];
+        ],
+        {i, Length[succ]}
+      ];
+    ];
+  ];
+  { {}, Infinity }
+];
+
+start = {2, 2, angleIndex[0., nTheta]};
+goal = {40, 20, angleIndex[0., nTheta]};
+{path, cost} = astar[start, goal];
+Print["Path length: ", Length[path], "  Cost: ", cost];
+      
