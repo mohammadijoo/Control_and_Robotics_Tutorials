@@ -1,0 +1,138 @@
+(* ::Package:: *)
+
+(* Chapter5_Lesson5.nb
+   Lab: Characterizing Odometry Error (Differential Drive)
+
+   This Mathematica notebook code:
+   1) Imports a CSV log with columns: t,nL,nR,x_odom,y_odom,th_odom,x_gt,y_gt,th_gt,(optional)trial_id
+   2) Computes endpoint error, trajectory RMSE, drift-per-meter
+   3) Calibrates (rL, rR, b) by nonlinear least squares (FindMinimum)
+   4) Computes increment residual covariance Q_hat after calibration
+
+   Usage:
+     raw = Import["your_log.csv", "Dataset"];
+*)
+
+ClearAll["Global`*"];
+
+wrapAngle[th_] := Module[{a = Mod[th + Pi, 2 Pi]},
+  If[a < 0, a = a + 2 Pi];
+  a - Pi
+];
+
+(* ---- Import CSV and build dataset ---- *)
+csvPath = "your_log.csv";  (* change this *)
+raw = Import[csvPath, "Dataset"];
+
+(* Ensure required keys exist *)
+req = {"t","nL","nR","x_odom","y_odom","th_odom","x_gt","y_gt","th_gt"};
+missing = Select[req, !KeyExistsQ[raw[[1]], #] &];
+If[Length[missing] > 0, Print["Missing columns: ", missing]; Abort[]];
+
+data = raw[All, Association @ # &];
+
+(* Add trial_id if missing *)
+If[!KeyExistsQ[data[[1]], "trial_id"],
+  data = data[All, Append[#, "trial_id" -> 0] &];
+];
+
+(* Wrap angles *)
+data = data[All, Append[#, 
+    "th_odom" -> wrapAngle[#["th_odom"]],
+    "th_gt" -> wrapAngle[#["th_gt"]]
+  ] &];
+
+(* ---- Metrics helpers ---- *)
+metrics[ds_] := Module[
+  {ex, ey, eth, epos, rmsePos, rmseTh, endPos, endTh, xg, yg, sTotal, drift},
+  ex = Normal[ds[All, #["x_odom"] - #["x_gt"] &]];
+  ey = Normal[ds[All, #["y_odom"] - #["y_gt"] &]];
+  eth = Normal[ds[All, wrapAngle[#["th_odom"] - #["th_gt"]] &]];
+  epos = Sqrt[ex^2 + ey^2];
+  rmsePos = Sqrt[Mean[epos^2]];
+  rmseTh = Sqrt[Mean[eth^2]];
+  endPos = Last[epos];
+  endTh = Abs[Last[eth]];
+  xg = Normal[ds[All, #["x_gt"] &]];
+  yg = Normal[ds[All, #["y_gt"] &]];
+  sTotal = Total[Sqrt[Differences[xg]^2 + Differences[yg]^2]];
+  drift = If[sTotal > 10^-12, endPos/sTotal, Indeterminate];
+  <|"rmse_pos" -> rmsePos, "rmse_th" -> rmseTh, "end_pos" -> endPos,
+    "end_th" -> endTh, "s_total" -> sTotal, "drift_per_m" -> drift|>
+];
+
+(* ---- Encoder increments ---- *)
+ticksToDphi[dTicks_, ticksPerRev_] := (2 Pi/ticksPerRev) dTicks;
+
+incrementResiduals[ds_, ticksPerRev_, {rL_, rR_, b_}] := Module[
+  {nL, nR, dphiL, dphiR, thGt, thPrev, xg, yg, dxGt, dyGt, dthGt,
+   sL, sR, dsInc, dth, thMid, dxPred, dyPred, incPred, incGt, eps},
+  nL = Normal[ds[All, #["nL"] &]];
+  nR = Normal[ds[All, #["nR"] &]];
+  dphiL = Prepend[ticksToDphi[Differences[nL], ticksPerRev], 0.0];
+  dphiR = Prepend[ticksToDphi[Differences[nR], ticksPerRev], 0.0];
+  thGt = Normal[ds[All, #["th_gt"] &]];
+  thPrev = Prepend[Most[thGt], First[thGt]];
+  xg = Normal[ds[All, #["x_gt"] &]];
+  yg = Normal[ds[All, #["y_gt"] &]];
+  dxGt = Prepend[Differences[xg], 0.0];
+  dyGt = Prepend[Differences[yg], 0.0];
+  dthGt = Prepend[wrapAngle /@ Differences[thGt], 0.0];
+
+  sL = rL dphiL; sR = rR dphiR;
+  dsInc = 0.5 (sR + sL);
+  dth = (sR - sL)/b;
+  thMid = wrapAngle /@ (thPrev + 0.5 dth);
+  dxPred = dsInc Cos[thMid];
+  dyPred = dsInc Sin[thMid];
+
+  incPred = Transpose[{dxPred, dyPred, dth}];
+  incGt = Transpose[{dxGt, dyGt, dthGt}];
+
+  eps = Rest[incPred - incGt]; (* drop first increment *)
+  eps
+];
+
+(* ---- Calibration objective ---- *)
+ticksPerRev = 4096.0;  (* set this to your robot *)
+wTheta = 1.0;
+
+all = data;
+eps0[{rL_, rR_, b_}] := Flatten[
+  Module[{eps = incrementResiduals[all, ticksPerRev, {rL, rR, b}]},
+    eps /. {a_, b_, c_} :> {a, b, wTheta c}
+  ]
+];
+
+(* Initial guess *)
+p0 = {0.05, 0.05, 0.30};
+
+sol = FindMinimum[
+  Total[eps0[{rL, rR, b}]^2],
+  {{rL, p0[[1]]}, {rR, p0[[2]]}, {b, p0[[3]]}},
+  Method -> "LevenbergMarquardt"
+];
+
+pHat = {rL, rR, b} /. sol[[2]];
+Print["Estimated parameters (rL, rR, b) = ", pHat];
+
+(* ---- Recompute increment residual covariance ---- *)
+eps = incrementResiduals[all, ticksPerRev, pHat];
+epsMean = Mean[eps];
+E0 = eps - epsMean;
+QHat = Covariance[E0];
+
+Print["Increment residual mean [dx,dy,dth] = ", epsMean];
+Print["Q_hat = "];
+Print[QHat];
+
+(* ---- Per-trial metrics (logged odom) ---- *)
+trialIds = Union[Normal[data[All, #["trial_id"] &]]];
+trialMetrics = Table[
+  Module[{ds = Select[Normal[data], #["trial_id"] == tid &]},
+    Join[<|"trial_id" -> tid|>, metrics[Dataset[ds]]]
+  ],
+  {tid, trialIds}
+];
+
+Dataset[trialMetrics]

@@ -1,0 +1,147 @@
+(* Chapter18_Lesson2.nb
+   Wolfram Mathematica Notebook (plain-text) *)
+
+Notebook[{
+  Cell["Chapter 18 - Lesson 2: Traversability and Terrain Classification", "Title"],
+  Cell["This notebook is a minimal, self-contained demonstration of grid-based elevation mapping and traversability scoring.", "Text"],
+
+  Cell["1) Load / generate point cloud", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    ClearAll["Global`*"];
+    SyntheticPointCloud[n_Integer: 200000, seed_Integer: 0] := Module[{x, y, z, bumps, ditch},
+      SeedRandom[seed];
+      x = RandomReal[{-10, 10}, n];
+      y = RandomReal[{-10, 10}, n];
+      z = 0.05 x + 0.02 y;
+      bumps = {{-3, 2, 0.35, 1.2}, {4, -1.5, 0.25, 0.9}, {1, 5, 0.30, 1.0}};
+      Do[
+        z = z + a Exp[-((x - cx)^2 + (y - cy)^2)/(2 s^2)],
+        { {cx, cy, a, s}, bumps}
+      ];
+      ditch = Boole[(-2 < x < 2) && (-6 < y < -3)] /. Thread[{x, y} -> Transpose[{x, y}]];
+      z = z - 0.6 ditch;
+      z = z + RandomVariate[NormalDistribution[0, 0.02], n];
+      Transpose[{x, y, z}]
+    ];
+
+    pts = SyntheticPointCloud[200000, 0];
+  ], "Input"],
+
+  Cell["2) Build a 2.5D height map (mean height per grid cell)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    GridSpec[xmin_, xmax_, ymin_, ymax_, res_] := <|
+      "xmin" -> xmin, "xmax" -> xmax, "ymin" -> ymin, "ymax" -> ymax, "res" -> res,
+      "Nx" -> Ceiling[(xmax - xmin)/res], "Ny" -> Ceiling[(ymax - ymin)/res]
+    |>;
+
+    spec = GridSpec[-10, 10, -10, 10, 0.25];
+
+    ToIndex[{x_, y_}, s_] := Module[{ix, iy},
+      ix = Floor[(x - s["xmin"])/s["res"]] + 1;
+      iy = Floor[(y - s["ymin"])/s["res"]] + 1;
+      {ix, iy}
+    ];
+
+    Hsum = ConstantArray[0., {spec["Ny"], spec["Nx"]}];
+    Cnt  = ConstantArray[0,  {spec["Ny"], spec["Nx"]}];
+
+    Do[
+      With[{x = pts[[i, 1]], y = pts[[i, 2]], z = pts[[i, 3]]},
+        With[{ij = ToIndex[{x, y}, spec]},
+          If[1 <= ij[[1]] <= spec["Nx"] && 1 <= ij[[2]] <= spec["Ny"],
+            Hsum[[ij[[2]], ij[[1]]]] += z;
+            Cnt[[ij[[2]], ij[[1]]]] += 1;
+          ]
+        ]
+      ],
+      {i, Length[pts]}
+    ];
+
+    H = MapThread[If[#2 > 0, #1/#2, Indeterminate] &, {Hsum, Cnt}, 2];
+  ], "Input"],
+
+  Cell["3) Features: slope, roughness, step height", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    (* Fill Indeterminate holes by nearest-neighbor style smoothing *)
+    FillHoles[A_, iters_: 5] := Nest[
+      Function[M,
+        MapIndexed[
+          Function[{v, idx},
+            If[v === Indeterminate,
+              Module[{y = idx[[1]], x = idx[[2]], ys, xs, patch, vals},
+                ys = Range[Max[1, y - 1], Min[Length[M], y + 1]];
+                xs = Range[Max[1, x - 1], Min[Length[M[[1]]], x + 1]];
+                patch = Flatten[M[[ys, xs]]];
+                vals = Select[patch, # =!= Indeterminate &];
+                If[Length[vals] > 0, Mean[vals], Indeterminate]
+              ],
+              v
+            ]
+          ],
+          M,
+          {2}
+        ]
+      ],
+      A,
+      iters
+    ];
+
+    Hf = FillHoles[H, 6];
+
+    (* Gradient approximations *)
+    dhdx = ListCorrelate[{{-1, 0, 1}}, Hf, {2, 2}, 0] / (2 spec["res"]);
+    dhdy = ListCorrelate[{{-1}, {0}, {1}}, Hf, {2, 2}, 0] / (2 spec["res"]);
+    slopeRad = ArcTan[Sqrt[dhdx^2 + dhdy^2]];
+
+    (* Roughness and step in 3x3 neighborhoods *)
+    NeighborhoodPatch[M_, {y_, x_}] := Flatten[M[[Range[Max[1, y - 1], Min[spec["Ny"], y + 1]],
+                                                   Range[Max[1, x - 1], Min[spec["Nx"], x + 1]]]]];
+
+    rough = Table[StandardDeviation[NeighborhoodPatch[Hf, {y, x}]], {y, spec["Ny"]}, {x, spec["Nx"]}];
+    step  = Table[Max[NeighborhoodPatch[Hf, {y, x}]] - Min[NeighborhoodPatch[Hf, {y, x}]], {y, spec["Ny"]}, {x, spec["Nx"]}];
+  ], "Input"],
+
+  Cell["4) Traversability probability (logistic model)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    b = 3.0; w1 = -6.0; w2 = -40.0; w3 = -25.0;
+    Sigmoid[s_] := 1/(1 + Exp[-s]);
+    pTrav = MapThread[Sigmoid[b + w1 #1 + w2 #2 + w3 #3] &, {slopeRad, rough, step}, 2];
+
+    (* Mask out empty cells *)
+    pTravMasked = MapThread[If[#2 > 0, #1, Indeterminate] &, {pTrav, Cnt}, 2];
+  ], "Input"],
+
+  Cell["5) Export (x,y,p_trav,slope_deg,rough,step,count) to CSV", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    CellCenter[{ix_, iy_}] := {
+      spec["xmin"] + (ix - 0.5) spec["res"],
+      spec["ymin"] + (iy - 0.5) spec["res"]
+    };
+
+    rows = Reap[
+      Do[
+        If[Cnt[[iy, ix]] > 0,
+          With[{xy = CellCenter[{ix, iy}]},
+            Sow[{xy[[1]], xy[[2]],
+                 pTravMasked[[iy, ix]],
+                 (180./Pi) slopeRad[[iy, ix]],
+                 rough[[iy, ix]],
+                 step[[iy, ix]],
+                 Cnt[[iy, ix]]}]
+          ]
+        ],
+        {iy, 1, spec["Ny"]}, {ix, 1, spec["Nx"]}
+      ]
+    ][[2, 1]];
+
+    Export["traversability_map.csv",
+      Prepend[rows, {"x","y","p_trav","slope_deg","rough_m","step_m","count"}]
+    ];
+  ], "Input"],
+
+  Cell["Done.", "Text"]
+},
+WindowSize-> {980, 720},
+WindowMargins-> {{Automatic, 30}, {Automatic, 30}},
+StyleDefinitions->"Default.nb"
+]

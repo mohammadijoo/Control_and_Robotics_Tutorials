@@ -1,0 +1,149 @@
+(* Chapter12_Lesson3.nb
+   Pose Graph Optimization in SE(2) via Gauss-Newton (Mathematica)
+   This notebook is provided as a plain-text Notebook[] expression so it can be
+   opened directly in Wolfram Mathematica.
+
+   Usage:
+     Open the .nb file in Mathematica and evaluate the cells.
+*)
+
+Notebook[{
+  Cell["Chapter 12 - Lesson 3: Pose Graph Optimization (Nonlinear Least Squares View)", "Title"],
+  Cell["This notebook derives Jacobians symbolically for a simple SE(2) between factor and performs a small Gauss-Newton optimization on a synthetic pose graph.", "Text"],
+
+  Cell["1) Utilities: wrap angle, rotation matrix", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      wrapAngle[a_] := Mod[a + Pi, 2 Pi] - Pi;
+      R2[th_] := {{Cos[th], -Sin[th]}, {Sin[th], Cos[th]}};
+    ], "Input"
+  ],
+
+  Cell["2) Define relative prediction and between-error (minimal approximation)", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      predictRelative[xi_, xj_] := Module[{ti = xi[[1 ;; 2]], tj = xj[[1 ;; 2]], Ri, dt, dth},
+        Ri = R2[xi[[3]]];
+        dt = Transpose[Ri].(tj - ti);
+        dth = wrapAngle[xj[[3]] - xi[[3]]];
+        {dt[[1]], dt[[2]], dth}
+      ];
+
+      betweenError[xi_, xj_, z_] := Module[{zhat, Rz, terr, therr},
+        zhat = predictRelative[xi, xj];
+        Rz = R2[z[[3]]];
+        terr = Transpose[Rz].({zhat[[1]], zhat[[2]]} - {z[[1]], z[[2]]});
+        therr = wrapAngle[zhat[[3]] - z[[3]]];
+        {terr[[1]], terr[[2]], therr}
+      ];
+    ], "Input"
+  ],
+
+  Cell["3) Symbolic Jacobians for the between-error", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      xi = {xi1, xi2, xi3};
+      xj = {xj1, xj2, xj3};
+      z  = {z1,  z2,  z3};
+
+      e = betweenError[xi, xj, z];
+
+      A = Simplify[D[e, {{xi1, xi2, xi3}}]]; (* de/dxi *)
+      B = Simplify[D[e, {{xj1, xj2, xj3}}]]; (* de/dxj *)
+
+      A // MatrixForm
+      B // MatrixForm
+    ], "Input"
+  ],
+
+  Cell["4) Small Gauss-Newton demo (dense) on a chain with one loop closure", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      SeedRandom[7];
+      N = 12;
+
+      (* Ground truth: gentle arc *)
+      Xtrue = ConstantArray[{0., 0., 0.}, N];
+      Do[
+        Xtrue[[k, 1]] = Xtrue[[k - 1, 1]] + 0.5 Cos[0.1 k];
+        Xtrue[[k, 2]] = Xtrue[[k - 1, 2]] + 0.5 Sin[0.1 k];
+        Xtrue[[k, 3]] = wrapAngle[0.05 k];
+      , {k, 2, N}];
+
+      noiseXY = 0.02; noiseTh = 0.01;
+      Sigma = DiagonalMatrix[{noiseXY^2, noiseXY^2, noiseTh^2}];
+      Omega = Inverse[Sigma];
+
+      (* Edges: odometry + loop closure *)
+      edges = {};
+      Do[
+        zMeas = predictRelative[Xtrue[[k]], Xtrue[[k + 1]]] + RandomVariate[NormalDistribution[0, 1], 3] * {noiseXY, noiseXY, noiseTh};
+        zMeas[[3]] = wrapAngle[zMeas[[3]]];
+        AppendTo[edges, {k, k + 1, zMeas, Omega}];
+      , {k, 1, N - 1}];
+
+      zLC = predictRelative[Xtrue[[1]], Xtrue[[N]]] + RandomVariate[NormalDistribution[0, 1], 3] * {noiseXY, noiseXY, noiseTh};
+      zLC[[3]] = wrapAngle[zLC[[3]]];
+      AppendTo[edges, {1, N, zLC, Omega}];
+
+      (* Init by integrating odometry *)
+      X = ConstantArray[{0., 0., 0.}, N];
+      Do[
+        z = edges[[k, 3]];
+        Rk = R2[X[[k, 3]]];
+        X[[k + 1, 1 ;; 2]] = X[[k, 1 ;; 2]] + (Rk.{z[[1]], z[[2]]});
+        X[[k + 1, 3]] = wrapAngle[X[[k, 3]] + z[[3]]];
+      , {k, 1, N - 1}];
+
+      (* Anchor pose 1: optimize poses 2..N *)
+      vecFromX[XX_] := Flatten[XX[[2 ;; N]]];
+      XFromVec[v_] := Module[{XX = X},
+        XX[[2 ;; N]] = Partition[v, 3];
+        XX
+      ];
+
+      oneGN[XX_] := Module[{dim = 3 (N - 1), H, b, chi2 = 0., v, d, p, q, z, Om, r, Aj, Bj, baseP, baseQ},
+        H = ConstantArray[0., {dim, dim}];
+        b = ConstantArray[0., dim];
+
+        Do[
+          {p, q, z, Om} = edges[[k]];
+          r = betweenError[XX[[p]], XX[[q]], z];
+          chi2 += r.Om.r;
+
+          Aj = N[A /. {xi1 -> XX[[p, 1]], xi2 -> XX[[p, 2]], xi3 -> XX[[p, 3]], xj1 -> XX[[q, 1]], xj2 -> XX[[q, 2]], xj3 -> XX[[q, 3]], z1 -> z[[1]], z2 -> z[[2]], z3 -> z[[3]]}];
+          Bj = N[B /. {xi1 -> XX[[p, 1]], xi2 -> XX[[p, 2]], xi3 -> XX[[p, 3]], xj1 -> XX[[q, 1]], xj2 -> XX[[q, 2]], xj3 -> XX[[q, 3]], z1 -> z[[1]], z2 -> z[[2]], z3 -> z[[3]]}];
+
+          (* skip anchored pose 1 in indexing *)
+          If[p != 1,
+            baseP = 3 (p - 2) + 1;
+            H[[baseP ;; baseP + 2, baseP ;; baseP + 2]] += Transpose[Aj].Om.Aj;
+            b[[baseP ;; baseP + 2]] += Transpose[Aj].Om.r;
+          ];
+          If[q != 1,
+            baseQ = 3 (q - 2) + 1;
+            H[[baseQ ;; baseQ + 2, baseQ ;; baseQ + 2]] += Transpose[Bj].Om.Bj;
+            b[[baseQ ;; baseQ + 2]] += Transpose[Bj].Om.r;
+          ];
+          If[p != 1 && q != 1,
+            H[[baseP ;; baseP + 2, baseQ ;; baseQ + 2]] += Transpose[Aj].Om.Bj;
+            H[[baseQ ;; baseQ + 2, baseP ;; baseP + 2]] += Transpose[Bj].Om.Aj;
+          ];
+        , {k, 1, Length[edges]}];
+
+        d = LinearSolve[H, -b];
+        {XFromVec[vecFromX[XX] + d], chi2, Norm[d]}
+      ];
+
+      Do[
+        {X, chi2, nd} = oneGN[X];
+        Print["iter=", it, "  chi2=", NumberForm[chi2, {10, 4}], "  |dx|=", ScientificForm[nd, 3]];
+        If[nd < 10^-8, Break[]];
+      , {it, 0, 10}];
+
+      X[[1 ;; 5]] // MatrixForm
+    ], "Input"
+  ]
+},
+WindowTitle -> "Chapter12_Lesson3.nb"
+]

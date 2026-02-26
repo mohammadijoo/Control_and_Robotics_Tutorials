@@ -1,0 +1,134 @@
+(* Chapter3_Lesson5.nb
+   Autonomous Mobile Robots (Control Engineering major)
+   Chapter 3 — Nonholonomic Motion and Feasibility for AMR
+   Lesson 5 — Feasibility Checks for Candidate Paths
+
+   This is a plain-text Mathematica notebook expression. Save as .nb and open.
+*)
+
+Notebook[{
+  Cell["Chapter 3, Lesson 5 — Feasibility Checks for Candidate Paths", "Title"],
+  Cell["This notebook implements curvature, time-scaling, and collision clearance checks for a 2D candidate path (disk footprint approximation on a grid).", "Text"],
+
+  Cell["1. Limits and a candidate path", "Section"],
+  Cell[BoxData[ToBoxes[
+    lim = <|
+      \"wheelbase_m\" -> 0.33,
+      \"delta_max_rad\" -> 0.45,
+      \"deltaDot_max_rad_s\" -> 0.75,
+      \"v_max_m_s\" -> 1.2,
+      \"a_long_max_m_s2\" -> 0.8,
+      \"a_lat_max_m_s2\" -> 1.5,
+      \"robot_radius_m\" -> 0.25,
+      \"clearance_margin_m\" -> 0.05
+    |>;
+  ]], "Input"],
+
+  Cell[BoxData[ToBoxes[
+    n = 200;
+    t = Subdivide[0, 1, n - 1];
+    R = 4.0;
+    ang = 0.6 t;
+    xy = Transpose[{R Sin[ang], R (1 - Cos[ang])}];
+  ]], "Input"],
+
+  Cell["2. Arc length and discrete curvature", "Section"],
+  Cell[BoxData[ToBoxes[
+    arcLength[pts_] := Prepend[Accumulate[Norm /@ Differences[pts]], 0.0];
+    curvatureDiscrete[pts_] := Module[{n = Length[pts], k = ConstantArray[0.0, Length[pts]], eps = 10^-12},
+      Do[
+        With[{p0 = pts[[i - 1]], p1 = pts[[i]], p2 = pts[[i + 1]]},
+          Module[{a = p1 - p0, b = p2 - p1, c = p2 - p0, la, lb, lc, area2, denom},
+            la = Norm[a]; lb = Norm[b]; lc = Norm[c];
+            area2 = Det[{a, c}];
+            denom = la lb lc + eps;
+            k[[i]] = 2.0 area2/denom;
+          ]
+        ],
+        {i, 2, n - 1}
+      ];
+      If[n >= 3, k[[1]] = k[[2]]; k[[n]] = k[[n - 1]]];
+      k
+    ];
+  ]], "Input"],
+
+  Cell[BoxData[ToBoxes[
+    s = arcLength[xy];
+    kappa = curvatureDiscrete[xy];
+    kappaMax = Tan[lim[\"delta_max_rad\"]]/lim[\"wheelbase_m\"];
+    {Max[Abs[kappa]], kappaMax}
+  ]], "Input"],
+
+  Cell["3. Time scaling (speed profile) with lateral and longitudinal constraints", "Section"],
+  Cell[BoxData[ToBoxes[
+    dkappaDs[k_, s_] := Module[{n = Length[k], dk = ConstantArray[0.0, Length[k]], eps = 10^-12},
+      Do[
+        dk[[i]] = (k[[i + 1]] - k[[i - 1]])/((s[[i + 1]] - s[[i - 1]]) + eps),
+        {i, 2, n - 1}
+      ];
+      dk[[1]] = (k[[2]] - k[[1]])/((s[[2]] - s[[1]]) + eps);
+      dk[[n]] = (k[[n]] - k[[n - 1]])/((s[[n]] - s[[n - 1]]) + eps);
+      dk
+    ];
+    timeScaling[s_, k_, lim_] := Module[{n = Length[s], ds, vcap, w, i, v, dt, eps = 10^-12},
+      ds = Differences[s];
+      vcap = ConstantArray[lim[\"v_max_m_s\"], n];
+      Do[
+        If[Abs[k[[i]]] > 10^-9,
+          vcap[[i]] = Min[vcap[[i]], Sqrt[Max[lim[\"a_lat_max_m_s2\"]/Abs[k[[i]]], 0.0]]]
+        ],
+        {i, 1, n}
+      ];
+      w = vcap^2;
+      Do[w[[i + 1]] = Min[w[[i + 1]], w[[i]] + 2 lim[\"a_long_max_m_s2\"] Max[ds[[i]], 0.0]], {i, 1, n - 1}];
+      Do[w[[i]] = Min[w[[i]], w[[i + 1]] + 2 lim[\"a_long_max_m_s2\"] Max[ds[[i]], 0.0]], {i, n - 1, 1, -1}];
+      v = Sqrt[Max[#, 0.0]] & /@ w;
+      dt = Table[ ds[[i]] / (0.5 (v[[i]] + v[[i + 1]]) + eps), {i, 1, n - 1} ];
+      <|\"v\" -> v, \"dt\" -> dt|>
+    ];
+  ]], "Input"],
+
+  Cell[BoxData[ToBoxes[
+    ts = timeScaling[s, kappa, lim];
+    v = ts[\"v\"]; dt = ts[\"dt\"];
+    totalT = Total[dt];
+    {Min[v], Max[v], totalT}
+  ]], "Input"],
+
+  Cell["4. Steering-rate check", "Section"],
+  Cell[BoxData[ToBoxes[
+    dkds = dkappaDs[kappa, s];
+    delta = ArcTan[lim[\"wheelbase_m\"] kappa];
+    kappaDot = v dkds;
+    deltaDot = lim[\"wheelbase_m\"] (Cos[delta]^2) kappaDot;
+    {Max[Abs[deltaDot]], lim[\"deltaDot_max_rad_s\"]}
+  ]], "Input"],
+
+  Cell["5. Collision clearance on an occupancy grid (disk approximation)", "Section"],
+  Cell[BoxData[ToBoxes[
+    res = 0.05;
+    W = Round[10/res]; H = Round[10/res];
+    occ = ConstantArray[0, {H, W}];
+    ox = Round[2/res]; oy = Round[1/res];
+    Do[occ[[y, x]] = 1, {y, Max[1, oy - 3], Min[H, oy + 3]}, {x, Max[1, ox - 3], Min[W, ox + 3]}];
+
+    (* DistanceTransform expects 0 as background by default; we want distance to ones, so use ImageDistanceTransform on occ==0? *)
+    distCells = ImageData@DistanceTransform[Image[Boole[occ == 0]]];
+    distM = distCells res;
+
+    needed = lim[\"robot_radius_m\"] + lim[\"clearance_margin_m\"];
+    origin = {0.0, 0.0};
+    toGrid[p_] := {Floor[(p[[1]] - origin[[1]])/res] + 1, Floor[(p[[2]] - origin[[2]])/res] + 1};
+    clearances = Table[
+      With[{g = toGrid[xy[[i]]]}, distM[[g[[2]], g[[1]]]]],
+      {i, 1, Length[xy]}
+    ];
+    {Min[clearances], needed}
+  ]], "Input"],
+
+  Cell["6. Overall feasibility verdict", "Section"],
+  Cell[BoxData[ToBoxes[
+    feasibleQ = (Max[Abs[kappa]] <= kappaMax) && (Max[Abs[deltaDot]] <= lim[\"deltaDot_max_rad_s\"]) && (Min[clearances] >= needed);
+    feasibleQ
+  ]], "Input"]
+}]

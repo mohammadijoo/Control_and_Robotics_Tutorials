@@ -1,0 +1,153 @@
+(* Chapter18_Lesson3.nb *)
+(* Long-Range Localization Drift Handling (2D EKF, Wolfram Language) *)
+(* State: {x, y, psi, bg} *)
+
+SeedRandom[18];
+
+wrapAngle[a_] := Module[{b = a}, Mod[b + Pi, 2 Pi] - Pi]
+
+isRough[k_] := (300 <= k < 520) || (840 <= k < 1100) || (1400 <= k < 1620);
+inOutage[k_] := (420 <= k < 980) || (1250 <= k < 1500);
+
+propagate[x_, P_, vm_, wm_, dt_, rough_] := Module[
+  {psi, bg, xn, F, sigmaV, sigmaW, sigmaBg, Q, Pn},
+  psi = x[[3]];
+  bg  = x[[4]];
+  xn = x;
+  xn[[1]] = xn[[1]] + vm dt Cos[psi];
+  xn[[2]] = xn[[2]] + vm dt Sin[psi];
+  xn[[3]] = wrapAngle[xn[[3]] + (wm - bg) dt];
+
+  F = IdentityMatrix[4];
+  F[[1, 3]] = -vm dt Sin[psi];
+  F[[2, 3]] =  vm dt Cos[psi];
+  F[[3, 4]] = -dt;
+
+  sigmaV = If[rough, 0.12, 0.03];
+  sigmaW = If[rough, 0.06, 0.01];
+  sigmaBg = If[rough, 0.0030, 0.0008];
+
+  Q = DiagonalMatrix[{(sigmaV dt)^2, (sigmaV dt)^2, (sigmaW dt)^2, sigmaBg^2 dt}];
+  Pn = F.P.Transpose[F] + Q;
+  Pn = 0.5 (Pn + Transpose[Pn]);
+  {xn, Pn}
+];
+
+scalarUpdate[x_, P_, idx_, z_, R_, angleResidual_] := Module[
+  {innov, S, K, xn, Pn, nis},
+  innov = z - x[[idx]];
+  If[angleResidual, innov = wrapAngle[innov]];
+  S = P[[idx, idx]] + R;
+  K = P[[All, idx]]/S;
+  xn = x + K innov;
+  xn[[3]] = wrapAngle[xn[[3]]];
+  Pn = P - Outer[Times, K, P[[idx, All]]];
+  Pn = 0.5 (Pn + Transpose[Pn]);
+  nis = innov^2/S;
+  {xn, Pn, nis}
+];
+
+dt = 0.1;
+N = 1800;
+bgTrue = 0.015;
+
+xTrue = ConstantArray[0., {N, 4}];
+xHist = ConstantArray[0., {N, 4}];
+pTrace = ConstantArray[0., N];
+nisGnss = {};
+nisAnchor = {};
+
+xEst = {0., 0., 0.05, 0.};
+PEst = DiagonalMatrix[{1., 1., (5 Degree)^2, 0.03^2}];
+
+Do[
+  tk = (k - 1) dt;
+  vCmd = 1.5 + 0.3 Sin[0.015 tk];
+  wCmd = 0.08 Sin[0.010 tk] + 0.04 Sin[0.040 tk];
+
+  rough = isRough[k - 1];
+  sigmaWTrue = If[rough, 0.03, 0.008];
+  sigmaVTrue = If[rough, 0.10, 0.02];
+
+  vTrue = vCmd + sigmaVTrue RandomVariate[NormalDistribution[0, 1]];
+  wTrue = wCmd + sigmaWTrue RandomVariate[NormalDistribution[0, 1]];
+
+  xTrue[[k, 1]] = xTrue[[k - 1, 1]] + vTrue dt Cos[xTrue[[k - 1, 3]]];
+  xTrue[[k, 2]] = xTrue[[k - 1, 2]] + vTrue dt Sin[xTrue[[k - 1, 3]]];
+  xTrue[[k, 3]] = wrapAngle[xTrue[[k - 1, 3]] + (wTrue - bgTrue) dt];
+  xTrue[[k, 4]] = bgTrue;
+
+  vm = vTrue + If[rough, 0.12, 0.03] RandomVariate[NormalDistribution[0, 1]];
+  wm = wTrue + If[rough, 0.05, 0.01] RandomVariate[NormalDistribution[0, 1]];
+
+  {xEst, PEst} = propagate[xEst, PEst, vm, wm, dt, rough];
+
+  If[Mod[k - 1, 10] == 0 && ! inOutage[k - 1],
+    rtkFixed = (! rough) && (Mod[k - 1, 90] != 0);
+    sigmaGps = If[rtkFixed, 0.15, 0.75];
+
+    zgx = xTrue[[k, 1]] + sigmaGps RandomVariate[NormalDistribution[0, 1]];
+    zgy = xTrue[[k, 2]] + sigmaGps RandomVariate[NormalDistribution[0, 1]];
+
+    innovX = zgx - xEst[[1]];
+    sx = PEst[[1, 1]] + sigmaGps^2;
+    d2x = innovX^2/sx;
+    If[d2x < 6.63,
+      {xEst, PEst, nisx} = scalarUpdate[xEst, PEst, 1, zgx, sigmaGps^2, False];
+      nisGnss = Append[nisGnss, nisx];
+    ];
+
+    innovY = zgy - xEst[[2]];
+    sy = PEst[[2, 2]] + sigmaGps^2;
+    d2y = innovY^2/sy;
+    If[d2y < 6.63,
+      {xEst, PEst, nisy} = scalarUpdate[xEst, PEst, 2, zgy, sigmaGps^2, False];
+      nisGnss = Append[nisGnss, nisy];
+    ];
+  ];
+
+  If[MemberQ[{1000, 1510, 1710}, k - 1],
+    zax = xTrue[[k, 1]] + 0.10 RandomVariate[NormalDistribution[0, 1]];
+    zay = xTrue[[k, 2]] + 0.10 RandomVariate[NormalDistribution[0, 1]];
+    zap = wrapAngle[xTrue[[k, 3]] + (2 Degree) RandomVariate[NormalDistribution[0, 1]]];
+
+    {xEst, PEst, n1} = scalarUpdate[xEst, PEst, 1, zax, 0.10^2, False];
+    {xEst, PEst, n2} = scalarUpdate[xEst, PEst, 2, zay, 0.10^2, False];
+    {xEst, PEst, n3} = scalarUpdate[xEst, PEst, 3, zap, (2 Degree)^2, True];
+    nisAnchor = Join[nisAnchor, {n1, n2, n3}];
+  ];
+
+  If[Length[nisGnss] >= 20 && Mean[Take[nisGnss, -20]] > 1.8,
+    PEst = 1.02 PEst;
+  ];
+
+  xHist[[k]] = xEst;
+  pTrace[[k]] = Tr[PEst];
+, {k, 2, N}];
+
+posErr = xHist[[All, 1 ;; 2]] - xTrue[[All, 1 ;; 2]];
+rmse = Sqrt[Mean[Total /@ (posErr^2)]];
+finalErr = Norm[posErr[[-1]]];
+finalHeadingDeg = (180/Pi) wrapAngle[xHist[[-1, 3]] - xTrue[[-1, 3]]];
+
+meanOrNaN[v_] := If[Length[v] == 0, Indeterminate, Mean[v]];
+
+Print["=== Chapter18_Lesson3.nb : Long-Range Localization Drift Handling ==="];
+Print["Mission duration: ", NumberForm[N dt, {8, 1}], " s"];
+Print["Position RMSE: ", NumberForm[rmse, {8, 3}], " m"];
+Print["Final position error: ", NumberForm[finalErr, {8, 3}], " m"];
+Print["Final heading error: ", NumberForm[finalHeadingDeg, {8, 3}], " deg"];
+Print["Mean scalar NIS (GNSS accepted): ", NumberForm[meanOrNaN[nisGnss], {8, 3}]];
+Print["Mean scalar NIS (Anchor): ", NumberForm[meanOrNaN[nisAnchor], {8, 3}]];
+Print["Final covariance trace: ", NumberForm[pTrace[[-1]], {8, 5}]];
+
+outageReport[name_, a_, b_] := Module[{es, ee},
+  es = Norm[xHist[[a + 1, 1 ;; 2]] - xTrue[[a + 1, 1 ;; 2]]];
+  ee = Norm[xHist[[b, 1 ;; 2]] - xTrue[[b, 1 ;; 2]]];
+  Print[name, ": error at start=", NumberForm[es, {8, 3}],
+        " m, end=", NumberForm[ee, {8, 3}],
+        " m, growth=", NumberForm[ee - es, {8, 3}], " m"];
+];
+
+outageReport["Outage1", 420, 979];
+outageReport["Outage2", 1250, 1499];

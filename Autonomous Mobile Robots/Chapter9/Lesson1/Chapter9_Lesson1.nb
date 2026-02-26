@@ -1,0 +1,127 @@
+Notebook[{
+  Cell["Chapter 9: Mapping Representations for Mobile Robots", "Title"],
+  Cell["Lesson 1: Occupancy Grid Mapping", "Subtitle"],
+  Cell[TextData[{
+    "This notebook implements a minimal 2D occupancy grid mapper with a log-odds grid and a basic inverse sensor model. ",
+    "It also builds a small synthetic world to generate range measurements."
+  }], "Text"],
+
+  Cell["1. Core utilities (logit, inv-logit, Bresenham)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    logit[p_] := Module[{pp = Clip[N[p], {10^-12, 1 - 10^-12}]}, Log[pp/(1 - pp)]];
+    invLogit[l_] := 1/(1 + Exp[-l]);
+
+    bresenham[{x0_, y0_}, {x1_, y1_}] := Module[
+      {dx = Abs[x1 - x0], dy = Abs[y1 - y0],
+       sx = If[x1 >= x0, 1, -1], sy = If[y1 >= y0, 1, -1],
+       err, x = x0, y = y0, pts = {}},
+      err = dx - dy;
+      While[True,
+        AppendTo[pts, {x, y}];
+        If[x == x1 && y == y1, Break[]];
+        With[{e2 = 2 err},
+          If[e2 > -dy, err -= dy; x += sx];
+          If[e2 <  dx, err += dx; y += sy];
+        ];
+      ];
+      pts
+    ];
+  ], "Input"],
+
+  Cell["2. Toy world and ray casting", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    buildToyWorld[W_, H_] := Module[{gt = ConstantArray[0, {H, W}]},
+      gt[[1, All]] = 1; gt[[H, All]] = 1; gt[[All, 1]] = 1; gt[[All, W]] = 1;
+      gt[[31 ;; 50, 56 ;; 75]] = 1;
+      gt[[71 ;; 80, 26 ;; 35]] = 1;
+      gt
+    ];
+
+    worldToGrid[{ox_, oy_}, res_, {x_, y_}] := {
+      Floor[(x - ox)/res] + 1,
+      Floor[(y - oy)/res] + 1
+    };
+
+    castRay[gt_, origin_, res_, pose_, relAng_, zMax_] := Module[
+      {step = 0.5 res, x = pose[[1]], y = pose[[2]], th = pose[[3]],
+       a, dist = 0., W = Length[gt[[1]]], H = Length[gt], gx, gy},
+      a = th + relAng;
+      While[dist < zMax,
+        {gx, gy} = worldToGrid[origin, res, {x + dist Cos[a], y + dist Sin[a]}];
+        If[gx < 1 || gx > W || gy < 1 || gy > H, Return[dist]];
+        If[gt[[gy, gx]] == 1, Return[dist]];
+        dist += step;
+      ];
+      zMax
+    ];
+  ], "Input"],
+
+  Cell["3. Occupancy grid mapping (log-odds updates)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    updateRay[L_, origin_, res_, pose_, relAng_, z_, zMax_, lFree_, lOcc_, Lmin_, Lmax_] := Module[
+      {x = pose[[1]], y = pose[[2]], th = pose[[3]], a, xe, ye, p0, p1, cells, hit, freeCells, W, H, LL = L},
+      H = Length[LL]; W = Length[LL[[1]]];
+      a = th + relAng;
+      xe = x + Clip[z, {0, zMax}] Cos[a];
+      ye = y + Clip[z, {0, zMax}] Sin[a];
+      p0 = worldToGrid[origin, res, {x, y}];
+      p1 = worldToGrid[origin, res, {xe, ye}];
+      If[p0[[1]] < 1 || p0[[1]] > W || p0[[2]] < 1 || p0[[2]] > H, Return[LL]];
+      cells = bresenham[p0, p1];
+      hit = (z < zMax - 10^-6);
+      freeCells = If[hit, Most[cells], cells];
+
+      Do[
+        With[{cx = c[[1]], cy = c[[2]]},
+          If[1 <= cx <= W && 1 <= cy <= H,
+            LL[[cy, cx]] = Clip[LL[[cy, cx]] + lFree, {Lmin, Lmax}]
+          ]
+        ],
+        {c, freeCells}
+      ];
+
+      If[hit,
+        With[{cx = Last[cells][[1]], cy = Last[cells][[2]]},
+          If[1 <= cx <= W && 1 <= cy <= H,
+            LL[[cy, cx]] = Clip[LL[[cy, cx]] + lOcc, {Lmin, Lmax}]
+          ]
+        ]
+      ];
+      LL
+    ];
+  ], "Input"],
+
+  Cell["4. Run a small synthetic mapping experiment", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    W = 120; H = 100; res = 0.05; origin = {0., 0.};
+    prior = 0.5; pOcc = 0.75; pFree = 0.35;
+    L0 = logit[prior];
+    L = ConstantArray[L0, {H, W}];
+    lOcc = logit[pOcc] - logit[prior];
+    lFree = logit[pFree] - logit[prior];
+
+    gt = buildToyWorld[W, H];
+
+    traj = Table[{0.8 + 0.06 (k - 1), 0.9 + 0.01 (k - 1), 0.15}, {k, 25}];
+    angles = Subdivide[-Pi/2, Pi/2, 120];
+    zMax = 3.0;
+
+    Do[
+      With[{pose = traj[[k]]},
+        Do[
+          With[{ang = angles[[i]], z = castRay[gt, origin, res, pose, angles[[i]], zMax]},
+            L = updateRay[L, origin, res, pose, ang, z, zMax, lFree, lOcc, -10, 10];
+          ],
+          {i, Length[angles]}
+        ];
+      ],
+      {k, Length[traj]}
+    ];
+
+    P = invLogit[L];
+
+    ArrayPlot[P, ColorFunction -> "GrayTones", Frame -> True, PlotLabel -> "Occupancy probability (after mapping)"]
+  ], "Input"]
+},
+WindowTitle -> "Chapter 9 - Lesson 1: Occupancy Grid Mapping"
+]

@@ -1,0 +1,106 @@
+(* Chapter7_Lesson3.nb *)
+(* Consistency and Linearization Pitfalls — EKF + NEES/NIS (Wolfram Language / Notebook).
+   This notebook-style source is a plain-text Notebook expression so it can be version-controlled. *)
+
+Notebook[{
+  Cell["Chapter 7 — Lesson 3: Consistency and Linearization Pitfalls", "Title"],
+  Cell["EKF localization in 2D with range-bearing measurements; compute ANEES/ANIS.", "Text"],
+
+  Cell[BoxData@ToBoxes[
+    Module[{wrap, fMotion, jacF, hMeas, jacH, ekfStep, Q, R, landmarks,
+            steps = 120, trials = 25, dt = 0.2, seed = 1, rng,
+            neesSum = 0., nisSum = 0., count = 0},
+
+      wrap[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+      fMotion[x_, u_, dt_] := Module[{px = x[[1]], py = x[[2]], th = x[[3]], v = u[[1]], om = u[[2]]},
+        {px + v dt Cos[th], py + v dt Sin[th], wrap[th + om dt]}
+      ];
+
+      jacF[x_, u_, dt_] := Module[{th = x[[3]], v = u[[1]]},
+        {{1, 0, -v dt Sin[th]},
+         {0, 1,  v dt Cos[th]},
+         {0, 0, 1}}
+      ];
+
+      hMeas[x_, lm_] := Module[{px = x[[1]], py = x[[2]], th = x[[3]], dx, dy, r, b},
+        dx = lm[[1]] - px; dy = lm[[2]] - py;
+        r = Sqrt[dx^2 + dy^2];
+        b = wrap[ArcTan[dx, dy] - th]; (* ArcTan[x,y] gives atan2(y,x) *)
+        {r, b}
+      ];
+
+      jacH[x_, lm_] := Module[{px = x[[1]], py = x[[2]], dx, dy, r2, r},
+        dx = lm[[1]] - px; dy = lm[[2]] - py;
+        r2 = dx^2 + dy^2; r = Sqrt[Max[r2, 10^-12]];
+        {
+          {-dx/r, -dy/r, 0},
+          { dy/r2, -dx/r2, -1}
+        }
+      ];
+
+      ekfStep[x_, P_, u_, z_, dt_, Q_, R_, lm_] := Module[
+        {F, xPred, PPred, H, zPred, nu, S, K, xUpd, PUpd, I = IdentityMatrix[3]},
+        F = jacF[x, u, dt];
+        xPred = fMotion[x, u, dt];
+        PPred = F.P.Transpose[F] + Q;
+
+        H = jacH[xPred, lm];
+        zPred = hMeas[xPred, lm];
+        nu = z - zPred; nu[[2]] = wrap[nu[[2]]];
+
+        S = H.PPred.Transpose[H] + R;
+        K = PPred.Transpose[H].Inverse[S];
+
+        xUpd = xPred + K.nu; xUpd[[3]] = wrap[xUpd[[3]]];
+        PUpd = (I - K.H).PPred.Transpose[I - K.H] + K.R.Transpose[K];
+
+        {xUpd, PUpd, nu, S}
+      ];
+
+      Q = DiagonalMatrix[{0.08^2, 0.08^2, (3 Degree)^2}];
+      R = DiagonalMatrix[{0.15^2, (2 Degree)^2}];
+      landmarks = {{5., 0.}, {0., 5.}, {5., 5.}};
+
+      rng = SeedRandom[seed];
+
+      Do[
+        Module[{xTrue = {0., 0., 0.},
+                xHat  = {0.5, -0.4, 10 Degree},
+                P = DiagonalMatrix[{0.8^2, 0.8^2, (15 Degree)^2}],
+                lm, v, om, u, w, z, vMeas, stepOut, e, nees, nis},
+
+          Do[
+            v  = 1.0 + 0.2 Sin[0.05 (k - 1)];
+            om = 0.35 + 0.25 Sin[0.03 (k - 1)];
+            u = {v, om};
+
+            w = RandomVariate[MultinormalDistribution[{0, 0, 0}, Q]];
+            xTrue = fMotion[xTrue, u, dt] + w; xTrue[[3]] = wrap[xTrue[[3]]];
+
+            lm = landmarks[[Mod[k - 1, Length[landmarks]] + 1]];
+
+            vMeas = RandomVariate[MultinormalDistribution[{0, 0}, R]];
+            z = hMeas[xTrue, lm] + vMeas; z[[2]] = wrap[z[[2]]];
+
+            stepOut = ekfStep[xHat, P, u, z, dt, Q, R, lm];
+            xHat = stepOut[[1]]; P = stepOut[[2]];
+
+            e = xTrue - xHat; e[[3]] = wrap[e[[3]]];
+            nees = e . LinearSolve[P, e];
+            nis  = stepOut[[3]] . LinearSolve[stepOut[[4]], stepOut[[3]]];
+
+            neesSum += nees; nisSum += nis; count += 1;
+          , {k, 1, steps}]
+        ]
+      , {tr, 1, trials}];
+
+      <|"ANEES" -> N[neesSum/count], "ANIS" -> N[nisSum/count], "ExpectedNEES" -> 3, "ExpectedNIS" -> 2|>
+    ]
+  ], "Input"],
+
+  Cell["Interpretation: ANEES significantly above 3 indicates overconfidence (inconsistency).", "Text"]
+},
+WindowSize -> {900, 700},
+StyleDefinitions -> "Default.nb"
+]

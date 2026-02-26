@@ -1,0 +1,133 @@
+(* Chapter14_Lesson1.nb
+   Wolfram Language notebook-style script (plain text) illustrating a layered navigation architecture:
+     - Global layer: shortest path on a grid graph with obstacles
+     - Local layer: follow waypoints with a heading controller
+     - Reactive layer: safety scaling / stop near obstacles
+
+   Author: Abolfazl Mohammadijoo (course material)
+   License: MIT (see repository)
+*)
+
+ClearAll["Global`*"];
+
+(* ----------------------------
+   1) Grid world and obstacles
+   ---------------------------- *)
+nx = 60; ny = 40;
+cellToXY[{i_, j_}] := {i/nx*12.0, j/ny*8.0};
+
+(* Rectangular obstacles in (x,y) world coordinates *)
+obsRects = {
+  {{3.0, 2.0}, {3.2, 6.0}},
+  {{6.0, 0.8}, {6.2, 4.5}},
+  {{8.5, 3.0}, {8.7, 7.2}}
+};
+
+inObsQ[{x_, y_}] := Or @@ (x >= #[[1,1]] && x <= #[[2,1]] && y >= #[[1,2]] && y <= #[[2,2]] & /@ obsRects);
+
+validCellQ[{i_, j_}] := Module[{xy = cellToXY[{i, j}]},
+  i >= 1 && i <= nx && j >= 1 && j <= ny && Not[inObsQ[xy]]
+];
+
+(* Build grid graph with 4-neighborhood *)
+cells = Select[Flatten[Table[{i, j}, {i, 1, nx}, {j, 1, ny}], 1], validCellQ];
+neighbors[{i_, j_}] := Select[{{i+1,j},{i-1,j},{i,j+1},{i,j-1}}, validCellQ];
+
+edges = Flatten[Table[Thread[{c, neighbors[c]}], {c, cells}], 1];
+g = Graph[UndirectedEdge @@@ edges, VertexCoordinates -> (cellToXY /@ cells)];
+
+startCell = {5, 6};
+goalCell  = {55, 35};
+
+(* ----------------------------
+   2) Global layer: shortest path
+   ---------------------------- *)
+pathCells = FindShortestPath[g, startCell, goalCell];
+pathXY = cellToXY /@ pathCells;
+
+(* ----------------------------
+   3) Local layer: nominal command
+   ---------------------------- *)
+wrapToPi[a_] := Module[{b = a}, While[b > Pi, b -= 2 Pi]; While[b < -Pi, b += 2 Pi]; b];
+
+pickLookahead[path_, pose_, L_] := Module[{xy = pose[[{1,2}]], d2, imin, acc = 0.0, prev, cur, j},
+  d2 = (#[[1]] - xy[[1]])^2 + (#[[2]] - xy[[2]])^2 & /@ path;
+  imin = First@Ordering[d2, 1];
+  prev = path[[imin]];
+  For[j = imin + 1, j <= Length[path], j++,
+    cur = path[[j]];
+    acc += Norm[cur - prev];
+    If[acc >= L, Return[cur]];
+    prev = cur;
+  ];
+  Last[path]
+];
+
+localNominal[pose_, tgt_, vRef_, kYaw_] := Module[{dx, dy, des, e, v, w},
+  dx = tgt[[1]] - pose[[1]];
+  dy = tgt[[2]] - pose[[2]];
+  des = ArcTan[dx, dy];
+  e = wrapToPi[des - pose[[3]]];
+  w = kYaw*e;
+  v = vRef*Max[0.0, Cos[e]];
+  {v, w}
+];
+
+(* ----------------------------
+   4) Reactive safety filter
+   ---------------------------- *)
+minRangeToRects[xy_] := Module[{x = xy[[1]], y = xy[[2]], dmin = Infinity, x0, y0, x1, y1, dx, dy},
+  Do[
+    x0 = r[[1,1]]; y0 = r[[1,2]];
+    x1 = r[[2,1]]; y1 = r[[2,2]];
+    dx = Which[x < x0, x0 - x, x > x1, x - x1, True, 0.0];
+    dy = Which[y < y0, y0 - y, y > y1, y - y1, True, 0.0];
+    dmin = Min[dmin, Sqrt[dx^2 + dy^2]];
+  , {r, obsRects}];
+  dmin
+];
+
+safetyFilter[u_, d_, dStop_, dSlow_] := Module[{v = u[[1]], w = u[[2]], s},
+  If[d <= dStop, Return[{0.0, 0.0}]];
+  If[d <= dSlow,
+    s = (d - dStop)/(dSlow - dStop + 10^-9);
+    s = Clip[s, {0.0, 1.0}];
+    Return[{s*v, s*w}]
+  ];
+  {v, w}
+];
+
+(* ----------------------------
+   5) Simulate the closed loop
+   ---------------------------- *)
+pose = {pathXY[[1,1]], pathXY[[1,2]], 0.0};  (* x,y,yaw *)
+dt = 0.05; vRef = 0.5; kYaw = 2.0; dStop = 0.35; dSlow = 0.9;
+
+traj = Reap[
+  Do[
+    tgt = pickLookahead[pathXY, pose, 0.6];
+    uNom = localNominal[pose, tgt, vRef, kYaw];
+    d = minRangeToRects[pose[[{1,2}]]];
+    u = safetyFilter[uNom, d, dStop, dSlow];
+
+    pose[[1]] += u[[1]]*Cos[pose[[3]]]*dt;
+    pose[[2]] += u[[1]]*Sin[pose[[3]]]*dt;
+    pose[[3]] = wrapToPi[pose[[3]] + u[[2]]*dt];
+
+    Sow[pose];
+    If[Norm[pose[[{1,2}]] - Last[pathXY]] < 0.25, Break[]];
+  , {k, 1, 800}]
+][[2,1]];
+
+(* ----------------------------
+   6) Visualize
+   ---------------------------- *)
+Show[
+  Graphics[{GrayLevel[0.9], Rectangle @@@ obsRects}],
+  Graphics[{Thick, Blue, Line[pathXY]}],
+  Graphics[{Thick, Red, Line[traj[[All, {1,2}]]]}],
+  PlotRange -> {{0, 12}, {0, 8}},
+  Axes -> True,
+  AspectRatio -> Automatic,
+  PlotLabel -> "Layered Navigation: Global path + Local tracking + Reactive safety"
+]

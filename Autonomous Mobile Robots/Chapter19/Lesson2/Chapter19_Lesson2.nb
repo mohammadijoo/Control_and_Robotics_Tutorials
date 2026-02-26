@@ -1,0 +1,156 @@
+(* Chapter19_Lesson2.nb *)
+(* Metrics for Navigation Robustness (Autonomous Mobile Robots)
+   Wolfram Language implementation. Save as .nb or paste into a notebook.
+
+   Expected columns in CSV:
+   episode_id,time_s,x,y,goal_x,goal_y,clearance_m,collision,intervention,
+   goal_reached,tracking_error_m,cmd_v,cmd_v_max,cmd_w,cmd_w_max,recovery_event
+
+   Robotics integration notes:
+   - ROS logs can be exported to CSV and imported with Import[..., "CSV"].
+   - For symbolic work, Wolfram can derive confidence interval approximations,
+     error propagation, and optimization-based composite scores.
+*)
+
+ClearAll["Global`*"];
+
+WilsonInterval[k_Integer, n_Integer, z_: 1.96] := Module[
+  {p, den, ctr, rad},
+  If[n <= 0, Return[<|"pHat" -> Indeterminate, "Low" -> Indeterminate, "High" -> Indeterminate|>]];
+  p = N[k/n];
+  den = 1 + z^2/n;
+  ctr = (p + z^2/(2 n))/den;
+  rad = (z/den) Sqrt[p (1 - p)/n + z^2/(4 n^2)];
+  <|"pHat" -> p, "Low" -> ctr - rad, "High" -> ctr + rad|>
+];
+
+SyntheticLog[numEpisodes_: 10] := Module[
+  {rows = {}, x, y, gx, gy, k, t, d, th, vMax, wMax, v, w, clearance, collision,
+   intervention, goalReached, eTrack, recovery},
+  Do[
+    x = 0.; y = 0.;
+    gx = 9.0 + 0.25 ep; gy = Mod[ep, 4] - 1.5;
+    For[k = 0, k <= 180, k++,
+      t = 0.1 k;
+      d = Sqrt[(gx - x)^2 + (gy - y)^2];
+      th = ArcTan[gx - x, gy - y]; (* angle form in WL *)
+      vMax = 0.8; wMax = 1.2;
+      v = Min[vMax, 0.55 + 0.05 Sin[0.07 k + ep]];
+      w = Clip[0.30 Sin[0.05 k], {-wMax, wMax}];
+      x = x + 0.1 v Cos[th];
+      y = y + 0.1 v Sin[th];
+
+      clearance = 0.72 + 0.20 Sin[0.1 k + ep];
+      If[ep == 3 && 70 < k < 85, clearance = clearance - 0.58];
+      If[ep == 8 && 45 < k < 58, clearance = clearance - 0.48];
+      clearance = Max[0., clearance];
+
+      collision = If[clearance < 0.05, 1, 0];
+      intervention = If[clearance < 0.12 && collision == 0, 1, 0];
+      goalReached = If[d < 0.33 && collision == 0, 1, 0];
+      eTrack = Abs[0.06 Sin[0.02 k + 0.3 ep]];
+      recovery = If[intervention == 1 && Mod[k, 6] == 0, 1, 0];
+
+      AppendTo[rows, <|
+        "episode_id" -> ep, "time_s" -> t, "x" -> x, "y" -> y,
+        "goal_x" -> gx, "goal_y" -> gy, "clearance_m" -> clearance,
+        "collision" -> collision, "intervention" -> intervention,
+        "goal_reached" -> goalReached, "tracking_error_m" -> eTrack,
+        "cmd_v" -> v, "cmd_v_max" -> vMax, "cmd_w" -> w, "cmd_w_max" -> wMax,
+        "recovery_event" -> recovery
+      |>];
+      If[collision == 1 || goalReached == 1, Break[]];
+    ],
+    {ep, 0, numEpisodes - 1}
+  ];
+  rows
+];
+
+PathLength[pts_List] := If[Length[pts] < 2, 0., Total[Norm /@ Differences[pts]]];
+
+EvaluateRobustness[data_List] := Module[
+  {groups, episodes, metrics, n, kSuccess, kSafe, kIntFree, nFailed, kRec,
+   succCI, safeCI, timeScore, trackScore, clearScore, effScore, robustness},
+  groups = GatherBy[data, #episode_id &];
+  metrics = Table[
+    Module[{g = SortBy[grp, #time_s &], success, collFree, intFree, hadFail, recov,
+            tFinal, L, dRef, eta, minClear, trackRMSE, satRatio, satFlags},
+      success = Max[g[[All, "goal_reached"]]];
+      collFree = If[Total[g[[All, "collision"]]] == 0, 1, 0];
+      intFree = If[Total[g[[All, "intervention"]]] == 0, 1, 0];
+      hadFail = If[Total[g[[All, "collision"]] + g[[All, "intervention"]]] > 0, 1, 0];
+      recov = If[hadFail == 1 && Total[g[[All, "recovery_event"]]] > 0 && success == 1, 1, 0];
+      tFinal = g[[-1, "time_s"]] - g[[1, "time_s"]];
+      L = PathLength[g[[All, {"x", "y"}]] /. Association -> List];
+      dRef = Norm[{g[[1, "goal_x"]] - g[[1, "x"]], g[[1, "goal_y"]] - g[[1, "y"]]}];
+      eta = If[success == 1, Min[1., dRef/Max[L, 10^-9]], 0.];
+      minClear = Min[g[[All, "clearance_m"]]];
+      trackRMSE = Sqrt[Mean[(g[[All, "tracking_error_m"]])^2]];
+      satFlags = Map[
+        Function[s, Boole[Abs[s["cmd_v"]] >= 0.98 Max[s["cmd_v_max"], 10^-9] ||
+                         Abs[s["cmd_w"]] >= 0.98 Max[s["cmd_w_max"], 10^-9]]],
+        g
+      ];
+      satRatio = Mean[satFlags];
+      <|
+        "episode_id" -> g[[1, "episode_id"]],
+        "success" -> success,
+        "collision_free" -> collFree,
+        "intervention_free" -> intFree,
+        "had_failure" -> hadFail,
+        "recovered_after_failure" -> recov,
+        "completion_time_s" -> tFinal,
+        "path_length_m" -> L,
+        "reference_distance_m" -> dRef,
+        "path_efficiency" -> eta,
+        "min_clearance_m" -> minClear,
+        "tracking_rmse_m" -> trackRMSE,
+        "saturation_ratio" -> satRatio
+      |>
+    ],
+    {grp, groups}
+  ];
+
+  n = Length[metrics];
+  kSuccess = Total[metrics[[All, "success"]]];
+  kSafe = Total[metrics[[All, "collision_free"]]];
+  kIntFree = Total[metrics[[All, "intervention_free"]]];
+  nFailed = Total[metrics[[All, "had_failure"]]];
+  kRec = Total[metrics[[All, "recovered_after_failure"]]];
+
+  succCI = WilsonInterval[kSuccess, n];
+  safeCI = WilsonInterval[kSafe, n];
+
+  timeScore = Mean[Map[Exp[-#completion_time_s/60.] #success &, metrics]];
+  trackScore = Mean[Map[Exp[-#tracking_rmse_m/0.25] &, metrics]];
+  clearScore = Mean[Map[Clip[#min_clearance_m/0.30, {0., 1.}] &, metrics]];
+  effScore = Mean[metrics[[All, "path_efficiency"]]];
+
+    robustness = 0.30 safeCI["pHat"] + 0.15 (N[kIntFree/n]) + 0.20 succCI["pHat"] +
+               0.15 clearScore + 0.10 effScore + 0.05 trackScore + 0.05 timeScore;
+
+  <|
+    "EpisodeMetrics" -> Dataset[metrics],
+    "Summary" -> <|
+      "num_episodes" -> n,
+      "success_rate" -> succCI,
+      "collision_free_rate" -> safeCI,
+      "intervention_free_rate" -> N[kIntFree/n],
+      "mean_completion_time_success_s" -> Mean[Cases[metrics[[All, "completion_time_s"]], _?NumericQ]],
+      "mean_path_efficiency" -> effScore,
+      "mean_min_clearance_m" -> Mean[metrics[[All, "min_clearance_m"]]],
+      "mean_tracking_rmse_m" -> Mean[metrics[[All, "tracking_rmse_m"]]],
+      "recovery_after_failure_rate" -> If[nFailed > 0, N[kRec/nFailed], Indeterminate],
+      "composite_robustness_score" -> robustness
+    |>
+  |>
+];
+
+data = SyntheticLog[12];
+result = EvaluateRobustness[data];
+
+Print["Per-episode metrics:"];
+Print[result["EpisodeMetrics"]];
+
+Print["Summary metrics:"];
+Print[result["Summary"]];

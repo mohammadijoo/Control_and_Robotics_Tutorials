@@ -1,0 +1,149 @@
+(* Chapter12_Lesson1.nb
+Autonomous Mobile Robots (Control Engineering)
+Chapter 12 — SLAM II: Graph-Based SLAM
+Lesson 1 — Pose Graphs and Factor Graphs
+
+A compact Wolfram Language notebook (as a Notebook[] expression) that:
+- defines SE(2) "between" for 2D poses (x,y,theta),
+- constructs a tiny pose graph objective,
+- solves MAP via FindMinimum (quasi-Newton) on the sum of squared residuals.
+
+Open this file in Wolfram Mathematica.
+*)
+
+Notebook[{
+  Cell["Chapter 12 — Lesson 1: Pose Graphs and Factor Graphs (SE(2) pose graph demo)", "Title"],
+  Cell["This notebook optimizes a tiny 2D pose graph using a direct MAP objective.", "Text"],
+
+  Cell[BoxData @ ToBoxes @
+    Row[{"1) Helpers: wrapAngle, rotation, between"}], "Section"],
+
+  Cell[BoxData @ ToBoxes @
+    HoldForm[
+      wrapAngle[a_] := Module[{x = Mod[a + Pi, 2 Pi] - Pi}, x];
+      rot[th_] := {{Cos[th], -Sin[th]}, {Sin[th], Cos[th]}};
+      between[xi_, xj_] := Module[{ti, tj, thi, thj, dt, dxy, dth},
+        ti = xi[[1 ;; 2]];
+        tj = xj[[1 ;; 2]];
+        thi = xi[[3]];
+        thj = xj[[3]];
+        dt = tj - ti;
+        dxy = Transpose[rot[thi]].dt;
+        dth = wrapAngle[thj - thi];
+        {dxy[[1]], dxy[[2]], dth}
+      ];
+    ]
+  , "Input"],
+
+  Cell["2) Build a tiny graph: sequential edges plus one loop closure", "Section"],
+
+  Cell[BoxData @ ToBoxes @
+    HoldForm[
+      gt = {
+        {0., 0., 0.},
+        {1., 0., 0.},
+        {2., 0., 0.},
+        {2., 1., Pi/2},
+        {2., 2., Pi/2},
+        {1., 2., Pi},
+        {0., 2., Pi},
+        {0., 1., -Pi/2}
+      };
+      n = Length[gt];
+
+      SeedRandom[4];
+      sigmaXY = 0.02; sigmaTh = 1 Degree;
+      Omega = DiagonalMatrix[{1/sigmaXY^2, 1/sigmaXY^2, 1/sigmaTh^2}];
+
+      noise[] := {RandomVariate[NormalDistribution[0, sigmaXY]],
+                  RandomVariate[NormalDistribution[0, sigmaXY]],
+                  RandomVariate[NormalDistribution[0, sigmaTh]]};
+
+      edges = Table[
+        Module[{z = between[gt[[i]], gt[[i+1]]] + noise[]},
+          z[[3]] = wrapAngle[z[[3]]];
+          <|"i" -> i, "j" -> (i+1), "z" -> z, "Omega" -> Omega|>
+        ],
+        {i, 1, n-1}
+      ];
+
+      (* loop closure: 8 -> 1 *)
+      zlc = between[gt[[8]], gt[[1]]] + noise[];
+      zlc[[3]] = wrapAngle[zlc[[3]]];
+      edges = Append[edges, <|"i" -> 8, "j" -> 1, "z" -> zlc, "Omega" -> Omega|>];
+    ]
+  , "Input"],
+
+  Cell["3) MAP objective: sum over factors of r^T Omega r + prior on node 1", "Section"],
+
+  Cell[BoxData @ ToBoxes @
+    HoldForm[
+      (* decision variables: poses x[i] = {x,y,th} *)
+      vars = Flatten@Table[{x[i,1], x[i,2], x[i,3]}, {i, 1, n}];
+
+      (* initial guess: noisy gt *)
+      init = Flatten@Table[
+        With[{g = gt[[i]]},
+          {x[i,1] -> g[[1]] + RandomVariate[NormalDistribution[0, 0.15]],
+           x[i,2] -> g[[2]] + RandomVariate[NormalDistribution[0, 0.15]],
+           x[i,3] -> wrapAngle[g[[3]] + RandomVariate[NormalDistribution[0, 5 Degree]]]}
+        ],
+        {i, 1, n}
+      ];
+
+      rEdge[poseI_, poseJ_, z_] := Module[{zhat, r},
+        zhat = between[poseI, poseJ];
+        r = z - zhat;
+        r[[3]] = wrapAngle[r[[3]]];
+        r
+      ];
+
+      obj =
+        Sum[
+          Module[{i = edges[[k]]["i"], j = edges[[k]]["j"], z = edges[[k]]["z"], Om = edges[[k]]["Omega"],
+                  poseI, poseJ, r},
+            poseI = {x[i,1], x[i,2], x[i,3]};
+            poseJ = {x[j,1], x[j,2], x[j,3]};
+            r = rEdge[poseI, poseJ, z];
+            r.Om.r
+          ],
+          {k, 1, Length[edges]}
+        ];
+
+      (* strong prior on node 1 *)
+      priorOm = DiagonalMatrix[{10^6, 10^6, 10^6}];
+      priorMu = gt[[1]];
+      r0 = ({x[1,1], x[1,2], x[1,3]} - priorMu);
+      r0[[3]] = wrapAngle[r0[[3]]];
+      obj = obj + r0.priorOm.r0;
+
+      Print["Objective constructed. Variables: ", Length[vars]];
+    ]
+  , "Input"],
+
+  Cell["4) Solve using FindMinimum (quasi-Newton)", "Section"],
+
+  Cell[BoxData @ ToBoxes @
+    HoldForm[
+      sol = FindMinimum[obj, init, Method -> "QuasiNewton", MaxIterations -> 200];
+      minVal = sol[[1]];
+      estRules = sol[[2]];
+      Print["Min objective: ", minVal];
+    ]
+  , "Input"],
+
+  Cell["5) Extract estimates", "Section"],
+
+  Cell[BoxData @ ToBoxes @
+    HoldForm[
+      est = Table[{x[i,1], x[i,2], x[i,3]} /. estRules, {i, 1, n}];
+      Grid[
+        Prepend[
+          Table[{i-1, gt[[i]], est[[i]]}, {i, 1, n}],
+          {"i", "gt (x,y,th)", "est (x,y,th)"}
+        ],
+        Frame -> All
+      ]
+    ]
+  , "Input"]
+}]

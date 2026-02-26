@@ -1,0 +1,158 @@
+(* Chapter15_Lesson5.nb (Wolfram Language script) *)
+(* Lab: Compare Local Planners in Dense Obstacles (DWA vs simplified TEB-proxy) *)
+
+ClearAll["Global`*"];
+
+corridorY[x_] := 0.9*Sin[0.6*x];
+referencePath[n_:120] := Table[{x, corridorY[x]}, {x, 0.5, 11.5, (11.5-0.5)/(n-1)}];
+
+sampleDenseWorld[nObs_:45, seed_:0] := Module[
+  {rng = RandomGeneratorState[], obs = {}, tries = 0, x, y, r, ok},
+  SeedRandom[seed];
+  While[Length[obs] < nObs && tries < 20000,
+    tries++;
+    x = RandomReal[{0.5, 11.5}];
+    y = RandomReal[{-2.5, 2.5}];
+    r = RandomReal[{0.12, 0.32}];
+    If[Abs[y - corridorY[x]] < 0.55 + r, Continue[]];
+    ok = True;
+    Do[
+      If[(x - o[[1]])^2 + (y - o[[2]])^2 < (r + o[[3]] + 0.05)^2, ok = False; Break[]],
+      {o, obs}
+    ];
+    If[ok, obs = Append[obs, {x, y, r}]];
+  ];
+  RandomGeneratorState[rng];
+  obs
+];
+
+clearance[p_, obs_, R_] := Min@Table[Norm[p - o[[{1,2}]]] - o[[3]] - R, {o, obs}];
+
+wrap[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+stepUnicycle[x_, v_, w_, dt_] := {
+  x[[1]] + v*Cos[x[[3]]]*dt,
+  x[[2]] + v*Sin[x[[3]]]*dt,
+  wrap[x[[3]] + w*dt]
+};
+
+rolloutMinClear[x0_, v_, w_, obs_, R_, dt_, T_] := Module[
+  {steps = Max[1, Round[T/dt]], x = x0, mc = Infinity},
+  Do[
+    x = stepUnicycle[x, v, w, dt];
+    mc = Min[mc, clearance[x[[{1,2}]], obs, R]];
+    If[mc <= 0, Break[]],
+    {steps}
+  ];
+  {x, mc}
+];
+
+dwaCommand[x_, v0_, w0_, path_, obs_, prm_] := Module[
+  {dt = prm["dt"], T = prm["T"], vmax = prm["vmax"], wmax = prm["wmax"],
+   a = prm["a"], alpha = prm["alpha"], R = prm["R"], goal = Last[path],
+   vmin, vmax2, wmin, wmax2, best = {-10^18, 0., 0.}, v, w, rr, xf, mc, goalDist, J},
+  vmin = Max[0., v0 - a*dt]; vmax2 = Min[vmax, v0 + a*dt];
+  wmin = Max[-wmax, w0 - alpha*dt]; wmax2 = Min[wmax, w0 + alpha*dt];
+  Do[
+    Do[
+      rr = rolloutMinClear[x, v, w, obs, R, dt, T];
+      xf = rr[[1]]; mc = rr[[2]];
+      If[mc <= R + 0.05, Continue[]];
+      goalDist = Norm[xf[[{1,2}]] - goal];
+      J = -0.6*goalDist + 1.8*mc + 0.4*(v/(vmax + 10^-9)) - 0.12*w^2;
+      If[J > best[[1]], best = {J, v, w}],
+      {w, Subdivide[wmin, wmax2, 16]}
+    ],
+    {v, Subdivide[vmin, vmax2, 8]}
+  ];
+  best[[{2,3}]]
+];
+
+optimizeBand[x_, obs_, prm_, N_:12, bandLen_:2.6, iters_:20, step_:0.12] := Module[
+  {R = prm["R"], pts, g, bestD, bestU, dvec, n, d, phi},
+  pts = Table[{x[[1]] + bandLen*(i-1)/(N-1), corridorY[x[[1]] + bandLen*(i-1)/(N-1)]}, {i, 1, N}];
+  pts[[1]] = x[[{1,2}]];
+  Do[
+    g = ConstantArray[{0., 0.}, N];
+    (* smoothness *)
+    Do[g[[i]] += 0.35*(2 pts[[i]] - pts[[i-1]] - pts[[i+1]]), {i, 2, N-1}];
+    (* obstacle repulsion *)
+    Do[
+      {bestD, bestU} = {Infinity, {0., 0.}};
+      Do[
+        dvec = pts[[i]] - o[[{1,2}]];
+        n = Norm[dvec] + 10^-12;
+        d = n - o[[3]] - R;
+        If[d < bestD, bestD = d; bestU = dvec/n],
+        {o, obs}
+      ];
+      If[bestD < 0.9,
+        phi = Exp[-4.5*(bestD - 0.9)];
+        g[[i]] += 1.8*(-4.5*phi)*bestU
+      ],
+      {i, 2, N}
+    ];
+    (* time preference *)
+    Do[g[[i]] += 0.25*(pts[[i]] - pts[[i-1]]), {i, 2, N}];
+    Do[pts[[i]] -= step*g[[i]], {i, 2, N}];
+    pts[[1]] = x[[{1,2}]],
+    {iters}
+  ];
+  pts
+];
+
+tebCommand[x_, v0_, w0_, path_, obs_, prm_] := Module[
+  {pts, d, heading, herr, w, v, vmax = prm["vmax"], wmax = prm["wmax"], a = prm["a"], alpha = prm["alpha"], dt = prm["dt"]},
+  pts = optimizeBand[x, obs, prm];
+  d = pts[[2]] - pts[[1]];
+  heading = ArcTan[d[[1]], d[[2]]];
+  herr = wrap[heading - x[[3]]];
+  w = Clip[2.2*herr, {-wmax, wmax}];
+  v = Clip[0.8*(Norm[d]/dt), {0., vmax}];
+  v = v/(1 + 1.2*Abs[w]);
+  v = Clip[v, {Max[0., v0 - a*dt], Min[vmax, v0 + a*dt]}];
+  w = Clip[w, {w0 - alpha*dt, w0 + alpha*dt}];
+  {v, w}
+];
+
+runOne[planner_, seed_, prm_] := Module[
+  {obs = sampleDenseWorld[prm["n_obs"], seed], path = referencePath[], goal, x = {0.6, 0.0, 0.0},
+   v = 0., w = 0., L = 0., cmin = Infinity, w2 = 0., c, u, x2, k},
+  goal = Last[path];
+  For[k = 0, k < prm["max_steps"], k++,
+    c = clearance[x[[{1,2}]], obs, prm["R"]];
+    cmin = Min[cmin, c];
+    If[c <= 0, Return[<|"success"->False,"collision"->True,"time"->k*prm["dt"],"L"->L,"cmin"->cmin,"w2"->w2|>]];
+    If[Norm[x[[{1,2}]] - goal] <= prm["goal_tol"], Return[<|"success"->True,"collision"->False,"time"->k*prm["dt"],"L"->L,"cmin"->cmin,"w2"->w2|>]];
+    u = If[planner=="teb", tebCommand[x, v, w, path, obs, prm], dwaCommand[x, v, w, path, obs, prm]];
+    x2 = stepUnicycle[x, u[[1]], u[[2]], prm["dt"]];
+    L += Norm[x2[[{1,2}]] - x[[{1,2}]]];
+    w2 += u[[2]]^2*prm["dt"];
+    x = x2; v = u[[1]]; w = u[[2]];
+  ];
+  <|"success"->False,"collision"->False,"time"->prm["max_steps"]*prm["dt"],"L"->L,"cmin"->cmin,"w2"->w2|>
+];
+
+summarize[R_] := Module[
+  {n = Length[R]},
+  <|
+    "trials"->n,
+    "success_rate"->Mean[Boole[R[[All,"success"]]]],
+    "collision_rate"->Mean[Boole[R[[All,"collision"]]]],
+    "time_mean"->Mean[R[[All,"time"]]],
+    "L_mean"->Mean[R[[All,"L"]]],
+    "cmin_mean"->Mean[R[[All,"cmin"]]],
+    "w2_mean"->Mean[R[[All,"w2"]]]
+  |>
+];
+
+compare[trials_:30, seed0_:0] := Module[
+  {prm = <|"R"->0.25,"vmax"->0.9,"wmax"->1.6,"a"->1.2,"alpha"->2.5,"dt"->0.1,"T"->2.0,
+                 "goal_tol"->0.25,"max_steps"->800,"n_obs"->45|>, resDWA, resTEB},
+  resDWA = Table[runOne["dwa", seed0+i, prm], {i, 0, trials-1}];
+  resTEB = Table[runOne["teb", seed0+i, prm], {i, 0, trials-1}];
+  Print["DWA ", summarize[resDWA]];
+  Print["TEB ", summarize[resTEB]];
+];
+
+compare[30, 0];

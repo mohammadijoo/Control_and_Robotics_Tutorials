@@ -1,0 +1,98 @@
+(* ::Package:: *)
+
+(* Chapter10_Lesson2.nb *)
+(* ICP Variants for Mobile Robots (2D SE(2) focus) *)
+
+(* This notebook uses:
+     - Nearest[] for correspondences
+     - A 2D point-to-point closed-form rotation estimate
+     - A 2D point-to-line linearized least-squares step
+*)
+
+ClearAll["Global`*"];
+
+rot2[th_] := {{Cos[th], -Sin[th]}, {Sin[th], Cos[th]}};
+
+estimateNormals2D[pts_] := Module[{M = Length[pts], prev, nxt, tang, n},
+  prev = RotateRight[pts, 1];
+  nxt  = RotateLeft[pts, 1];
+  tang = nxt - prev;
+  n = Map[Normalize[{ -#[[2]], #[[1]] }] &, tang];
+  n
+];
+
+solveP2P2D[P_, Q_] := Module[{pbar, qbar, P0, Q0, h11, h12, h21, h22, th, R, t},
+  pbar = Mean[P]; qbar = Mean[Q];
+  P0 = P - pbar; Q0 = Q - qbar;
+  h11 = Total[MapThread[#1[[1]]*#2[[1]] &, {P0, Q0}]];
+  h12 = Total[MapThread[#1[[1]]*#2[[2]] &, {P0, Q0}]];
+  h21 = Total[MapThread[#1[[2]]*#2[[1]] &, {P0, Q0}]];
+  h22 = Total[MapThread[#1[[2]]*#2[[2]] &, {P0, Q0}]];
+  th = ArcTan[h21 - h12, h11 + h22];
+  R = rot2[th];
+  t = qbar - (R.pbar);
+  {R, t, th}
+];
+
+solveP2L2D[P_, Q_, n_, R0_, t0_] := Module[
+  {p, e, r, perp, jtheta, A, b, delta, dx, dy, dth, Rdel, tdel},
+  p = (R0.# & /@ P) + t0;
+  e = p - Q;
+  r = MapThread[#1.#2 &, {n, e}];
+  perp = ({-#[[2]], #[[1]]} & /@ P);
+  jtheta = MapThread[#1.(R0.#2) &, {n, perp}];
+  A = Transpose[{n[[All,1]], n[[All,2]], jtheta}];
+  b = -r;
+  delta = LinearSolve[Transpose[A].A, Transpose[A].b];
+  {dx, dy, dth} = delta;
+  Rdel = rot2[dth];
+  tdel = {dx, dy};
+  {Rdel, tdel, Mean[r^2]}
+];
+
+icpSE2[src_, dst_, variant_:"p2l", maxIter_:60, tol_:1.*^-7, rejectDist_:0.5] := Module[
+  {R = rot2[0.0], t = {0.0, 0.0}, costHist = {}, normals, nnFun, prev = Infinity},
+  normals = If[variant === "p2l", estimateNormals2D[dst], {}];
+  nnFun = Nearest[dst -> "Index"];
+  Do[
+    Module[{srcT, idx, Q, P, Nn, d, keep, cost, Rdel, tdel},
+      srcT = (R.# & /@ src) + t;
+      idx = First /@ (nnFun /@ srcT);
+      Q = dst[[idx]];
+      d = MapThread[Norm[#1-#2] &, {srcT, Q}];
+      keep = Flatten@Position[d, _?(# <= rejectDist &)];
+      If[Length[keep] < 3, Break[]];
+      P = src[[keep]];
+      Q = Q[[keep]];
+      If[variant === "p2p",
+        Module[{sol = solveP2P2D[P, Q]},
+          R = sol[[1]]; t = sol[[2]];
+          cost = Mean[MapThread[Norm[R.#1 + t - #2]^2 &, {P, Q}]];
+        ],
+        Nn = normals[[idx[[keep]]]];
+        {Rdel, tdel, cost} = solveP2L2D[P, Q, Nn, R, t];
+        R = Rdel.R;
+        t = Rdel.t + tdel;
+      ];
+      AppendTo[costHist, cost];
+      If[Abs[prev - cost] < tol, Break[]];
+      prev = cost;
+    ],
+    {maxIter}
+  ];
+  {R, t, ArcTan[R[[2,1]], R[[1,1]]], costHist}
+];
+
+(* Demo *)
+SeedRandom[2];
+M = 300;
+a = Subdivide[0, 2 Pi, M-1];
+dst = Transpose[{2 Cos[a] + 0.3 Cos[5 a], 1 Sin[a] + 0.2 Sin[3 a]}];
+trueTheta = 0.25;
+trueT = {0.8, -0.4};
+Rtrue = rot2[trueTheta];
+src = (Rtrue.# & /@ dst) + trueT + 0.01 RandomVariate[NormalDistribution[0,1], {M,2}];
+
+{Rest, test, thetahat, hist} = icpSE2[src, dst, "p2l", 60, 1.*^-7, 0.5];
+Print["Estimated theta: ", thetahat, "  t: ", test];
+Print["True theta: ", trueTheta, "  t: ", trueT];

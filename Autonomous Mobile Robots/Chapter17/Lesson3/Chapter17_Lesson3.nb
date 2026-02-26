@@ -1,0 +1,120 @@
+(* Chapter17_Lesson3.nb
+   Autonomous Mobile Robots (Control Engineering) — Chapter 17, Lesson 3
+   Next-Best-View (NBV) Strategies — Wolfram Mathematica Notebook (plain text)
+   -------------------------------------------------------------------------
+   This .nb is provided as a Notebook expression. Open it in Mathematica.
+
+   It implements:
+     - Bernoulli entropy
+     - A binary sensor Bayes update
+     - Expected information gain per cell
+     - Ray-cast view scoring on a probability grid
+     - NBV selection among random candidates
+*)
+
+Notebook[{
+  Cell["Chapter 17, Lesson 3 — Next-Best-View (NBV) Strategies", "Title"],
+  Cell["Core math utilities", "Section"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    clamp[x_, lo_, hi_] := Min[Max[x, lo], hi];
+    bernoulliEntropy[p_] := Module[{q = clamp[p, 10^-12, 1 - 10^-12]},
+      -q Log[q] - (1 - q) Log[1 - q]
+    ];
+
+    posterior[pOcc_, zOcc_, pHit_:0.85, pFalse_:0.15] := Module[{p = clamp[pOcc, 10^-12, 1 - 10^-12], num, den},
+      If[zOcc,
+        num = pHit p; den = pHit p + pFalse (1 - p),
+        num = (1 - pHit) p; den = (1 - pHit) p + (1 - pFalse) (1 - p)
+      ];
+      clamp[num/den, 10^-12, 1 - 10^-12]
+    ];
+
+    expectedPosteriorEntropy[pOcc_, pHit_:0.85, pFalse_:0.15] := Module[
+      {p = clamp[pOcc, 10^-12, 1 - 10^-12], pzOcc, pzFree, pPostOcc, pPostFree},
+      pzOcc = pHit p + pFalse (1 - p);
+      pzFree = 1 - pzOcc;
+      pPostOcc = posterior[p, True, pHit, pFalse];
+      pPostFree = posterior[p, False, pHit, pFalse];
+      pzOcc bernoulliEntropy[pPostOcc] + pzFree bernoulliEntropy[pPostFree]
+    ];
+
+    expectedInformationGain[pOcc_, pHit_:0.85, pFalse_:0.15] :=
+      bernoulliEntropy[pOcc] - expectedPosteriorEntropy[pOcc, pHit, pFalse];
+  ], "Input"],
+
+  Cell["Ray casting (grid line traversal)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    bresenham[{x0_, y0_}, {x1_, y1_}] := Module[
+      {dx = Abs[x1 - x0], dy = -Abs[y1 - y0], sx = If[x0 < x1, 1, -1], sy = If[y0 < y1, 1, -1],
+       err, x = x0, y = y0, pts = {}},
+      err = dx + dy;
+      While[True,
+        AppendTo[pts, {x, y}];
+        If[x == x1 && y == y1, Break[]];
+        With[{e2 = 2 err},
+          If[e2 >= dy, err = err + dy; x = x + sx];
+          If[e2 <= dx, err = err + dx; y = y + sy];
+        ];
+      ];
+      pts
+    ];
+
+    rayEndpoint[{cx_, cy_}, theta_, r_] := {Round[cx + r Cos[theta]], Round[cy + r Sin[theta]]};
+  ], "Input"],
+
+  Cell["Expected IG of a view + NBV selection", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    inBoundsQ[grid_, {x_, y_}] := Module[{h = Length[grid], w = Length[grid[[1]]]},
+      1 <= x <= w && 1 <= y <= h
+    ];
+
+    expectedIgView[grid_, pose:{cx_, cy_, heading_}, fov_:Pi, nRays_:45, maxRange_:10, occStop_:0.70] := Module[
+      {angles, total = 0, end, line, pOcc},
+      If[!inBoundsQ[grid, {cx, cy}], Return[-10^9]];
+      angles = Table[heading - fov/2 + (i/(Max[1, nRays - 1])) fov, {i, 0, nRays - 1}];
+      Do[
+        end = rayEndpoint[{cx, cy}, a, maxRange];
+        line = bresenham[{cx, cy}, end];
+        Do[
+          If[k == 1, Continue[]];
+          If[!inBoundsQ[grid, line[[k]]], Break[]];
+          pOcc = grid[[ line[[k,2]], line[[k,1]] ]];
+          total += expectedInformationGain[pOcc];
+          If[pOcc > occStop, Break[]];
+          , {k, 1, Length[line]}
+        ];
+        , {a, angles}
+      ];
+      total
+    ];
+
+    travelCost[{cx_, cy_}, {vx_, vy_}] := Sqrt[(vx - cx)^2 + (vy - cy)^2];
+
+    chooseNBV[grid_, current:{cx_, cy_, heading_}, candidates_, lambda_:0.22] := Module[
+      {best = {cx, cy, heading}, bestU = -Infinity, ig, u, c},
+      Do[
+        ig = expectedIgView[grid, cand];
+        c = travelCost[{cx, cy}, cand[[{1,2}]]];
+        u = ig - lambda c;
+        If[u > bestU, bestU = u; best = cand;];
+        , {cand, candidates}
+      ];
+      {best, bestU}
+    ];
+  ], "Input"],
+
+  Cell["Demo run", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SeedRandom[7];
+    W = 30; H = 18;
+    grid = ConstantArray[0.5, {H, W}];
+    current = {2, 2, 0.0};
+
+    candidates = Table[{RandomInteger[{1, W}], RandomInteger[{1, H}], RandomReal[{0, 2 Pi}]}, {120}];
+    {best, bestU} = chooseNBV[grid, current, candidates, 0.22];
+    bestIG = expectedIgView[grid, best];
+
+    Print["NBV = ", best, " IG = ", bestIG, " U = ", bestU];
+  ], "Input"]
+}]

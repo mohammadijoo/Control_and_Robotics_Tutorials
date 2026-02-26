@@ -1,0 +1,134 @@
+(* Chapter7_Lesson5.nb
+   Wolfram Mathematica notebook-style source (plain text).
+   EKF/UKF localization lab: Wheel + IMU + GPS (2D ground robot)
+*)
+
+ClearAll["Global`*"];
+SeedRandom[7];
+
+wrap[a_] := Module[{b = Mod[a + Pi, 2 Pi]}, If[b < 0, b = b + 2 Pi]; b - Pi];
+
+circMean[theta_List, w_List] := ArcTan[Total[w*Cos[theta]], Total[w*Sin[theta]]];
+
+(* State: {x, y, theta, v, bg, ba} *)
+
+fDisc[state_, omegaM_, aM_, dt_] := Module[
+  {x, y, th, v, bg, ba, omega, acc},
+  {x, y, th, v, bg, ba} = state;
+  omega = omegaM - bg;
+  acc = aM - ba;
+  {
+    x + v*dt*Cos[th],
+    y + v*dt*Sin[th],
+    wrap[th + omega*dt],
+    v + acc*dt,
+    bg,
+    ba
+  }
+];
+
+jacF[state_, omegaM_, aM_, dt_] := Module[
+  {x, y, th, v, bg, ba, F},
+  {x, y, th, v, bg, ba} = state;
+  F = IdentityMatrix[6];
+  F[[1,3]] = -v*dt*Sin[th];
+  F[[1,4]] =  dt*Cos[th];
+  F[[2,3]] =  v*dt*Cos[th];
+  F[[2,4]] =  dt*Sin[th];
+  F[[3,5]] = -dt;
+  F[[4,6]] = -dt;
+  F
+];
+
+(* EKF predict/update *)
+ekfPredict[{x_, P_}, omegaM_, aM_, dt_, Qc_] := Module[
+  {xp, F, G, Qd, Pp},
+  xp = fDisc[x, omegaM, aM, dt];
+  F = jacF[x, omegaM, aM, dt];
+  G = ConstantArray[0, {6,4}];
+  G[[3,1]] = dt;        (* gyro white noise into theta *)
+  G[[4,2]] = dt;        (* accel white noise into v *)
+  G[[5,3]] = Sqrt[dt];  (* bg random walk *)
+  G[[6,4]] = Sqrt[dt];  (* ba random walk *)
+  Qd = G.Qc.Transpose[G];
+  Pp = F.P.Transpose[F] + Qd;
+  {xp, Pp}
+];
+
+ekfUpdate[{x_, P_}, z_, h_, H_, R_] := Module[
+  {y, S, K, I, xnew, Pnew},
+  y = z - h;
+  S = H.P.Transpose[H] + R;
+  K = P.Transpose[H].Inverse[S];
+  xnew = x + K.y;
+  xnew[[3]] = wrap[xnew[[3]]];
+  I = IdentityMatrix[Length[x]];
+  Pnew = (I - K.H).P.Transpose[I - K.H] + K.R.Transpose[K];
+  {xnew, Pnew}
+];
+
+(* UKF tools *)
+sigmaPoints[x_, P_, lambda_] := Module[
+  {n = Length[x], S, X},
+  S = CholeskyDecomposition[(n + lambda)*P];
+  X = ConstantArray[0, {2 n + 1, n}];
+  X[[1]] = x;
+  Do[
+    X[[1 + i]] = x + S[[All, i]];
+    X[[1 + i + n]] = x - S[[All, i]];
+    , {i, 1, n}];
+  X[[All, 3]] = wrap /@ X[[All, 3]];
+  X
+];
+
+ukfPredict[{x_, P_}, omegaM_, aM_, dt_, Qd_, alpha_: 10^-3, beta_: 2, kappa_: 0] := Module[
+  {n = Length[x], lambda, Wm, Wc, Xsig, Xp, xbar, Pbar, dx, thbar},
+  lambda = alpha^2 (n + kappa) - n;
+  Wm = ConstantArray[1/(2 (n + lambda)), 2 n + 1];
+  Wc = Wm;
+  Wm[[1]] = lambda/(n + lambda);
+  Wc[[1]] = Wm[[1]] + (1 - alpha^2 + beta);
+
+  Xsig = sigmaPoints[x, P, lambda];
+  Xp = fDisc[#, omegaM, aM, dt] & /@ Xsig;
+
+  xbar = Total[MapThread[#1 #2 &, {Wm, Xp}]];
+  thbar = circMean[Xp[[All, 3]], Wm];
+  xbar[[3]] = thbar;
+
+  Pbar = ConstantArray[0, {n, n}];
+  Do[
+    dx = Xp[[i]] - xbar;
+    dx[[3]] = wrap[dx[[3]]];
+    Pbar += Wc[[i]] Outer[Times, dx, dx];
+    , {i, 1, 2 n + 1}];
+  Pbar += Qd;
+  {xbar, Pbar, lambda, Wm, Wc}
+];
+
+ukfUpdate[{x_, P_}, z_, hfun_, R_, lambda_, Wm_, Wc_] := Module[
+  {n = Length[x], Xsig, Zsig, zbar, S, Pxz, dz, dx, K, xnew, Pnew},
+  Xsig = sigmaPoints[x, P, lambda];
+  Zsig = hfun /@ Xsig;
+  zbar = Total[MapThread[#1 #2 &, {Wm, Zsig}]];
+
+  S = ConstantArray[0, {Length[z], Length[z]}];
+  Pxz = ConstantArray[0, {n, Length[z]}];
+
+  Do[
+    dz = Zsig[[i]] - zbar;
+    dx = Xsig[[i]] - x;
+    dx[[3]] = wrap[dx[[3]]];
+    S += Wc[[i]] Outer[Times, dz, dz];
+    Pxz += Wc[[i]] Outer[Times, dx, dz];
+    , {i, 1, 2 n + 1}];
+  S += R;
+
+  K = Pxz.Inverse[S];
+  xnew = x + K.(z - zbar);
+  xnew[[3]] = wrap[xnew[[3]]];
+  Pnew = P - K.S.Transpose[K];
+  {xnew, Pnew}
+];
+
+Print["Mathematica EKF/UKF lab scaffold loaded. Build a simulation loop analogous to the Python/Matlab versions."];

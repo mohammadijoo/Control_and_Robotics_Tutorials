@@ -1,0 +1,160 @@
+(* Chapter11_Lesson3.nb *)
+Notebook[{
+  Cell["FastSLAM 1.0 (Rao–Blackwellized Particle Filter SLAM) — Wolfram Language demo", "Title"],
+  Cell[TextData[{
+    "This notebook is a compact educational implementation of FastSLAM 1.0 in 2D.\n",
+    "Assumptions: known data association; range-bearing sensor; Gaussian noise; unicycle motion.\n"
+  }], "Text"],
+
+  Cell["1. Utilities", "Section"],
+  Cell[BoxData[
+    ToBoxes[
+      ClearAll[wrap, motionModel, hLandmark, HLandmark, invMeas, gaussLike];
+      wrap[a_] := Module[{x = a},
+        While[x <= -Pi, x += 2 Pi];
+        While[x > Pi, x -= 2 Pi];
+        x
+      ];
+
+      motionModel[{px_, py_, th_}, {v_, w_}, dt_] := Module[{px2, py2, th2},
+        If[Abs[w] < 10^-9,
+          px2 = px + v dt Cos[th];
+          py2 = py + v dt Sin[th];
+          th2 = th;,
+          px2 = px + (v/w) (Sin[th + w dt] - Sin[th]);
+          py2 = py - (v/w) (Cos[th + w dt] - Cos[th]);
+          th2 = th + w dt;
+        ];
+        {px2, py2, wrap[th2]}
+      ];
+
+      hLandmark[{px_, py_, th_}, {mx_, my_}] := Module[{dx, dy, q, r, b},
+        dx = mx - px; dy = my - py;
+        q = dx^2 + dy^2; r = Sqrt[Max[q, 10^-12]];
+        b = wrap[ArcTan[dx, dy] - th];
+        {r, b}
+      ];
+
+      HLandmark[{px_, py_, th_}, {mx_, my_}] := Module[{dx, dy, q, r},
+        dx = mx - px; dy = my - py;
+        q = Max[dx^2 + dy^2, 10^-12];
+        r = Sqrt[Max[q, 10^-12]];
+        {{dx/r, dy/r}, {-dy/q, dx/q}}
+      ];
+
+      invMeas[{px_, py_, th_}, {r_, b_}] := Module[{ang},
+        ang = th + b;
+        {px + r Cos[ang], py + r Sin[ang]}
+      ];
+
+      gaussLike[v_, S_] := Module[{Ssym, detS, invS, e},
+        Ssym = (S + Transpose[S])/2;
+        detS = Max[Det[Ssym], 10^-18];
+        invS = Inverse[Ssym];
+        e = v.invS.v;
+        (1/(2 Pi Sqrt[detS])) Exp[-1/2 e]
+      ];
+    ]
+  ], "Input"],
+
+  Cell["2. One FastSLAM step (core update)", "Section"],
+  Cell[BoxData[
+    ToBoxes[
+      ClearAll[fastslamStep];
+      fastslamStep[particles_, u_, obs_, dt_, Ru_, Qz_, rng_] := Module[
+        {ps = particles, N, mvn, motionNoise, idx, normalize, ess, resample},
+        N = Length[ps];
+        mvn[cov_] := RandomVariate[MultinormalDistribution[{0, 0}, cov]];
+        (* motion sampling *)
+        ps = ps /. p_Association :> Module[{x = p["x"], un = u + mvn[Ru]},
+          AssociateTo[p, "x" -> motionModel[x, un, dt]]; p
+        ];
+
+        (* measurement updates *)
+        ps = ps /. p_Association :> Module[{x = p["x"], w = p["w"], lms = p["lms"], o, id, z, lm, mu, Sigma, zhat, v, H, S, K},
+          Do[
+            {id, z} = o;
+            lm = lms[[id]];
+            If[! lm["seen"],
+              mu = invMeas[x, z];
+              H = HLandmark[x, mu];
+              Sigma = Inverse[H].Qz.Transpose[Inverse[H]];
+              lm = <|"seen" -> True, "mu" -> mu, "Sigma" -> Sigma|>;
+              lms[[id]] = lm;,
+              mu = lm["mu"]; Sigma = lm["Sigma"];
+              zhat = hLandmark[x, mu];
+              v = {z[[1]] - zhat[[1]], wrap[z[[2]] - zhat[[2]]]};
+              H = HLandmark[x, mu];
+              S = H.Sigma.Transpose[H] + Qz;
+              K = Sigma.Transpose[H].Inverse[S];
+              mu = mu + K.v;
+              Sigma = (IdentityMatrix[2] - K.H).Sigma;
+              lm = <|"seen" -> True, "mu" -> mu, "Sigma" -> Sigma|>;
+              lms[[id]] = lm;
+              w = w * gaussLike[v, S];
+            ],
+            {o, obs}
+          ];
+          AssociateTo[p, "w" -> w, "lms" -> lms]; p
+        ];
+
+        (* normalize weights *)
+        normalize = Total[ps[[All, "w"]]];
+        If[normalize <= 10^-30,
+          ps = ps /. p_Association :> (AssociateTo[p, "w" -> 1.0/N]; p);,
+          ps = ps /. p_Association :> (AssociateTo[p, "w" -> p["w"]/normalize]; p);
+        ];
+
+        (* ESS + systematic resample *)
+        ess = 1.0/Total[(ps[[All, "w"]]]^2];
+        resample[ps0_] := Module[{cdf, u0, new = {}, j = 1, u},
+          cdf = Accumulate[ps0[[All, "w"]]];
+          u0 = RandomReal[{0, 1/N}];
+          Do[
+            u = u0 + (i - 1)/N;
+            While[j < N && u > cdf[[j]], j++];
+            AppendTo[new, ps0[[j]]],
+            {i, 1, N}
+          ];
+          new = new /. p_Association :> (AssociateTo[p, "w" -> 1.0/N]; p);
+          new
+        ];
+        If[ess < 0.5 N, ps = resample[ps]];
+        ps
+      ];
+    ]
+  ], "Input"],
+
+  Cell["3. Minimal example setup (no plotting)", "Section"],
+  Cell[BoxData[
+    ToBoxes[
+      SeedRandom[42];
+      M = 5; N = 50;
+      Ru = DiagonalMatrix[{0.05^2, (2 Pi/180)^2}];
+      Qz = DiagonalMatrix[{0.15^2, (3 Pi/180)^2}];
+
+      initParticle[] := <|
+        "x" -> {0.0, 0.0, 0.0},
+        "w" -> 1.0/N,
+        "lms" -> Table[<|"seen" -> False, "mu" -> {0.0, 0.0}, "Sigma" -> 10^6 IdentityMatrix[2]|>, {M}]
+      |>;
+
+      particles = Table[initParticle[], {N}];
+
+      (* One step with empty observation list (hook your simulator here) *)
+      u = {0.8, 0.1}; dt = 0.1;
+      particles = fastslamStep[particles, u, {}, dt, Ru, Qz, RandomReal[]];
+
+      meanPose = Module[{ws = particles[[All, "w"]], xs = particles[[All, "x"]], px, py, c, s},
+        px = Total[ws * xs[[All, 1]]];
+        py = Total[ws * xs[[All, 2]]];
+        c  = Total[ws * Cos[xs[[All, 3]]]];
+        s  = Total[ws * Sin[xs[[All, 3]]]];
+        {px, py, ArcTan[c, s]}
+      ];
+      meanPose
+    ]
+  ], "Input"]
+},
+WindowTitle -> "Chapter11_Lesson3.nb"
+]

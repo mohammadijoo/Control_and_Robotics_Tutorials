@@ -1,0 +1,171 @@
+(* Chapter17_Lesson5.nb
+Autonomous Mobile Robots — Chapter 17 (Exploration and Active Mapping)
+Lesson 5 Lab: Autonomous Exploration in Unknown Map (single robot)
+
+This is plain-text Wolfram Language code intended to be saved as .nb (or .wl).
+For a true notebook, you can paste into Mathematica and save as Notebook.
+
+Core features:
+- Log-odds occupancy belief
+- Frontier detection
+- Goal scoring with IG - cost - risk
+*)
+
+ClearAll["Global`*"];
+
+Clamp[x_, lo_, hi_] := Max[lo, Min[hi, x]];
+Logit[p_] := Module[{pp = Clamp[p, 10^-6, 1 - 10^-6]}, Log[pp/(1 - pp)]];
+Sigmoid[l_] := 1/(1 + Exp[-l]);
+BernoulliEntropy[p_] := Module[{pp = Clamp[p, 10^-12, 1 - 10^-12]}, -pp Log[pp] - (1 - pp) Log[1 - pp]];
+
+(* World generation *)
+W = 60; H = 45; obstacleProb = 0.22; SeedRandom[7];
+occTrue = RandomChoice[{obstacleProb -> 1, (1 - obstacleProb) -> 0}, {H, W}];
+occTrue[[1, All]] = 1; occTrue[[H, All]] = 1; occTrue[[All, 1]] = 1; occTrue[[All, W]] = 1;
+
+(* Belief log-odds *)
+l = ConstantArray[0.0, {H, W}];
+lOcc = Logit[0.72]; lFree = Logit[0.28]; lMin = Logit[0.02]; lMax = Logit[0.98];
+
+ProbFromLogOdds[LL_] := 1/(1 + Exp[-LL]);
+ClassifyMap[LL_] := Module[{p = ProbFromLogOdds[LL], cls},
+  cls = ConstantArray[-1, Dimensions[LL]];
+  cls = ReplacePart[cls, Position[p, _?(# >= 0.65 &)] -> 1];
+  cls = ReplacePart[cls, Position[p, _?(# <= 0.35 &)] -> 0];
+  cls
+];
+
+TotalEntropy[LL_] := Total[Map[BernoulliEntropy, Flatten[ProbFromLogOdds[LL]]]];
+
+Neighbors4[{x_, y_}] := {{x + 1, y}, {x - 1, y}, {x, y + 1}, {x, y - 1}};
+
+FrontierCells[cls_] := Module[{fronts = {}, x, y},
+  For[y = 2, y <= H - 1, y++,
+    For[x = 2, x <= W - 1, x++,
+      If[cls[[y, x]] == -1,
+        If[MemberQ[cls[[#[[2]], #[[1]]]] & /@ Neighbors4[{x, y}], 0],
+          AppendTo[fronts, {x, y}]
+        ]
+      ]
+    ]
+  ];
+  fronts
+];
+
+ApproxIG[cls_, goal_, rMax_] := Module[{x0 = goal[[1]], y0 = goal[[2]], count = 0, x, y},
+  For[y = Max[1, y0 - rMax], y <= Min[H, y0 + rMax], y++,
+    For[x = Max[1, x0 - rMax], x <= Min[W, x0 + rMax], x++,
+      If[(x - x0)^2 + (y - y0)^2 <= rMax^2 && cls[[y, x]] == -1, count++]
+    ]
+  ];
+  count Log[2]
+];
+
+(* Simple sensing update: mark cells in a disk as free, and obstacles as occupied if seen.
+   This is a pedagogical simplification (not ray casting). *)
+SenseUpdate[LL_, pose_, rMax_] := Module[{LL2 = LL, x0 = pose[[1]], y0 = pose[[2]], x, y},
+  For[y = Max[1, y0 - rMax], y <= Min[H, y0 + rMax], y++,
+    For[x = Max[1, x0 - rMax], x <= Min[W, x0 + rMax], x++,
+      If[(x - x0)^2 + (y - y0)^2 <= rMax^2,
+        If[occTrue[[y, x]] == 1,
+          LL2[[y, x]] = Clamp[LL2[[y, x]] + lOcc, lMin, lMax],
+          LL2[[y, x]] = Clamp[LL2[[y, x]] + lFree, lMin, lMax]
+        ]
+      ]
+    ]
+  ];
+  LL2
+];
+
+(* Dijkstra cost on grid (very small-scale demo) *)
+DijkstraCost[cls_, start_, goal_] := Module[{dist, prev, pq, sx, sy, gx, gy, INF = 10^18, pop, cur, x, y, nx, ny, step, nd},
+  dist = ConstantArray[INF, {H, W}];
+  prev = ConstantArray[{-1, -1}, {H, W}];
+  {sx, sy} = start; {gx, gy} = goal;
+  dist[[sy, sx]] = 0.0;
+  pq = { {0.0, {sx, sy}} };
+
+  pop[] := Module[{m = First@MinimalBy[pq, First], i},
+    i = First@FirstPosition[pq, m];
+    pq = Delete[pq, i];
+    m
+  ];
+
+  While[Length[pq] > 0,
+    cur = pop[];
+    {x, y} = cur[[2]];
+    If[{x, y} == {gx, gy}, Break[]];
+    Do[
+      {nx, ny} = nb;
+      If[nx >= 1 && nx <= W && ny >= 1 && ny <= H && cls[[ny, nx]] != 1,
+        step = If[cls[[ny, nx]] == 0, 1.0, 3.0];
+        nd = dist[[y, x]] + step;
+        If[nd < dist[[ny, nx]], dist[[ny, nx]] = nd; prev[[ny, nx]] = {x, y}; AppendTo[pq, {nd, {nx, ny}}];]
+      ],
+      {nb, Neighbors4[{x, y}]}
+    ];
+  ];
+
+  {dist[[gy, gx]], prev}
+];
+
+RecoverPath[prev_, start_, goal_] := Module[{path = {goal}, cur = goal, sx, sy},
+  {sx, sy} = start;
+  While[cur != start,
+    cur = prev[[cur[[2]], cur[[1]]]];
+    If[cur == {-1, -1}, Return[{}]];
+    path = Prepend[path, cur];
+  ];
+  path
+];
+
+(* Main loop *)
+pose = First@Position[occTrue, 0]; (* {y,x} *)
+pose = Reverse[pose]; (* {x,y} *)
+
+l = SenseUpdate[l, pose, 10];
+wIG = 1.0; wCost = 0.35; wRisk = 1.2;
+
+travel = 0; steps = 0;
+Do[
+  steps++;
+  cls = ClassifyMap[l];
+  fronts = FrontierCells[cls];
+  If[fronts == {}, Break[]];
+
+  candidates = RandomSample[fronts, Min[Length[fronts], 60]];
+  bestScore = -10^18; bestGoal = First[candidates];
+
+  Do[
+    goal = g;
+    {cost, prev} = DijkstraCost[cls, pose, goal];
+    If[!NumericQ[cost] || cost > 10^17, Continue[]];
+    path = RecoverPath[prev, pose, goal];
+    If[Length[path] < 2, Continue[]];
+    ig = ApproxIG[cls, goal, 10];
+    risk = Mean[ProbFromLogOdds[l[[#[[2]], #[[1]]]]]& /@ path];
+    score = wIG*ig - wCost*cost - wRisk*risk;
+    If[score > bestScore, bestScore = score; bestGoal = goal;],
+    {g, candidates}
+  ];
+
+  {cost2, prev2} = DijkstraCost[cls, pose, bestGoal];
+  path2 = RecoverPath[prev2, pose, bestGoal];
+  If[Length[path2] < 2, Break[]];
+  next = path2[[2]];
+  If[occTrue[[next[[2]], next[[1]]]] == 1, l[[next[[2]], next[[1]]]] = lMax; Continue[]];
+  pose = next; travel++;
+  l = SenseUpdate[l, pose, 10];,
+  {2500}
+];
+
+clsFinal = ClassifyMap[l];
+knownFrac = N[Count[Flatten[clsFinal], _?(# != -1 &)]/(W*H)];
+
+Print["=== Exploration Summary (Mathematica) ==="];
+Print["steps: ", steps];
+Print["travel: ", travel];
+Print["known_fraction: ", knownFrac];
+Print["entropy_final: ", TotalEntropy[l]];
+
+ArrayPlot[clsFinal, PlotLabel -> "Belief map: -1 unknown, 0 free, 1 occupied", ImageSize -> Large]

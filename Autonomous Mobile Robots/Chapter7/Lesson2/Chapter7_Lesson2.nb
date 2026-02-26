@@ -1,0 +1,139 @@
+(* Chapter7_Lesson2.nb
+   Wolfram Mathematica notebook (plain text form) illustrating the Unscented Transform (UT)
+   and a minimal UKF step for planar robot localization.
+
+   To use:
+     - Open Mathematica
+     - File -> Open -> select this .nb
+*)
+
+Notebook[{
+  Cell["Chapter 7 - Lesson 2: UKF Localization (Mathematica Demo)", "Title"],
+  Cell["1) Utilities", "Section"],
+  Cell[BoxData@ToBoxes@HoldForm[
+    wrapAngle[a_] := ArcTan[Sin[a], Cos[a]];
+    meanAngle[angles_, w_] := Module[{s, c},
+      s = Total[w*Sin[angles]];
+      c = Total[w*Cos[angles]];
+      wrapAngle[ArcTan[s, c]]
+    ];
+  ], "Input"],
+
+  Cell["2) Sigma points and UT", "Section"],
+  Cell[BoxData@ToBoxes@HoldForm[
+    sigmaPoints[x_, P_, alpha_:0.35, beta_:2.0, kappa_:0.0] := Module[
+      {n, lambda, S, X, Wm, Wc},
+      n = Length[x];
+      lambda = alpha^2 (n + kappa) - n;
+      S = CholeskyDecomposition[(n + lambda) P];  (* lower-triangular *)
+      X = Join[{x},
+        Table[x + S[[All, i]], {i, 1, n}],
+        Table[x - S[[All, i]], {i, 1, n}]
+      ];
+      X = MapAt[wrapAngle, X, {All, 3}]; (* wrap theta *)
+      Wm = ConstantArray[1/(2 (n + lambda)), 2 n + 1];
+      Wc = Wm;
+      Wm[[1]] = lambda/(n + lambda);
+      Wc[[1]] = Wm[[1]] + (1 - alpha^2 + beta);
+      {X, Wm, Wc}
+    ];
+
+    utMeanCov[g_, x_, P_, alpha_:0.35, beta_:2.0, kappa_:0.0] := Module[
+      {X, Wm, Wc, Y, ybar, S},
+      {X, Wm, Wc} = sigmaPoints[x, P, alpha, beta, kappa];
+      Y = g /@ X;
+      ybar = Total[MapThread[#1 #2 &, {Wm, Y}]];
+      S = Total[
+        MapThread[#1 Outer[Times, (#2 - ybar), (#2 - ybar)] &, {Wc, Y}]
+      ];
+      {ybar, S}
+    ];
+  ], "Input"],
+
+  Cell["3) Motion and measurement models", "Section"],
+  Cell[BoxData@ToBoxes@HoldForm[
+    fMotion[x_, u_, dt_] := Module[{px, py, th, v, w},
+      {px, py, th} = x; {v, w} = u;
+      {px + dt v Cos[th], py + dt v Sin[th], wrapAngle[th + dt w]}
+    ];
+
+    hRangeBearing[x_, lm_] := Module[{px, py, th, lx, ly, dx, dy, r, b},
+      {px, py, th} = x; {lx, ly} = lm;
+      dx = lx - px; dy = ly - py;
+      r = Sqrt[dx^2 + dy^2];
+      b = wrapAngle[ArcTan[dy, dx] - th];
+      {r, b}
+    ];
+  ], "Input"],
+
+  Cell["4) One UKF predict/update step (additive noise)", "Section"],
+  Cell[BoxData@ToBoxes@HoldForm[
+    ukfPredict[x_, P_, Q_, u_, dt_, alpha_:0.35, beta_:2.0, kappa_:0.0] := Module[
+      {X, Wm, Wc, Xp, xbar, Pbar},
+      {X, Wm, Wc} = sigmaPoints[x, P, alpha, beta, kappa];
+      Xp = (fMotion[#, u, dt]&) /@ X;
+
+      xbar = {
+        Total[Wm*Xp[[All, 1]]],
+        Total[Wm*Xp[[All, 2]]],
+        meanAngle[Xp[[All, 3]], Wm]
+      };
+
+      Pbar = Total[
+        MapThread[#1 Outer[Times, (#2 - xbar), (#2 - xbar)] &, {Wc, Xp}]
+      ] + Q;
+
+      {xbar, Pbar}
+    ];
+
+    ukfUpdate[xPred_, PPred_, R_, z_, lm_, alpha_:0.35, beta_:2.0, kappa_:0.0] := Module[
+      {X, Wm, Wc, Z, zbar, S, Pxz, K, innov, xNew, PNew},
+      {X, Wm, Wc} = sigmaPoints[xPred, PPred, alpha, beta, kappa];
+      Z = (hRangeBearing[#, lm]&) /@ X;
+
+      zbar = {
+        Total[Wm*Z[[All, 1]]],
+        meanAngle[Z[[All, 2]], Wm]
+      };
+
+      S = Total[
+        MapThread[#1 Outer[Times, (#2 - zbar), (#2 - zbar)] &, {Wc, Z}]
+      ] + R;
+
+      Pxz = Total[
+        MapThread[#1 Outer[Times, (#2 - xPred), (#3 - zbar)] &, {Wc, X, Z}]
+      ];
+
+      K = Pxz . Inverse[S];
+      innov = z - zbar; innov[[2]] = wrapAngle[innov[[2]]];
+
+      xNew = xPred + K . innov;
+      xNew[[3]] = wrapAngle[xNew[[3]]];
+      PNew = PPred - K . S . Transpose[K];
+
+      {xNew, PNew}
+    ];
+  ], "Input"],
+
+  Cell["5) Quick numerical check (single step)", "Section"],
+  Cell[BoxData@ToBoxes@HoldForm[
+    x0 = {0.5, -0.5, -0.3};
+    P0 = DiagonalMatrix[{0.8^2, 0.8^2, (20 Degree)^2}];
+    Q = DiagonalMatrix[{0.02^2, 0.02^2, (1 Degree)^2}];
+    R = DiagonalMatrix[{0.15^2, (2 Degree)^2}];
+
+    u = {1.0, 0.1};
+    dt = 0.1;
+
+    lm = {5.0, 0.0};
+    z = hRangeBearing[fMotion[x0, u, dt], lm] + {0.05, 1 Degree};
+
+    {xPred, PPred} = ukfPredict[x0, P0, Q, u, dt];
+    {x1, P1} = ukfUpdate[xPred, PPred, R, z, lm];
+
+    {xPred, x1, Diagonal[P1]}
+  ], "Input"]
+},
+WindowSize -> {1100, 800},
+StyleDefinitions -> "Default.nb"
+]

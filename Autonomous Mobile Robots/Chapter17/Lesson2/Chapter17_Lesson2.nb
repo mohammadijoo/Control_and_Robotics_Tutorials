@@ -1,0 +1,107 @@
+(* Chapter 17 - Lesson 2: Information Gain and Entropy Reduction
+   Autonomous Mobile Robots (Control Engineering)
+
+   Wolfram Language (Mathematica) code for:
+   - Bernoulli entropy
+   - Per-cell information gain for a binary sensor model
+   - Approx expected IG scoring for a viewpoint using ray stepping
+*)
+
+ClearAll[clip, Hbern, IGCell, WorldToGrid, InBoundsQ, RayCastCells, ExpectedIGView, MapEntropy];
+
+clip[x_, lo_, hi_] := Min[Max[x, lo], hi];
+
+Hbern[p_] := Module[{pp = clip[p, 10^-12, 1 - 10^-12]},
+  -pp Log[pp] - (1 - pp) Log[1 - pp]
+];
+
+IGCell[p_, pHit_:0.85, pFalse_:0.15] := Module[
+  {Hprior, PzOcc, PzFree, pPostOcc, pPostFree, Hpost},
+  Hprior = Hbern[p];
+  PzOcc = pHit p + pFalse (1 - p);
+  PzFree = 1 - PzOcc;
+
+  PzOcc = clip[PzOcc, 10^-15, 1 - 10^-15];
+  PzFree = clip[PzFree, 10^-15, 1 - 10^-15];
+
+  pPostOcc  = (pHit p)/PzOcc;
+  pPostFree = ((1 - pHit) p)/PzFree;
+
+  Hpost = PzOcc Hbern[pPostOcc] + PzFree Hbern[pPostFree];
+  Hprior - Hpost
+];
+
+MapEntropy[P_] := Total[Hbern /@ Flatten[P]];
+
+WorldToGrid[g_, x_, y_] := Module[{ix, iy},
+  ix = Floor[(x - g["originX"])/g["resolution"]] + 1;
+  iy = Floor[(y - g["originY"])/g["resolution"]] + 1;
+  {ix, iy}
+];
+
+InBoundsQ[g_, ix_, iy_] := (1 <= ix <= g["width"]) && (1 <= iy <= g["height"]);
+
+RayCastCells[g_, x0_, y0_, theta_, maxRange_] := Module[
+  {step = 0.5 g["resolution"], t = 0., cells = {}, seen},
+  seen = ConstantArray[False, {g["height"], g["width"]}];
+  While[t <= maxRange,
+    Module[{x = x0 + t Cos[theta], y = y0 + t Sin[theta], ix, iy},
+      {ix, iy} = WorldToGrid[g, x, y];
+      If[!InBoundsQ[g, ix, iy], Break[]];
+      If[!seen[[iy, ix]],
+        seen[[iy, ix]] = True;
+        AppendTo[cells, {ix, iy}];
+      ];
+    ];
+    t += step;
+  ];
+  cells
+];
+
+ExpectedIGView[g_, pose_, fovDeg_:180., nRays_:181, maxRange_:8., pHit_:0.85, pFalse_:0.15,
+               unknownBand_:{0.4, 0.6}, occStop_:0.75] := Module[
+  {x = pose[[1]], y = pose[[2]], yaw = pose[[3]],
+   fov = fovDeg Degree, angles, lo = unknownBand[[1]], hi = unknownBand[[2]],
+   visited, ig = 0.0},
+  angles = If[nRays < 2, {0.0}, Table[-0.5 fov + (i-1) (fov/(nRays-1)), {i, 1, nRays}]];
+  visited = ConstantArray[False, {g["height"], g["width"]}];
+
+  Do[
+    Module[{cells = RayCastCells[g, x, y, yaw + a, maxRange]},
+      Do[
+        Module[{ix = c[[1]], iy = c[[2]], p},
+          If[visited[[iy, ix]], Continue[]];
+          visited[[iy, ix]] = True;
+          p = g["P"][[iy, ix]];
+          If[p >= occStop, Break[]];
+          If[lo <= p <= hi, ig += IGCell[p, pHit, pFalse]];
+        ],
+      {c, cells}]
+    ],
+  {a, angles}];
+
+  ig
+];
+
+(* Demo *)
+SeedRandom[0];
+g = <|
+  "width" -> 120, "height" -> 120, "resolution" -> 0.1,
+  "originX" -> -6.0, "originY" -> -6.0,
+  "P" -> ConstantArray[0.5, {120, 120}]
+|>;
+
+Do[
+  g["P"][[RandomInteger[{1,120}], RandomInteger[{1,120}]]] = clip[RandomVariate[NormalDistribution[0.15, 0.10]], 0.01, 0.99],
+{4000}];
+Do[
+  g["P"][[RandomInteger[{1,120}], RandomInteger[{1,120}]]] = clip[RandomVariate[NormalDistribution[0.85, 0.08]], 0.01, 0.99],
+{1200}];
+
+Print["Initial map entropy (nats): ", N[MapEntropy[g["P"]], 6]];
+
+poses = {{0.,0.,0.}, {-2.,1.5,0.7}, {2.,-1.,-1.2}};
+Do[
+  ig = ExpectedIGView[g, pose, 180., 181, 6.0];
+  Print["Pose=", pose, "  Expected IG≈ ", N[ig, 6], " nats"],
+{pose, poses}];

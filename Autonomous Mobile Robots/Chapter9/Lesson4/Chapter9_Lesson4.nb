@@ -1,0 +1,112 @@
+(* Chapter9_Lesson4.nb *)
+Notebook[{
+  Cell["Chapter 9 - Lesson 4: Elevation and Traversability Maps (outdoor AMR)", "Title"],
+  Cell["This notebook implements a minimal elevation-map fusion (per-cell 1D Kalman update) and a traversability cost map based on slope, roughness, and step height.", "Text"],
+
+  Cell["1. Synthetic Terrain and Point Cloud", "Section"],
+  Cell[BoxData@ToBoxes[
+    ClearAll["Global`*"];
+    SeedRandom[7];
+
+    xMin = -10; xMax = 10; yMin = -10; yMax = 10;
+    res = 0.2;
+    nx = Ceiling[(xMax - xMin)/res];
+    ny = Ceiling[(yMax - yMin)/res];
+
+    sigma0 = 2.0; measSigma = 0.10; R = measSigma^2; gateK = 3.0;
+
+    mu = ConstantArray[0.0, {nx, ny}];
+    sigma2 = ConstantArray[sigma0^2, {nx, ny}];
+    count = ConstantArray[0, {nx, ny}];
+
+    terrainTrue[x_, y_] := 0.20*Sin[0.35*x] + 0.15*Cos[0.25*y] + 0.03*x +
+      0.25*Exp[-0.08*((x - 2)^2 + (y + 1)^2)];
+
+    nGround = 50000; nOut = 2000;
+
+    ground = Table[
+      With[{x = RandomReal[{xMin, xMax}], y = RandomReal[{yMin, yMax}]},
+        {x, y, terrainTrue[x, y] + RandomVariate[NormalDistribution[0, measSigma]]}
+      ],
+      {nGround}
+    ];
+
+    outliers = Table[
+      With[{x = RandomReal[{xMin, xMax}], y = RandomReal[{yMin, yMax}]},
+        {x, y, terrainTrue[x, y] + 0.8 + RandomVariate[NormalDistribution[0, 0.05]]}
+      ],
+      {nOut}
+    ];
+
+    pts = RandomSample[Join[ground, outliers]];
+  ], "Input"],
+
+  Cell["2. Per-cell 1D Kalman Fusion", "Section"],
+  Cell[BoxData@ToBoxes[
+    accepted = 0;
+    Do[
+      {px, py, pz} = pts[[k]];
+      ix = Floor[(px - xMin)/res] + 1;
+      iy = Floor[(py - yMin)/res] + 1;
+
+      If[1 <= ix <= nx && 1 <= iy <= ny,
+        m = mu[[ix, iy]];
+        s2 = sigma2[[ix, iy]];
+
+        nu = pz - m;
+        S = s2 + R;
+
+        If[count[[ix, iy]] == 0 || Abs[nu] <= gateK*Sqrt[S],
+          K = s2/S;
+          mu[[ix, iy]] = m + K*nu;
+          sigma2[[ix, iy]] = (1 - K)*s2;
+          count[[ix, iy]] = count[[ix, iy]] + 1;
+          accepted++
+        ];
+      ],
+      {k, Length[pts]}
+    ];
+    accepted
+  ], "Input"],
+
+  Cell["3. Features and Traversability Cost", "Section"],
+  Cell[BoxData@ToBoxes[
+    slope = ConstantArray[0.0, {nx, ny}];
+    rough = ConstantArray[0.0, {nx, ny}];
+    stepH = ConstantArray[0.0, {nx, ny}];
+
+    Do[
+      If[count[[i, j]] > 0,
+        dzdx = (mu[[i + 1, j]] - mu[[i - 1, j]])/(2*res);
+        dzdy = (mu[[i, j + 1]] - mu[[i, j - 1]])/(2*res);
+        slope[[i, j]] = ArcTan[Sqrt[dzdx^2 + dzdy^2]];
+
+        neigh = Flatten[mu[[i - 1 ;; i + 1, j - 1 ;; j + 1]]];
+        rough[[i, j]] = StandardDeviation[neigh];
+        stepH[[i, j]] = Max[Abs[neigh - mu[[i, j]]]];
+      ],
+      {i, 2, nx - 1}, {j, 2, ny - 1}
+    ];
+
+    slopeRef = 0.35; roughRef = 0.08; stepRef = 0.12;
+    wS = 3.0; wR = 2.0; wD = 2.5; bias = -3.0;
+
+    score = wS*(slope/slopeRef) + wR*(rough/roughRef) + wD*(stepH/stepRef) + bias;
+    cost = 1/(1 + Exp[-score]);
+  ], "Input"],
+
+  Cell["4. Visualization", "Section"],
+  Cell[BoxData@ToBoxes[
+    Print["Elevation mean (ArrayPlot):"];
+    ArrayPlot[Transpose[mu], PlotLegends -> Automatic, Frame -> True];
+
+    Print["Traversability cost (ArrayPlot):"];
+    ArrayPlot[Transpose[cost], PlotLegends -> Automatic, Frame -> True];
+
+    Print["3D terrain (ListPlot3D) for elevation mean (subsampled):"];
+    ListPlot3D[Transpose[mu[[;; ;; 2, ;; ;; 2]]], Mesh -> None, PlotRange -> All]
+  ], "Input"]
+},
+WindowSize -> {1100, 800},
+StyleDefinitions -> "Default.nb"
+]

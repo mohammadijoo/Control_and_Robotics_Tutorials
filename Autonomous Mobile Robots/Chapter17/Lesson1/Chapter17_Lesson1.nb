@@ -1,0 +1,125 @@
+(* ::Package:: *)
+(* Autonomous Mobile Robots — Chapter 17, Lesson 1: Frontier-Based Exploration *)
+(* File: Chapter17_Lesson1.nb *)
+(* Mathematica/Wolfram Language reference implementation for frontier detection + clustering. *)
+
+ClearAll["Global`*"];
+
+(* Grid encoding: -1 unknown, 0 free, 100 occupied *)
+H = 30; W = 40;
+grid = ConstantArray[-1, {H, W}];
+
+(* Known free region *)
+Do[grid[[r, c]] = 0, {r, 6, 15}, {c, 6, 18}];
+(* Obstacles *)
+Do[grid[[r, 13]] = 100, {r, 6, 15}];
+Do[grid[[11, c]] = 100, {c, 13, 30}];
+(* Another known pocket *)
+Do[grid[[r, c]] = 0, {r, 19, 25}, {c, 26, 35}];
+
+robot = {9, 9}; (* 1-indexed row/col *)
+
+inBounds[{r_, c_}] := 1 <= r <= H && 1 <= c <= W;
+neighbors4[{r_, c_}] := Select[{{r - 1, c}, {r + 1, c}, {r, c - 1}, {r, c + 1}}, inBounds];
+neighbors8[{r_, c_}] := Select[Flatten[Table[{r + dr, c + dc}, {dr, -1, 1}, {dc, -1, 1}], 1], inBounds] /. {r, c} -> Sequence[];
+
+isFree[v_] := v === 0;
+isUnknown[v_] := v === -1;
+
+detectFrontiers[g_] := Module[{front = {}},
+  Do[
+    If[isFree[g[[r, c]]] && AnyTrue[neighbors4[{r, c}], isUnknown[g[[#[[1]], #[[2]]]]] &],
+      AppendTo[front, {r, c}]
+    ],
+    {r, 1, H}, {c, 1, W}
+  ];
+  front
+];
+
+clusterFrontiers[g_, frontierCells_] := Module[{frontSet, visited = <||>, clusters = {}, q, comp, u},
+  frontSet = AssociationThread[frontierCells -> ConstantArray[True, Length[frontierCells]]];
+  Do[
+    If[KeyExistsQ[visited, cell] || !KeyExistsQ[frontSet, cell], Continue[]];
+    q = {cell};
+    visited[cell] = True;
+    comp = {};
+    While[Length[q] > 0,
+      u = First[q]; q = Rest[q];
+      AppendTo[comp, u];
+      Do[
+        If[KeyExistsQ[frontSet, v] && !KeyExistsQ[visited, v],
+          visited[v] = True;
+          AppendTo[q, v];
+        ],
+        {v, neighbors8[u]}
+      ];
+    ];
+    AppendTo[clusters, comp];
+    ,
+    {cell, frontierCells}
+  ];
+  Reverse@SortBy[clusters, Length]
+];
+
+bfsDistFree[g_, start_] := Module[{dist, q, u, du, v},
+  dist = ConstantArray[Infinity, {H, W}];
+  If[!isFree[g[[start[[1]], start[[2]]]]], Return[dist]];
+  q = {start};
+  dist[[start[[1]], start[[2]]]] = 0;
+  While[Length[q] > 0,
+    u = First[q]; q = Rest[q];
+    du = dist[[u[[1]], u[[2]]]];
+    Do[
+      If[isFree[g[[v[[1]], v[[2]]]]] && dist[[v[[1]], v[[2]]]] === Infinity,
+        dist[[v[[1]], v[[2]]]] = du + 1;
+        q = Append[q, v];
+      ],
+      {v, neighbors4[u]}
+    ];
+  ];
+  dist
+];
+
+centroid[comp_] := Mean[comp];
+chooseGoal[g_, dist_, comp_, maxRad_: 6] := Module[{c0, best = {}, bestD = Infinity, r0, c1, rad, r, c, d},
+  c0 = Round[centroid[comp]];
+  r0 = c0[[1]]; c1 = c0[[2]];
+  For[rad = 0, rad <= maxRad, rad++,
+    For[r = r0 - rad, r <= r0 + rad, r++,
+      For[c = c1 - rad, c <= c1 + rad, c++,
+        If[!inBounds[{r, c}], Continue[]];
+        If[!isFree[g[[r, c]]], Continue[]];
+        d = dist[[r, c]];
+        If[NumberQ[d] && d < bestD,
+          bestD = d; best = {r, c};
+        ];
+      ];
+    ];
+    If[best =!= {}, Return[best]];
+  ];
+  best
+];
+
+score[distance_, size_, alpha_: 1.0, beta_: 2.5] := alpha*distance - beta*size;
+
+frontiers = detectFrontiers[grid];
+clusters = clusterFrontiers[grid, frontiers];
+dist = bfsDistFree[grid, robot];
+
+bestGoal = {};
+bestCost = Infinity;
+
+Do[
+  If[Length[comp] < 6, Continue[]];
+  goal = chooseGoal[grid, dist, comp, 6];
+  If[goal === {}, Continue[]];
+  d = dist[[goal[[1]], goal[[2]]]];
+  J = score[d, Length[comp], 1.0, 2.5];
+  If[J < bestCost, bestCost = J; bestGoal = goal;];
+  ,
+  {comp, clusters}
+];
+
+Print["robot=", robot];
+Print["frontier_clusters=", Length[clusters]];
+Print["best_goal=", bestGoal, ", cost=", bestCost];

@@ -1,0 +1,103 @@
+(* Chapter20_Lesson4.nb *)
+(* Navigation Stack Deployment (Capstone AMR) *)
+(* Wolfram Language notebook-style script for timing budget, inflation cost, and trajectory score. *)
+
+ClearAll["Global`*"];
+
+(* 1) Timing budget *)
+periodMs = 100.0;
+wcet = <|
+  "sensor_preprocess" -> 8.0,
+  "localization" -> 14.0,
+  "costmap_update" -> 18.0,
+  "global_planner" -> 12.0,
+  "local_planner" -> 22.0,
+  "controller" -> 5.0,
+  "bt_tick" -> 3.0
+|>;
+
+utilization = Total[Values[wcet]]/periodMs;
+Print["Utilization = ", NumberForm[utilization, {4, 3}], 
+      ", schedulable = ", utilization <= 1.0];
+
+(* 2) Inflation cost model *)
+rIns = 0.22; rInf = 0.70; cLethal = 254; cIns = 220; kappa = 8.0;
+
+InflationCost[d_] := Piecewise[{
+   {cLethal, d <= rIns},
+   {0, d >= rInf}
+  },
+  Round[Clip[cIns Exp[-kappa (d - rIns)], {1, cIns}]]
+];
+
+inflationTable = Table[{d, InflationCost[d]}, {d, {0.18, 0.25, 0.35, 0.50, 0.80}}];
+Print["Inflation samples: ", inflationTable];
+
+Plot[Evaluate[Piecewise[{
+  {cLethal, x <= rIns},
+  {0, x >= rInf}
+  },
+  cIns Exp[-kappa (x - rIns)]
+  ]], {x, 0, 1.0},
+  PlotRange -> All,
+  AxesLabel -> {"d (m)", "cost"},
+  PlotLabel -> "Inflation Decay"];
+
+(* 3) Local trajectory score *)
+weights = <|"wPath" -> 1.4, "wGoal" -> 1.0, "wObs" -> 2.6, "wVel" -> 0.4, "wSpin" -> 0.2|>;
+
+ScoreTrajectory[distPath_, distGoal_, obsCost_, v_, omega_, vRef_: 0.50] := Module[
+  {obsTerm},
+  obsTerm = N[obsCost]/254.0;
+  weights["wPath"] distPath +
+  weights["wGoal"] distGoal +
+  weights["wObs"] obsTerm +
+  weights["wVel"] Abs[v - vRef] +
+  weights["wSpin"] Abs[omega]
+];
+
+candidates = {
+  <|"distPath" -> 0.05, "distGoal" -> 1.20, "obsCost" -> 140, "v" -> 0.40, "omega" -> 0.10|>,
+  <|"distPath" -> 0.18, "distGoal" -> 0.95, "obsCost" -> 80,  "v" -> 0.55, "omega" -> 0.35|>,
+  <|"distPath" -> 0.10, "distGoal" -> 1.00, "obsCost" -> 220, "v" -> 0.50, "omega" -> 0.05|>
+};
+
+scored = Table[
+  {i, ScoreTrajectory[candidates[[i, "distPath"]], candidates[[i, "distGoal"]], 
+                      candidates[[i, "obsCost"]], candidates[[i, "v"]], candidates[[i, "omega"]]]},
+  {i, Length[candidates]}
+];
+
+best = First @ MinimalBy[scored, Last];
+Print["Scores = ", scored];
+Print["Best candidate index = ", best[[1]]];
+
+(* 4) Small-angle lateral-heading error dynamics and Lyapunov check *)
+v = 0.6; ky = 1.8; kpsi = 2.4;
+A = {{0, v}, {-ky, -kpsi}};
+evals = Eigenvalues[A];
+Print["Eigenvalues(A) = ", evals];
+
+x0 = {0.35, 0.25};
+sol = NDSolveValue[
+  {
+    x1'[t] == A[[1]].{x1[t], x2[t]},
+    x2'[t] == A[[2]].{x1[t], x2[t]},
+    x1[0] == x0[[1]],
+    x2[0] == x0[[2]]
+  },
+  {x1, x2}, {t, 0, 8}
+];
+
+V[t_] := 1/2 (ky (sol[[1]][t])^2 + v (sol[[2]][t])^2);
+
+Plot[{sol[[1]][t], sol[[2]][t]}, {t, 0, 8},
+  PlotRange -> All,
+  PlotLegends -> {"e_y", "e_psi"},
+  AxesLabel -> {"t (s)", "error"},
+  PlotLabel -> "Tracking Error Convergence"];
+
+Plot[V[t], {t, 0, 8},
+  PlotRange -> All,
+  AxesLabel -> {"t (s)", "V"},
+  PlotLabel -> "Lyapunov Decrease"];

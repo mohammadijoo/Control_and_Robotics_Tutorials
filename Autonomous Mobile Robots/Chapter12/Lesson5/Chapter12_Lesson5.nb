@@ -1,0 +1,202 @@
+(* Chapter12_Lesson5.nb *)
+(* Lab: Build and Optimize a 2D Pose Graph (SE(2)) in Wolfram Language.
+   This is a plain-text Notebook expression. Open in Mathematica, then evaluate cells. *)
+
+Notebook[{
+  Cell["Chapter 12 — Lesson 5: Pose Graph Optimization Lab (SE(2))", "Title"],
+  Cell["From-scratch Gauss-Newton / LM for 2D pose graphs.", "Text"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    WrapAngle[a_] := Module[{b = Mod[a + Pi, 2 Pi] - Pi}, If[b <= -Pi, b + 2 Pi, b]]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    Rot2[th_] := {{Cos[th], -Sin[th]}, {Sin[th], Cos[th]}}
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SE2Compose[x_, y_] := Module[{R = Rot2[x[[3]]], t},
+      t = x[[1 ;; 2]] + R.y[[1 ;; 2]];
+      {t[[1]], t[[2]], WrapAngle[x[[3]] + y[[3]]]}
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SE2Inverse[x_] := Module[{R = Rot2[x[[3]]], tinv},
+      tinv = -(Transpose[R].x[[1 ;; 2]]);
+      {tinv[[1]], tinv[[2]], WrapAngle[-x[[3]]]}
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SE2Between[xi_, xj_] := SE2Compose[SE2Inverse[xi], xj]
+  ], "Input"],
+
+  Cell["Edge structure: {i, j, z, Omega}", "Text"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    LinearizeEdge[xi_, xj_, z_] := Module[
+      {ti, tj, thi, thj, Ri, Rz, dt, zhatT, zhatTh, et, eth, e, S, A, B, dri},
+      ti = xi[[1 ;; 2]]; tj = xj[[1 ;; 2]]; thi = xi[[3]]; thj = xj[[3]];
+      Ri = Rot2[thi]; Rz = Rot2[z[[3]]];
+      dt = tj - ti;
+      zhatT = Transpose[Ri].dt;
+      zhatTh = WrapAngle[thj - thi];
+      et = Transpose[Rz].(zhatT - z[[1 ;; 2]]);
+      eth = WrapAngle[zhatTh - z[[3]]];
+      e = {et[[1]], et[[2]], eth};
+
+      S = {{0, -1}, {1, 0}};
+      A = ConstantArray[0, {3, 3}];
+      B = ConstantArray[0, {3, 3}];
+
+      A[[1 ;; 2, 1 ;; 2]] = -Transpose[Rz].Transpose[Ri];
+      B[[1 ;; 2, 1 ;; 2]] =  Transpose[Rz].Transpose[Ri];
+
+      dri = -Transpose[Ri].(S.dt);
+      A[[1 ;; 2, 3]] = Transpose[Rz].dri;
+
+      A[[3, 3]] = -1; B[[3, 3]] = 1;
+
+      {e, A, B}
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    PoseGraphCost[x_, edges_] := Total@Table[
+      Module[{i = edges[[k, 1]], j = edges[[k, 2]], z = edges[[k, 3]], Om = edges[[k, 4]],
+              xi, xj, zhat, err},
+        xi = x[[3 i + 1 ;; 3 i + 3]];
+        xj = x[[3 j + 1 ;; 3 j + 3]];
+        zhat = SE2Between[xi, xj];
+        err = SE2Compose[SE2Inverse[z], zhat];
+        err[[3]] = WrapAngle[err[[3]]];
+        err . (Om . err)
+      ],
+      {k, Length[edges]}
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    BuildNormalEquations[x_, edges_, N_, lambda_: 0] := Module[
+      {dim = 3 N, H, b, k, i, j, z, Om, xi, xj, e, A, B, ii, jj, d},
+      H = ConstantArray[0., {dim, dim}];
+      b = ConstantArray[0., dim];
+
+      For[k = 1, k <= Length[edges], k++,
+        {i, j, z, Om} = edges[[k]];
+        xi = x[[3 i + 1 ;; 3 i + 3]];
+        xj = x[[3 j + 1 ;; 3 j + 3]];
+        {e, A, B} = LinearizeEdge[xi, xj, z];
+
+        ii = Range[3 i + 1, 3 i + 3];
+        jj = Range[3 j + 1, 3 j + 3];
+
+        H[[ii, ii]] += Transpose[A].Om.A;
+        H[[ii, jj]] += Transpose[A].Om.B;
+        H[[jj, ii]] += Transpose[B].Om.A;
+        H[[jj, jj]] += Transpose[B].Om.B;
+
+        b[[ii]] += Transpose[A].Om.e;
+        b[[jj]] += Transpose[B].Om.e;
+      ];
+
+      If[lambda > 0,
+        d = Diagonal[H];
+        H += DiagonalMatrix[lambda (d + 10^-12)];
+      ];
+
+      (* Gauge fix: anchor node 0 (i=0) => set first 3 variables fixed *)
+      H[[1 ;; 3, All]] = 0; H[[All, 1 ;; 3]] = 0;
+      H[[1, 1]] = 1; H[[2, 2]] = 1; H[[3, 3]] = 1;
+      b[[1 ;; 3]] = 0;
+
+      {H, b}
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SolvePoseGraph[x0_, edges_, N_, maxIters_: 25, tol_: 10^-7] := Module[
+      {x = x0, cost, it, lambda = 10^-3, H, b, dx, xNew, newCost},
+      cost = PoseGraphCost[x, edges];
+      Print["iter 0: cost=", N@cost];
+
+      For[it = 1, it <= maxIters, it++,
+        {H, b} = BuildNormalEquations[x, edges, N, lambda];
+        dx = LinearSolve[H, -b];
+        If[Norm[dx] < tol, Print["stop: step<tol"]; Break[]];
+
+        xNew = x + dx;
+        xNew[[3 ;; ;; 3]] = WrapAngle /@ xNew[[3 ;; ;; 3]];
+
+        newCost = PoseGraphCost[xNew, edges];
+        If[newCost < cost,
+          x = xNew; cost = newCost; lambda = Max[lambda/3, 10^-12];
+          Print["iter ", it, ": cost=", N@cost, " lambda=", N@lambda],
+          lambda = Min[lambda*5, 10^9];
+          Print["iter ", it, ": rejected lambda=", N@lambda]
+        ];
+      ];
+      x
+    ]
+  ], "Input"],
+
+  Cell["Synthetic data generator (small) and run:", "Text"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    MakeInformation[sxy_, sth_] := Inverse[DiagonalMatrix[{sxy^2, sxy^2, sth^2}]]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SimulatePoseGraph[N_: 40, seed_: 4] := Module[
+      {gt, x, i, u, edges = {}, OmOdo, OmLoop, z, zNoisy, x0, cur},
+      SeedRandom[seed];
+      gt = ConstantArray[0., 3 N];
+      x = {0., 0., 0.};
+
+      For[i = 0, i < N, i++,
+        gt[[3 i + 1 ;; 3 i + 3]] = x;
+        u = {0.5, 0., 0.03};
+        x = SE2Compose[x, u];
+      ];
+
+      OmOdo = MakeInformation[0.05, 0.02];
+      For[i = 0, i < N - 1, i++,
+        z = SE2Between[gt[[3 i + 1 ;; 3 i + 3]], gt[[3 (i + 1) + 1 ;; 3 (i + 1) + 3]]];
+        zNoisy = z + {RandomVariate[NormalDistribution[0, 0.05]],
+                      RandomVariate[NormalDistribution[0, 0.05]],
+                      RandomVariate[NormalDistribution[0, 0.02]]};
+        zNoisy[[3]] = WrapAngle[zNoisy[[3]]];
+        AppendTo[edges, {i, i + 1, zNoisy, OmOdo}];
+      ];
+
+      OmLoop = MakeInformation[0.03, 0.01];
+      For[i = 0, i < N - 12, i += 10,
+        z = SE2Between[gt[[3 i + 1 ;; 3 i + 3]], gt[[3 (i + 10) + 1 ;; 3 (i + 10) + 3]]];
+        zNoisy = z + {RandomVariate[NormalDistribution[0, 0.03]],
+                      RandomVariate[NormalDistribution[0, 0.03]],
+                      RandomVariate[NormalDistribution[0, 0.01]]};
+        zNoisy[[3]] = WrapAngle[zNoisy[[3]]];
+        AppendTo[edges, {i, i + 10, zNoisy, OmLoop}];
+      ];
+
+      x0 = ConstantArray[0., 3 N];
+      cur = {0., 0., 0.};
+      x0[[1 ;; 3]] = cur;
+      For[i = 0, i < N - 1, i++,
+        cur = SE2Compose[cur, edges[[i + 1, 3]]];
+        x0[[3 (i + 1) + 1 ;; 3 (i + 1) + 3]] = cur;
+      ];
+
+      {x0, edges, gt}
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    {x0, edges, gt} = SimulatePoseGraph[50, 4];
+    xOpt = SolvePoseGraph[x0, edges, 50];
+    {PoseGraphCost[x0, edges], PoseGraphCost[xOpt, edges]}
+  ], "Input"]
+},
+WindowTitle -> "Chapter12 Lesson5 Pose Graph Lab"
+]

@@ -1,0 +1,202 @@
+(* Chapter3_Lesson3.nb
+   Autonomous Mobile Robots — Chapter 3 Lesson 3
+   Feasible Path Families for Car-Like Robots (Dubins, from scratch)
+
+   Open this notebook in Wolfram Mathematica.
+*)
+
+Notebook[{
+  Cell["Chapter 3 — Lesson 3: Dubins feasible paths (bounded curvature)", "Title"],
+  Cell["From-scratch Dubins solver (LSL, RSR, LSR, RSL, RLR, LRL) + sampling and plot.", "Text"],
+
+  Cell[BoxData@ToBoxes[
+    ClearAll[mod2pi, angdiff, segUnit, endpointError, candLSL, candRSR, candLSR, candRSL, candRLR, candLRL,
+      DubinsShortest, SampleDubins];
+
+    mod2pi[a_] := Mod[a, 2 Pi];
+
+    angdiff[a_, b_] := Module[{d = Mod[a - b + Pi, 2 Pi] - Pi}, d];
+
+    segUnit[{x_, y_, th_}, st_, sl_] := Which[
+      st === "S", {x + sl Cos[th], y + sl Sin[th], th},
+      st === "L", {x + Sin[th + sl] - Sin[th], y - Cos[th + sl] + Cos[th], mod2pi[th + sl]},
+      st === "R", {x - Sin[th - sl] + Sin[th], y + Cos[th - sl] - Cos[th], mod2pi[th - sl]},
+      True, $Failed
+    ];
+
+    endpointError[alpha_, d_, beta_, seg_, {t_, p_, q_}] := Module[{pose},
+      pose = {0.0, 0.0, alpha};
+      pose = segUnit[pose, StringTake[seg, {1}], t];
+      pose = segUnit[pose, StringTake[seg, {2}], p];
+      pose = segUnit[pose, StringTake[seg, {3}], q];
+      Norm[pose[[{1, 2}]] - {d, 0.0}] + Abs[angdiff[pose[[3]], beta]]
+    ];
+
+    candLSL[alpha_, beta_, d_] := Module[{sa, sb, ca, cb, cab, tmp0, p2, p, tmp1, t, q},
+      sa = Sin[alpha]; sb = Sin[beta];
+      ca = Cos[alpha]; cb = Cos[beta];
+      cab = Cos[alpha - beta];
+      tmp0 = d + sa - sb;
+      p2 = 2 + d^2 - 2 cab + 2 d (sa - sb);
+      If[p2 < 0, Return[{}]];
+      p = Sqrt[p2];
+      tmp1 = ArcTan[cb - ca, tmp0];
+      t = mod2pi[-alpha + tmp1];
+      q = mod2pi[beta - tmp1];
+      {t, p, q}
+    ];
+
+    candRSR[alpha_, beta_, d_] := Module[{sa, sb, ca, cb, cab, tmp0, p2, p, tmp1, t, q},
+      sa = Sin[alpha]; sb = Sin[beta];
+      ca = Cos[alpha]; cb = Cos[beta];
+      cab = Cos[alpha - beta];
+      tmp0 = d - sa + sb;
+      p2 = 2 + d^2 - 2 cab + 2 d (-sa + sb);
+      If[p2 < 0, Return[{}]];
+      p = Sqrt[p2];
+      tmp1 = ArcTan[ca - cb, tmp0];
+      t = mod2pi[alpha - tmp1];
+      q = mod2pi[-beta + tmp1];
+      {t, p, q}
+    ];
+
+    candLSR[alpha_, beta_, d_] := Module[{sa, sb, ca, cb, cab, p2, p, tmp0, tmp1, t, q},
+      sa = Sin[alpha]; sb = Sin[beta];
+      ca = Cos[alpha]; cb = Cos[beta];
+      cab = Cos[alpha - beta];
+      p2 = -2 + d^2 + 2 cab + 2 d (sa + sb);
+      If[p2 < 0, Return[{}]];
+      p = Sqrt[p2];
+      tmp0 = ArcTan[-ca - cb, d + sa + sb];
+      tmp1 = ArcTan[-2, p];
+      t = mod2pi[-alpha + tmp0 - tmp1];
+      q = mod2pi[-beta + tmp0 - tmp1];
+      {t, p, q}
+    ];
+
+    candRSL[alpha_, beta_, d_] := Module[{sa, sb, ca, cb, cab, p2, p, tmp0, tmp1, t, q},
+      sa = Sin[alpha]; sb = Sin[beta];
+      ca = Cos[alpha]; cb = Cos[beta];
+      cab = Cos[alpha - beta];
+      p2 = -2 + d^2 + 2 cab - 2 d (sa + sb);
+      If[p2 < 0, Return[{}]];
+      p = Sqrt[p2];
+      tmp0 = ArcTan[ca + cb, d - sa - sb];
+      tmp1 = ArcTan[2, p];
+      t = mod2pi[alpha - tmp0 + tmp1];
+      q = mod2pi[beta - tmp0 + tmp1];
+      {t, p, q}
+    ];
+
+    candRLR[alpha_, beta_, d_] := Module[{sa, sb, ca, cb, cab, tmp0, p, tmp1, t, q},
+      sa = Sin[alpha]; sb = Sin[beta];
+      ca = Cos[alpha]; cb = Cos[beta];
+      cab = Cos[alpha - beta];
+      tmp0 = (6 - d^2 + 2 cab + 2 d (sa - sb))/8;
+      If[Abs[tmp0] > 1, Return[{}]];
+      p = mod2pi[2 Pi - ArcCos[tmp0]];
+      tmp1 = ArcTan[ca - cb, d - sa + sb];
+      t = mod2pi[alpha - tmp1 + p/2];
+      q = mod2pi[alpha - beta - t + p];
+      {t, p, q}
+    ];
+
+    candLRL[alpha_, beta_, d_] := candRLR[mod2pi[-alpha], mod2pi[-beta], d];
+
+    DubinsShortest[q0 : {x0_, y0_, th0_}, q1 : {x1_, y1_, th1_}, Rmin_?Positive] := Module[
+      {dx, dy, c0, s0, x, y, phi, d, theta, alpha, beta, cands, best = <||>, bestLen = Infinity, prm, err, L},
+      dx = x1 - x0; dy = y1 - y0;
+      c0 = Cos[th0]; s0 = Sin[th0];
+      x = (c0 dx + s0 dy)/Rmin;
+      y = (-s0 dx + c0 dy)/Rmin;
+      phi = mod2pi[th1 - th0];
+      d = Sqrt[x^2 + y^2];
+      theta = If[d > 0, ArcTan[y, x], 0.0];
+      alpha = mod2pi[-theta];
+      beta = mod2pi[phi - theta];
+
+      cands = {
+        {"LSL","LSL", candLSL},
+        {"RSR","RSR", candRSR},
+        {"LSR","LSR", candLSR},
+        {"RSL","RSL", candRSL},
+        {"RLR","RLR", candRLR},
+        {"LRL","LRL", candLRL}
+      };
+
+      Do[
+        prm = cands[[i,3]][alpha,beta,d];
+        If[prm === {} , Continue[]];
+        err = endpointError[alpha,d,beta,cands[[i,2]],prm];
+        If[err > 10^-6, Continue[]];
+        L = Rmin Total[prm];
+        If[L < bestLen,
+          bestLen = L;
+          best = <|"Type"->cands[[i,1]], "Seg"->cands[[i,2]], "Params"->prm, "Rmin"->Rmin, "Length"->L|>;
+        ];
+        ,
+        {i, Length[cands]}
+      ];
+      If[best === <||>, Return[$Failed], best]
+    ];
+
+    SampleDubins[q0 : {x0_, y0_, th0_}, path_Association, step_?Positive] := Module[
+      {seg = path["Seg"], prm = path["Params"], R = path["Rmin"], cur, pts = {}, lens, st, sl, L, n, ds, a, arc, da},
+      cur = {x0, y0, mod2pi[th0]};
+      AppendTo[pts, cur];
+      lens = prm;
+      Do[
+        st = StringTake[seg, {i}];
+        sl = lens[[i]];
+        If[st === "S",
+          L = sl R;
+          n = Max[1, Ceiling[L/step]];
+          ds = L/n;
+          Do[
+            cur = {cur[[1]] + ds Cos[cur[[3]]], cur[[2]] + ds Sin[cur[[3]]], cur[[3]]};
+            AppendTo[pts, cur],
+            {k, n}
+          ],
+          a = sl;
+          arc = a R;
+          n = Max[1, Ceiling[arc/step]];
+          da = a/n;
+          Do[
+            If[st === "L",
+              cur = {cur[[1]] + R (Sin[cur[[3]] + da] - Sin[cur[[3]]]),
+                     cur[[2]] + R (-Cos[cur[[3]] + da] + Cos[cur[[3]]]),
+                     mod2pi[cur[[3]] + da]},
+              cur = {cur[[1]] + R (-Sin[cur[[3]] - da] + Sin[cur[[3]]]),
+                     cur[[2]] + R (Cos[cur[[3]] - da] - Cos[cur[[3]]]),
+                     mod2pi[cur[[3]] - da]}
+            ];
+            AppendTo[pts, cur],
+            {k, n}
+          ]
+        ];
+        ,
+        {i, 3}
+      ];
+      pts
+    ];
+  ], "Input"],
+
+  Cell["Demo", "Section"],
+  Cell[BoxData@ToBoxes[
+    Module[{q0, q1, Rmin, path, pts},
+      q0 = {0.0, 0.0, 10 Degree};
+      q1 = {8.0, 4.0, 110 Degree};
+      Rmin = 2.0;
+
+      path = DubinsShortest[q0, q1, Rmin];
+      Print[path];
+
+      pts = SampleDubins[q0, path, 0.05];
+      ListLinePlot[pts[[All, {1, 2}]], AspectRatio -> Automatic, GridLines -> Automatic,
+        PlotLabel -> "Dubins feasible path (bounded curvature)"]
+    ]
+  ], "Input"]
+},
+WindowSize -> {1000, 800},
+StyleDefinitions -> "Default.nb"
+]

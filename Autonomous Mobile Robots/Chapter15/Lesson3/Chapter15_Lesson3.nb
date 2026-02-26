@@ -1,0 +1,117 @@
+(* ::Package:: *)
+
+(* Chapter15_Lesson3.nb
+   Dynamic Window Approach (DWA) — Wolfram Language reference notebook content.
+   Open this file in Mathematica.
+*)
+
+ClearAll["Global`*"];
+
+(* Configuration *)
+cfg = <|
+  "vMin" -> -0.2, "vMax" -> 1.0,
+  "wMin" -> -1.5, "wMax" -> 1.5,
+  "aMax" -> 0.8, "aBrake" -> 1.0, "alphaMax" -> 2.0,
+  "dt" -> 0.1, "T" -> 2.0,
+  "vRes" -> 0.05, "wRes" -> 0.1,
+  "rRobot" -> 0.3,
+  "wHeading" -> 0.4, "wClear" -> 0.4, "wSpeed" -> 0.2
+|>;
+
+wrapToPi[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+motionStep[s_, v_, w_, dt_] := Module[{x, y, th},
+  {x, y, th} = s[[{1, 2, 3}]];
+  {x + v Cos[th] dt, y + v Sin[th] dt, wrapToPi[th + w dt], v, w}
+];
+
+dynamicWindow[s_, cfg_] := Module[{v, w, dt, aBrake, aMax, alphaMax,
+   vL, vU, wL, wU},
+  {v, w} = s[[{4, 5}]];
+  dt = cfg["dt"]; aBrake = cfg["aBrake"]; aMax = cfg["aMax"]; alphaMax = cfg["alphaMax"];
+  vL = Max[cfg["vMin"], v - aBrake dt];
+  vU = Min[cfg["vMax"], v + aMax dt];
+  wL = Max[cfg["wMin"], w - alphaMax dt];
+  wU = Min[cfg["wMax"], w + alphaMax dt];
+  {vL, vU, wL, wU}
+];
+
+rollout[s0_, v_, w_, cfg_] := Module[{n, dt, s = s0},
+  n = Floor[cfg["T"]/cfg["dt"]];
+  dt = cfg["dt"];
+  NestList[motionStep[#, v, w, dt] &, s, n]
+];
+
+minClearance[traj_, obs_] := Module[{pts},
+  pts = traj[[All, {1, 2}]];
+  Min[Flatten[EuclideanDistance @@@ Tuples[{pts, obs}]]]
+];
+
+headingScore[traj_, goal_] := Module[{last, dir, err},
+  last = traj[[-1]];
+  dir = ArcTan @@ Reverse[(goal - last[[{1, 2}]])];
+  err = wrapToPi[dir - last[[3]]];
+  Cos[err]
+];
+
+speedScore[v_, cfg_] := (v - cfg["vMin"]) / Max[10^-9, (cfg["vMax"] - cfg["vMin"])];
+
+admissibleQ[v_, clear_, cfg_] := Module[{dStop},
+  dStop = (Max[0, v]^2) / Max[10^-9, 2 cfg["aBrake"]];
+  clear > (dStop + cfg["rRobot"])
+];
+
+normalize[list_] := Module[{lo = Min[list], hi = Max[list]},
+  If[Abs[hi - lo] < 10^-12, ConstantArray[0., Length[list]], (list - lo)/(hi - lo)]
+];
+
+dwaControl[s_, goal_, obs_, cfg_] := Module[
+  {vL, vU, wL, wU, vs, ws, cand = {}, traj, clear, h, sp, hs, cs, ss, J, best},
+  {vL, vU, wL, wU} = dynamicWindow[s, cfg];
+  vs = Range[vL, vU, cfg["vRes"]];
+  ws = Range[wL, wU, cfg["wRes"]];
+
+  Do[
+    traj = rollout[s, v, w, cfg];
+    clear = minClearance[traj, obs] - cfg["rRobot"];
+    If[admissibleQ[v, clear, cfg],
+      h = headingScore[traj, goal];
+      sp = speedScore[v, cfg];
+      AppendTo[cand, <|"h" -> h, "c" -> clear, "s" -> sp, "v" -> v, "w" -> w, "traj" -> traj|>]
+    ],
+    {v, vs}, {w, ws}
+  ];
+
+  If[cand === {}, Return[{0., 0., {s}}]];
+
+  hs = normalize[cand[[All, "h"]]];
+  cs = normalize[cand[[All, "c"]]];
+  ss = normalize[cand[[All, "s"]]];
+
+  J = cfg["wHeading"] hs + cfg["wClear"] cs + cfg["wSpeed"] ss;
+  best = Ordering[J, -1][[1]];
+  {cand[[best, "v"]], cand[[best, "w"]], cand[[best, "traj"]]}
+];
+
+(* Demo *)
+s = {0., 0., 0., 0., 0.};
+goal = {8., 6.};
+
+obs1 = Transpose[{Subdivide[2., 7., 14], ConstantArray[3., 15]}];
+obs2 = Transpose[{ConstantArray[4., 12], Subdivide[1., 5., 11]}];
+obs = Join[obs1, obs2];
+
+path = {s[[{1, 2}]]};
+Do[
+  {v, w, traj} = dwaControl[s, goal, obs, cfg];
+  s = motionStep[s, v, w, cfg["dt"]];
+  path = Append[path, s[[{1, 2}]]];
+  If[Norm[s[[{1, 2}]] - goal] < 0.3, Break[]],
+  {k, 1, 600}
+];
+
+Show[
+  ListLinePlot[path, PlotRange -> All, AspectRatio -> 1],
+  ListPlot[obs, PlotStyle -> PointSize[0.012]],
+  ListPlot[{goal}, PlotMarkers -> {"\[Star]", 16}]
+]

@@ -1,0 +1,158 @@
+(* Chapter15_Lesson4.nb
+   Timed-Elastic-Band (TEB) local planning — educational nonlinear least-squares in Wolfram Language.
+
+   This is plain-text Wolfram Language content saved with .nb extension for portability.
+   You can paste into a Mathematica notebook and evaluate.
+*)
+
+ClearAll["Global`*"];
+
+wrapToPi[a_] := Mod[a + Pi, 2 Pi] - Pi;
+hinge[x_] := Max[0, x];
+
+(* Scenario *)
+start = {0.0, 0.0, 0.0};  (* x,y,theta *)
+goal  = {4.0, 2.5, 0.0};
+
+obstacles = {
+  {2.0, 1.2, 0.45},
+  {2.8, 2.0, 0.35}
+};
+
+N = 18;
+nMid = N - 2;
+nDt  = N - 1;
+
+w = <|
+  "wSmooth" -> 10.0, "wAlign" -> 2.0, "wTime" -> 1.0, "wObst" -> 50.0,
+  "wV" -> 10.0, "wW" -> 5.0, "wA" -> 1.0, "wAlpha" -> 1.0
+|>;
+
+lim = <|
+  "vMax" -> 0.8, "wMax" -> 1.2, "aMax" -> 0.8, "alphaMax" -> 1.5,
+  "dtMin" -> 0.05, "dtMax" -> 0.6, "dMin" -> 0.35, "robotRadius" -> 0.20
+|>;
+
+(* Initial guess (straight line) *)
+xs0 = Subdivide[start[[1]], goal[[1]], N - 1];
+ys0 = Subdivide[start[[2]], goal[[2]], N - 1];
+th0 = Table[
+  If[i == 1, start[[3]],
+    If[i == N, goal[[3]],
+      ArcTan[ys0[[i + 1]] - ys0[[i]], xs0[[i + 1]] - xs0[[i]]]
+    ]
+  ],
+  {i, 1, N}
+];
+dt0 = ConstantArray[0.22, N - 1];
+
+(* Decision variables: xMid, yMid, thMid, dt *)
+xMidVars  = Array[x, nMid];
+yMidVars  = Array[y, nMid];
+thMidVars = Array[th, nMid];
+dtVars    = Array[dt, nDt];
+
+xs := Join[{start[[1]]}, xMidVars, {goal[[1]]}];
+ys := Join[{start[[2]]}, yMidVars, {goal[[2]]}];
+ths := Join[{start[[3]]}, thMidVars, {goal[[3]]}];
+
+(* Residual vector *)
+residuals := Module[{res = {}, v, ww, dmin, px, py, d},
+  (* dt objective + bounds *)
+  Do[
+    AppendTo[res, Sqrt[w["wTime"]] dtVars[[i]]];
+    AppendTo[res, Sqrt[w["wTime"]] hinge[lim["dtMin"] - dtVars[[i]]]];
+    AppendTo[res, Sqrt[w["wTime"]] hinge[dtVars[[i]] - lim["dtMax"]]];
+    , {i, 1, nDt}
+  ];
+
+  (* smoothness *)
+  Do[
+    AppendTo[res, Sqrt[w["wSmooth"]] (xs[[i + 1]] - 2 xs[[i]] + xs[[i - 1]])];
+    AppendTo[res, Sqrt[w["wSmooth"]] (ys[[i + 1]] - 2 ys[[i]] + ys[[i - 1]])];
+    , {i, 2, N - 1}
+  ];
+
+  (* align *)
+  Do[
+    AppendTo[res,
+      Sqrt[w["wAlign"]] Sin[
+        wrapToPi[ths[[i]] - ArcTan[ys[[i + 1]] - ys[[i]], xs[[i + 1]] - xs[[i]]]]
+      ]
+    ];
+    , {i, 1, N - 1}
+  ];
+
+  (* obstacle clearance *)
+  Do[
+    px = xs[[i]]; py = ys[[i]];
+    dmin = Min@Table[
+      Sqrt[(px - obstacles[[k, 1]])^2 + (py - obstacles[[k, 2]])^2] - (obstacles[[k, 3]] + lim["robotRadius"]),
+      {k, 1, Length[obstacles]}
+    ];
+    AppendTo[res, Sqrt[w["wObst"]] hinge[lim["dMin"] - dmin]];
+    , {i, 1, N}
+  ];
+
+  (* v,w bounds *)
+  v = Table[
+    Sqrt[(xs[[i + 1]] - xs[[i]])^2 + (ys[[i + 1]] - ys[[i]])^2] / Max[dtVars[[i]], 10^-6],
+    {i, 1, N - 1}
+  ];
+  ww = Table[
+    wrapToPi[ths[[i + 1]] - ths[[i]]] / Max[dtVars[[i]], 10^-6],
+    {i, 1, N - 1}
+  ];
+  Do[
+    AppendTo[res, Sqrt[w["wV"]] hinge[v[[i]] - lim["vMax"]]];
+    AppendTo[res, Sqrt[w["wW"]] hinge[Abs[ww[[i]]] - lim["wMax"]]];
+    , {i, 1, N - 1}
+  ];
+
+  (* accel bounds *)
+  Do[
+    With[{dtm = Max[0.5 (dtVars[[i]] + dtVars[[i + 1]]), 10^-6]},
+      AppendTo[res, Sqrt[w["wA"]] hinge[Abs[(v[[i + 1]] - v[[i]])/dtm] - lim["aMax"]]];
+      AppendTo[res, Sqrt[w["wAlpha"]] hinge[Abs[(ww[[i + 1]] - ww[[i]])/dtm] - lim["alphaMax"]]];
+    ];
+    , {i, 1, N - 2}
+  ];
+
+  res
+];
+
+(* Objective: 0.5 ||r||^2 *)
+objective := 0.5 Total[residuals^2];
+
+(* Initial values *)
+initRules =
+  Join[
+    Thread[xMidVars -> xs0[[2 ;; -2]]],
+    Thread[yMidVars -> ys0[[2 ;; -2]]],
+    Thread[thMidVars -> th0[[2 ;; -2]]],
+    Thread[dtVars -> dt0]
+  ];
+
+vars = Join[xMidVars, yMidVars, thMidVars, dtVars];
+
+sol = FindMinimum[objective, initRules, vars, Method -> "LevenbergMarquardt"];
+
+Print["Objective min: ", sol[[1]]];
+
+(* Extract and plot *)
+rules = sol[[2]];
+xsSol = xs /. rules;
+ysSol = ys /. rules;
+
+Show[
+  Graphics[{
+    Thick, Line[Transpose[{xsSol, ysSol}]],
+    Black, PointSize[0.02], Point[{start[[1]], start[[2]]}],
+    Black, PointSize[0.02], Point[{goal[[1]], goal[[2]]}],
+    Table[
+      {Dashed, Circle[{obstacles[[k, 1]], obstacles[[k, 2]]}, obstacles[[k, 3]]]},
+      {k, 1, Length[obstacles]}
+    ]
+  }],
+  Axes -> True, AspectRatio -> 1, PlotRange -> All
+]

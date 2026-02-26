@@ -1,0 +1,152 @@
+\
+    (* Chapter8_Lesson5.nb
+       Autonomous Mobile Robots — Chapter 8 (Particle-Filter Localization)
+       Lesson 5 Lab: Implement MCL on a Map
+       Plain-text Notebook expression (open in Mathematica).
+    *)
+    Notebook[{
+      Cell["Chapter 8 — Lesson 5: MCL on a Map (Lab)", "Title"],
+      Cell["Self-contained Monte Carlo Localization demo (occupancy grid + ray casting + resampling).", "Text"],
+      Cell[BoxData @ ToBoxes @ Module[
+        {res=0.05,W=220,H=160,occ,worldToGrid,isOcc,rayCast,beams,rMax=6.0,N=1200,
+         P,w,wrap,sysResample,neff,simulate,odom,zScan,motion,sensor,estimate,
+         true={2.0,2.0,0.0},dt=0.25,T=180,v=0.35,om=0.25,trueHist={},estHist={},i},
+
+        wrap[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+        occ = ConstantArray[0,{H,W}];
+        occ[[1,All]]=1; occ[[H,All]]=1; occ[[All,1]]=1; occ[[All,W]]=1;
+        occ[[31;;55,41;;160]]=1;
+        occ[[86;;110,21;;90]]=1;
+        occ[[86;;140,141;;170]]=1;
+        occ[[16;;40,181;;205]]=1;
+
+        worldToGrid[{x_,y_}] := {Floor[x/res]+1, Floor[y/res]+1};
+        isOcc[{gx_,gy_}] := (gx<1 || gx>W || gy<1 || gy>H || occ[[gy,gx]]==1);
+
+        rayCast[{x_,y_,th_}, rmax_] := Module[{r=0.,step=0.02,g},
+          While[r<rmax,
+            g=worldToGrid[{x + r Cos[th], y + r Sin[th]}];
+            If[isOcc[g], Return[r]];
+            r += step;
+          ];
+          rmax
+        ];
+
+        beams = N@Subdivide[-Pi/2, Pi/2, 12];
+
+        (* init particles uniformly on free cells *)
+        With[{free = Position[occ,0]},
+          P = Table[
+            Module[{c = free[[RandomInteger[{1,Length[free]}]]]},
+              {(c[[2]]-1+0.5)res,(c[[1]]-1+0.5)res,RandomReal[{-Pi,Pi}]}
+            ],
+            {N}
+          ];
+        ];
+        w = ConstantArray[1./N,N];
+
+        sysResample[ww_] := Module[{u0=RandomReal[]/Length[ww],cdf=Accumulate[ww],j=1},
+          Table[
+            With[{u=u0+(k-1)/Length[ww]},
+              While[u>cdf[[j]] && j<Length[ww], j++];
+              j
+            ],
+            {k,Length[ww]}
+          ]
+        ];
+
+        neff[ww_] := 1.0/Total[ww^2];
+
+        simulate[{x_,y_,th_},v_,om_,dt_] := {x + v Cos[th] dt, y + v Sin[th] dt, wrap[th + om dt]};
+
+        odom[p1_,p2_] := Module[{dx=p2[[1]]-p1[[1]],dy=p2[[2]]-p1[[2]],dT,dir,dR1,dR2},
+          dT = Sqrt[dx^2 + dy^2];
+          dir = ArcTan[dx,dy]; (* atan2(dy,dx) *)
+          dR1 = If[dT>10^-9, wrap[dir - p1[[3]]], 0.0];
+          dR2 = wrap[p2[[3]] - p1[[3]] - dR1];
+          {dR1,dT,dR2}
+        ];
+
+        zScan[p_,sig_] := Table[
+          Clip[rayCast[{p[[1]],p[[2]],p[[3]]+beams[[k]]}, rMax] + RandomVariate[NormalDistribution[0,sig]], {0,rMax}],
+          {k,Length[beams]}
+        ];
+
+        motion[{dR1_,dT_,dR2_}] := Module[{a1=0.03,a2=0.01,a3=0.03,a4=0.01,sr1,st,sr2,dr1,dtp,dr2,xn,yn,thn,g},
+          sr1=Sqrt[a1 dR1^2 + a2 dT^2];
+          st =Sqrt[a3 dT^2 + a4 (dR1^2 + dR2^2)];
+          sr2=Sqrt[a1 dR2^2 + a2 dT^2];
+          P = Table[
+            Module[{p=P[[k]]},
+              dr1 = dR1 + RandomVariate[NormalDistribution[0,sr1]];
+              dtp = dT  + RandomVariate[NormalDistribution[0,st]];
+              dr2 = dR2 + RandomVariate[NormalDistribution[0,sr2]];
+              xn = p[[1]] + dtp Cos[p[[3]] + dr1];
+              yn = p[[2]] + dtp Sin[p[[3]] + dr1];
+              thn = wrap[p[[3]] + dr1 + dr2];
+              g = worldToGrid[{xn,yn}];
+              If[isOcc[g], p, {xn,yn,thn}]
+            ],
+            {k,N}
+          ];
+        ];
+
+        sensor[z_] := Module[{sigma=0.20,zHit=0.85,zRand=0.15,norm,unif,invs2,logw,zexp,dz,prob},
+          norm = 1/(Sqrt[2 Pi] sigma); unif = 1/rMax; invs2 = 1/(sigma^2);
+          logw = ConstantArray[0.0,N];
+          Do[
+            zexp = Table[rayCast[{P[[k,1]],P[[k,2]],P[[k,3]]+beams[[bi]]}, rMax], {k,N}];
+            dz = z[[bi]] - zexp;
+            prob = zHit*norm*Exp[-0.5 dz^2 invs2] + zRand*unif;
+            logw = logw + Log[prob + 10^-12];
+            ,
+            {bi,Length[beams]}
+          ];
+          logw = logw - Max[logw];
+          w = Exp[logw]; w = w/Total[w];
+        ];
+
+        estimate[] := Module[{mx,my,s,c,th},
+          mx = Total[w * P[[All,1]]];
+          my = Total[w * P[[All,2]]];
+          s  = Total[w * Sin[P[[All,3]]]];
+          c  = Total[w * Cos[P[[All,3]]]];
+          th = ArcTan[c,s];
+          {mx,my,th}
+        ];
+
+        Do[
+          Module[{next=simulate[true,v,om,dt],g,od,z},
+            g = worldToGrid[{next[[1]],next[[2]]}];
+            If[isOcc[g], next = simulate[true,0.0,0.8,dt]];
+            od = odom[true,next];
+            z  = zScan[next,0.05];
+
+            motion[od];
+            sensor[z];
+
+            If[neff[w] < 0.55 N,
+              Module[{idx = sysResample[w], k = Round[0.03 N], free = Position[occ,0]},
+                P = P[[idx]];
+                w = ConstantArray[1./N,N];
+                Do[
+                  With[{c = free[[RandomInteger[{1,Length[free]}]]]},
+                    P[[j]] = {(c[[2]]-1+0.5)res,(c[[1]]-1+0.5)res,RandomReal[{-Pi,Pi}]};
+                  ],
+                  {j,1,k}
+                ];
+              ]
+            ];
+
+            AppendTo[trueHist,next];
+            AppendTo[estHist,estimate[]];
+            true = next;
+          ],
+          {i,1,T}
+        ];
+
+        ListLinePlot[{trueHist[[All,{1,2}]], estHist[[All,{1,2}]]},
+          PlotLegends->{"true","MCL"}, AspectRatio->Automatic, ImageSize->Large]
+      ], "Input"]
+    }]

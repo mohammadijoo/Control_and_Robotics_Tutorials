@@ -1,0 +1,164 @@
+(* Chapter1_Lesson4.nb
+   Wolfram Mathematica notebook (plain-text representation).
+   It simulates a 2D unicycle with noisy odometry and range-bearing landmark measurements,
+   then performs a Gauss-Newton/WLS correction step each time.
+*)
+
+Notebook[{
+  Cell["Chapter 1 — Lesson 4: Sensing–Estimation–Navigation Pipeline (Demo)", "Title"],
+  Cell["This notebook is a minimal, self-contained simulation of a sensing–estimation–navigation loop.", "Text"],
+
+  Cell[BoxData[
+    ToBoxes[
+      ClearAll["Global`*"];
+      wrapAngle[a_] := Module[{x = Mod[a + Pi, 2 Pi]}, If[x < 0, x + 2 Pi, x] - Pi];
+
+      unicycleStep[x_, v_, w_, dt_] := Module[{th = x[[3]]},
+        {x[[1]] + v dt Cos[th], x[[2]] + v dt Sin[th], wrapAngle[x[[3]] + w dt]}
+      ];
+
+      measModel[x_, lm_] := Module[{dx = lm[[1]] - x[[1]], dy = lm[[2]] - x[[2]], r, b},
+        r = Sqrt[dx^2 + dy^2];
+        b = wrapAngle[ArcTan[dx, dy] - x[[3]]];
+        {r, b}
+      ];
+
+      measJacobian[x_, lm_] := Module[{dx = lm[[1]] - x[[1]], dy = lm[[2]] - x[[2]], q, r},
+        q = Max[dx^2 + dy^2, 10^-12];
+        r = Sqrt[q];
+        {
+          {-dx/r, -dy/r, 0},
+          {dy/q, -dx/q, -1}
+        }
+      ];
+    ]
+  ], "Input"],
+
+  Cell["Simulation parameters", "Section"],
+  Cell[BoxData[
+    ToBoxes[
+      SeedRandom[7];
+      landmarks = {{5., 0.}, {6., 6.}, {0., 6.}};
+      dt = 0.1; N = 350;
+
+      xTrue = {0., 0., 0.};
+      xHat  = {0., 0., 0.};
+
+      P = DiagonalMatrix[{0.15^2, 0.15^2, (8 Degree)^2}];
+
+      sigmaV = 0.08;
+      sigmaW = 3 Degree;
+      sigmaR = 0.12;
+      sigmaB = 2 Degree;
+
+      goal = {7., 7.};
+      kHeading = 1.6;
+      vMax = 0.9;
+
+      R = DiagonalMatrix[{sigmaR^2, sigmaB^2}];
+    ]
+  ], "Input"],
+
+  Cell["Iterated WLS update (prior + stacked measurements)", "Section"],
+  Cell[BoxData[
+    ToBoxes[
+      wlsUpdateIterated[xPrior_, PPrior_, zList_, lmList_, Rmeas_, iters_: 2] :=
+        Module[{m, z, Rbig, Rinv, Pinv, x, h, H, res, A, b, delta},
+          m = Length[zList];
+          If[m == 0, Return[{xPrior, PPrior}]];
+
+          z = Flatten[zList];
+          Rbig = KroneckerProduct[IdentityMatrix[m], Rmeas];
+          Rinv = Inverse[Rbig];
+          Pinv = Inverse[PPrior];
+
+          x = xPrior;
+          Do[
+            h = Flatten[measModel[x, #] & /@ lmList];
+            H = ArrayFlatten[Partition[measJacobian[x, lmList[[#]]], 1] & /@ Range[m]];
+
+            res = z - h;
+            (* wrap each bearing residual *)
+            Do[res[[2 i]] = wrapAngle[res[[2 i]]], {i, 1, m}];
+
+            A = Pinv + Transpose[H].Rinv.H;
+            b = Transpose[H].Rinv.res + Pinv.(xPrior - x);
+
+            delta = LinearSolve[A, b];
+            x = x + delta;
+            x[[3]] = wrapAngle[x[[3]]];
+          , {iters}];
+
+          (* posterior covariance at final linearization point *)
+          H = ArrayFlatten[Partition[measJacobian[x, lmList[[#]]], 1] & /@ Range[m]];
+          {x, Inverse[Pinv + Transpose[H].Rinv.H]}
+        ];
+    ]
+  ], "Input"],
+
+  Cell["Main loop", "Section"],
+  Cell[BoxData[
+    ToBoxes[
+      histTrue = ConstantArray[0., {N, 3}];
+      histHat  = ConstantArray[0., {N, 3}];
+
+      Do[
+        (* navigation uses estimate *)
+        dx = goal[[1]] - xHat[[1]];
+        dy = goal[[2]] - xHat[[2]];
+        dist = Sqrt[dx^2 + dy^2];
+        desired = ArcTan[dx, dy];
+        headingErr = wrapAngle[desired - xHat[[3]]];
+
+        vCmd = vMax Tanh[dist];
+        wCmd = kHeading headingErr;
+
+        (* true motion with mild slip *)
+        slip = (0.35 Degree) RandomVariate[NormalDistribution[0, 1]];
+        xTrue = unicycleStep[xTrue, vCmd, wCmd + slip/dt, dt];
+
+        (* odometry *)
+        vMeas = vCmd + sigmaV RandomVariate[NormalDistribution[0, 1]];
+        wMeas = wCmd + sigmaW RandomVariate[NormalDistribution[0, 1]];
+
+        xPrior = unicycleStep[xHat, vMeas, wMeas, dt];
+
+        th = xHat[[3]];
+        F = {{1, 0, -vMeas dt Sin[th]},
+             {0, 1,  vMeas dt Cos[th]},
+             {0, 0,  1}};
+
+        Q = DiagonalMatrix[{(sigmaV dt)^2, (sigmaV dt)^2, (sigmaW dt)^2}];
+        PPrior = F.P.Transpose[F] + Q;
+
+        (* measurements: use landmarks within range *)
+        maxRange = 8.;
+        zList = {};
+        lmList = {};
+        Do[
+          zTrue = measModel[xTrue, lm];
+          If[zTrue[[1]] <= maxRange,
+            zNoisy = {zTrue[[1]] + sigmaR RandomVariate[NormalDistribution[0, 1]],
+                      wrapAngle[zTrue[[2]] + sigmaB RandomVariate[NormalDistribution[0, 1]]]};
+            zList = Append[zList, zNoisy];
+            lmList = Append[lmList, lm];
+          ];
+        , {lm, landmarks}];
+
+        {xHat, P} = wlsUpdateIterated[xPrior, PPrior, zList, lmList, R, 2];
+
+        histTrue[[k]] = xTrue;
+        histHat[[k]] = xHat;
+      , {k, 1, N}];
+
+      ListLinePlot[{histTrue[[All, {1, 2}]], histHat[[All, {1, 2}]]},
+        PlotLegends -> {"true", "estimated"},
+        AspectRatio -> 1,
+        GridLines -> Automatic,
+        PlotRange -> All,
+        AxesLabel -> {"x (m)", "y (m)"},
+        PlotLabel -> "Sensing–Estimation–Navigation loop (demo)"
+      ]
+    ]
+  ], "Input"]
+}]

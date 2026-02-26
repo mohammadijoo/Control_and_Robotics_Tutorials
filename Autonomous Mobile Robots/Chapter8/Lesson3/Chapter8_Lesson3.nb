@@ -1,0 +1,184 @@
+
+Notebook[{
+ Cell["Chapter 8, Lesson 3 — Sensor Likelihoods for LiDAR and Vision", "Title"],
+ Cell["Chapter8_Lesson3.nb", "Subtitle"],
+ Cell["This notebook demonstrates a likelihood-field LiDAR model and a bearing-only vision landmark model, plus log-sum-exp normalization.", "Text"],
+
+ Cell[BoxData[
+  RowBox[{"(*", " ", "Map: binary occupancy grid (1=obstacle, 0=free)", " ", "*)"}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"W", "=", "120"}], ";",
+   RowBox[{"H", "=", "120"}], ";",
+   RowBox[{"res", "=", "0.05"}], ";",
+   RowBox[{"origin", "=", RowBox[{"{", RowBox[{"-3.0", ",", "-3.0"}], "}"}]}], ";",
+   "\n",
+   RowBox[{"occ", "=", RowBox[{"ConstantArray", "[", RowBox[{"0", ",", RowBox[{"{", RowBox[{"H", ",", "W"}], "}"}]}], "]"}]}], ";",
+   "\n",
+   RowBox[{"(* wall *)"}],
+   RowBox[{"Do", "[", RowBox[{RowBox[{RowBox[{"occ", "[", RowBox[{"[", RowBox[{"61", ",", "gx"}], "]"}], "]"}], "=", "1"}], ",",
+     RowBox[{"{", RowBox[{"gx", ",", "11", ",", "110"}], "}"}]}], "]"}], ";",
+   "\n",
+   RowBox[{"(* pillar *)"}],
+   RowBox[{"Do", "[",
+     RowBox[{RowBox[{RowBox[{"occ", "[", RowBox[{"[", RowBox[{"gy", ",", "gx"}], "]"}], "]"}], "=", "1"}], ",",
+      RowBox[{"{", RowBox[{"gy", ",", "21", ",", "30"}], "}"}], ",",
+      RowBox[{"{", RowBox[{"gx", ",", "86", ",", "95"}], "}"}]}], "]"}], ";"
+  }]], "Input"],
+
+ Cell["Distance transform (requires DistanceTransform in your Mathematica version).", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"img", "=", RowBox[{"Image", "[", RowBox[{"occ", ",", "\"Bit\""}], "]"}]}], ";",
+   "\n",
+   RowBox[{"distImg", "=", RowBox[{"DistanceTransform", "[", "img", "]"}]}], ";",
+   "\n",
+   RowBox[{"dist", "=", RowBox[{"ImageData", "[", "distImg", "]"}]}], ";",
+   "\n",
+   RowBox[{"distM", "=", RowBox[{"dist", "*", "res"}]}], ";"
+  }]], "Input"],
+
+ Cell["Utility functions.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"wrapToPi", "[", "a_", "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{RowBox[{"{", "b", "}"}], ",",
+     RowBox[{
+      RowBox[{"b", "=", RowBox[{"Mod", "[", RowBox[{RowBox[{"a", "+", "Pi"}], ",", RowBox[{"2", "Pi"}]}], "]"}]}], ";",
+      RowBox[{"b", "-", "Pi"}]}]}], "]"}]}]], "Input"],
+
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"logSumExp", "[", "v_List", "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{RowBox[{"{", RowBox[{"m", ",", "s"}], "}"}], ",",
+     RowBox[{
+      RowBox[{"m", "=", RowBox[{"Max", "[", "v", "]"}]}], ";",
+      RowBox[{"s", "=", RowBox[{"Total", "[", RowBox[{"Exp", "[", RowBox[{"v", "-", "m"}], "]"}], "]"}]}], ";",
+      RowBox[{"m", "+", RowBox[{"Log", "[", "s", "]"}]}]}]}], "]"}]}]], "Input"],
+
+ Cell["LiDAR likelihood field log-likelihood.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"lidarLogLikelihood", "[",
+    RowBox[{"pose_", ",", "ranges_", ",", "angles_", ",", "zMax_", ",", "sigmaHit_", ",", "wHit_", ",", "wRand_", ",", "maxDist_"}], "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{
+     RowBox[{"{", RowBox[{"x", ",", "y", ",", "th", ",", "sig2", ",", "invZ", ",", "ll", ",", "n"}], "}"}], ",",
+     RowBox[{
+      RowBox[{"x", "=", RowBox[{"pose", "[", RowBox[{"[", "1", "]"}], "]"}]}], ";",
+      RowBox[{"y", "=", RowBox[{"pose", "[", RowBox[{"[", "2", "]"}], "]"}]}], ";",
+      RowBox[{"th", "=", RowBox[{"pose", "[", RowBox[{"[", "3", "]"}], "]"}]}], ";",
+      RowBox[{"sig2", "=", RowBox[{"sigmaHit", "^", "2"}]}], ";",
+      RowBox[{"invZ", "=", RowBox[{"1.0", "/", "zMax"}]}], ";",
+      RowBox[{"ll", "=", "0.0"}], ";",
+      RowBox[{"n", "=", RowBox[{"Min", "[", RowBox[{RowBox[{"Length", "[", "ranges", "]"}], ",", RowBox[{"Length", "[", "angles", "]"}]}], "]"}]}], ";",
+      "\n",
+      RowBox[{"Do", "[",
+       RowBox[{
+        RowBox[{"Module", "[", RowBox[{
+          RowBox[{"{", RowBox[{"z", ",", "a", ",", "wx", ",", "wy", ",", "gx", ",", "gy", ",", "inside", ",", "d", ",", "pHit", ",", "p"}], "}"}], ",",
+          RowBox[{
+           RowBox[{"z", "=", RowBox[{"Clip", "[", RowBox[{RowBox[{"ranges", "[", RowBox[{"[", "k", "]"}], "]"}], ",", RowBox[{"{", RowBox[{"0.0", ",", "zMax"}], "}"}]}], "]"}]}], ";",
+           RowBox[{"a", "=", RowBox[{"th", "+", RowBox[{"angles", "[", RowBox[{"[", "k", "]"}], "]"}]}]}], ";",
+           RowBox[{"wx", "=", RowBox[{"x", "+", RowBox[{"z", "*", RowBox[{"Cos", "[", "a", "]"}]}]}]}], ";",
+           RowBox[{"wy", "=", RowBox[{"y", "+", RowBox[{"z", "*", RowBox[{"Sin", "[", "a", "]"}]}]}]}], ";",
+           RowBox[{"gx", "=", RowBox[{"Floor", "[", RowBox[{RowBox[{"(", RowBox[{"wx", "-", RowBox[{"origin", "[", RowBox[{"[", "1", "]"}], "]"}]}], ")"}], "/", "res"}], "]"}], "+", "1"}]}], ";",
+           RowBox[{"gy", "=", RowBox[{"Floor", "[", RowBox[{RowBox[{"(", RowBox[{"wy", "-", RowBox[{"origin", "[", RowBox[{"[", "2", "]"}], "]"}]}], ")"}], "/", "res"}], "]"}], "+", "1"}]}], ";",
+           RowBox[{"inside", "=", RowBox[{"And", "[", RowBox[{RowBox[{"1", "<=", "gx", "<=", "W"}], ",", RowBox[{"1", "<=", "gy", "<=", "H"}]}], "]"}]}], ";",
+           RowBox[{"d", "=", RowBox[{"If", "[", RowBox[{"inside", ",", RowBox[{"Min", "[", RowBox[{"maxDist", ",", RowBox[{"distM", "[", RowBox[{"[", RowBox[{"gy", ",", "gx"}], "]"}], "]"}]}], "]"}], ",", "maxDist"}], "]"}]}], ";",
+           RowBox[{"pHit", "=", RowBox[{"Exp", "[", RowBox[{RowBox[{"-", RowBox[{"d", "^", "2"}]}], "/", RowBox[{"(", RowBox[{"2.0", "*", "sig2"}], ")"}]}], "]"}]}], ";",
+           RowBox[{"p", "=", RowBox[{"wHit", "*", "pHit", "+", RowBox[{"wRand", "*", "invZ"}]}]}], ";",
+           RowBox[{"ll", "=", RowBox[{"ll", "+", RowBox[{"Log", "[", RowBox[{"Max", "[", RowBox[{"p", ",", "1*^-12"}], "]"}], "]"}]}]}], ";"
+          }]}], "]"}], ",",
+        RowBox[{"{", RowBox[{"k", ",", "1", ",", "n"}], "}"}]}], "]"}], ";",
+      "ll"
+     }]}], "]"}]}]], "Input"],
+
+ Cell["Vision bearing-only landmark likelihood.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"visionLogLikelihood", "[", RowBox[{"pose_", ",", "obs_", ",", "landmarks_Association", ",", "sigma_", ",", "eps_"}], "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{
+     RowBox[{"{", RowBox[{"x", ",", "y", ",", "th", ",", "sig2", ",", "norm", ",", "uni", ",", "ll"}], "}"}], ",",
+     RowBox[{
+      RowBox[{"x", "=", RowBox[{"pose", "[", RowBox[{"[", "1", "]"}], "]"}]}], ";",
+      RowBox[{"y", "=", RowBox[{"pose", "[", RowBox[{"[", "2", "]"}], "]"}]}], ";",
+      RowBox[{"th", "=", RowBox[{"pose", "[", RowBox[{"[", "3", "]"}], "]"}]}], ";",
+      RowBox[{"sig2", "=", RowBox[{"sigma", "^", "2"}]}], ";",
+      RowBox[{"norm", "=", RowBox[{"1.0", "/", RowBox[{"Sqrt", "[", RowBox[{"2.0", "*", "Pi", "*", "sig2"}], "]"}]}]}], ";",
+      RowBox[{"uni", "=", RowBox[{"1.0", "/", RowBox[{"(", RowBox[{"2.0", "*", "Pi"}], ")"}]}]}], ";",
+      RowBox[{"ll", "=", "0.0"}], ";",
+      "\n",
+      RowBox[{"Do", "[",
+       RowBox[{
+        RowBox[{"Module", "[", RowBox[{
+          RowBox[{"{", RowBox[{"id", ",", "bearingMeas", ",", "lm", ",", "lx", ",", "ly", ",", "pred", ",", "innov", ",", "pIn", ",", "p"}], "}"}], ",",
+          RowBox[{
+           RowBox[{"id", "=", RowBox[{"obs", "[", RowBox[{"[", RowBox[{"k", ",", "1"}], "]"}], "]"}]}], ";",
+           RowBox[{"bearingMeas", "=", RowBox[{"obs", "[", RowBox[{"[", RowBox[{"k", ",", "2"}], "]"}], "]"}]}], ";",
+           RowBox[{"If", "[", RowBox[{RowBox[{"KeyExistsQ", "[", RowBox[{"landmarks", ",", "id"}], "]"}], ",",
+             RowBox[{
+              RowBox[{"lm", "=", RowBox[{"landmarks", "[", "id", "]"}]}], ";",
+              RowBox[{"lx", "=", RowBox[{"lm", "[", RowBox[{"[", "1", "]"}], "]"}]}], ";",
+              RowBox[{"ly", "=", RowBox[{"lm", "[", RowBox[{"[", "2", "]"}], "]"}]}], ";",
+              RowBox[{"pred", "=", RowBox[{"wrapToPi", "[", RowBox[{RowBox[{"ArcTan", "[", RowBox[{RowBox[{"lx", "-", "x"}], ",", RowBox[{"ly", "-", "y"}]}], "]"}], "-", "th"}], "]"}]}], ";",
+              RowBox[{"innov", "=", RowBox[{"wrapToPi", "[", RowBox[{"bearingMeas", "-", "pred"}], "]"}]}], ";",
+              RowBox[{"pIn", "=", RowBox[{"norm", "*", RowBox[{"Exp", "[", RowBox[{RowBox[{"-", RowBox[{"innov", "^", "2"}]}], "/", RowBox[{"(", RowBox[{"2.0", "*", "sig2"}], ")"}]}], "]"}]}]}], ";",
+              RowBox[{"p", "=", RowBox[{RowBox[{"(", RowBox[{"1.0", "-", "eps"}], ")"}], "*", "pIn", "+", RowBox[{"eps", "*", "uni"}]}]}], ";"
+             }],
+             RowBox[{"p", "=", "uni"}]
+            ]"}], "]"}], ";",
+           RowBox[{"ll", "=", RowBox[{"ll", "+", RowBox[{"Log", "[", RowBox[{"Max", "[", RowBox[{"p", ",", "1*^-15"}], "]"}], "]"}]}]}], ";"
+          }]}], "]"}], ",",
+        RowBox[{"{", RowBox[{"k", ",", "1", ",", RowBox[{"Length", "[", "obs", "]"}]}], "}"}]}], "]"}], ";",
+      "ll"
+     }]}], "]"}]}]], "Input"],
+
+ Cell["Demo: compute weights for three particles.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"particles", "=", RowBox[{"{",
+    RowBox[{
+     RowBox[{"{", RowBox[{"-0.5", ",", "-0.8", ",", RowBox[{"90", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"-0.2", ",", "-0.6", ",", RowBox[{"88", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"0.8", ",", "0.1", ",", RowBox[{"30", "Degree"}]}], "}"}]
+    }], "}"}]}], ";",
+   "\n",
+   RowBox[{"ranges", "=", RowBox[{"{", RowBox[{"2.8", ",", "3.0", ",", "3.2", ",", "3.1", ",", "3.0", ",", "3.2", ",", "2.9", ",", "2.7", ",", "2.6"}], "}"}]}], ";",
+   "\n",
+   RowBox[{"angles", "=", RowBox[{"Table", "[", RowBox[{RowBox[{"(-40", "+", RowBox[{"80", "*", RowBox[{"(", RowBox[{"i", "/", "8"}], ")"}]}]}], ")"}], "Degree"}], ",", RowBox[{"{", RowBox[{"i", ",", "0", ",", "8"}], "}"}]}], "]"}]}], ";",
+   "\n",
+   RowBox[{"landmarks", "=", RowBox[{"<|", RowBox[{"1", "->", RowBox[{"{", RowBox[{"-1.0", ",", "0.0"}], "}"}], ",", "2", "->", RowBox[{"{", RowBox[{"1.0", ",", "0.5"}], "}"}], ",", "3", "->", RowBox[{"{", RowBox[{"0.0", ",", RowBox[{"-1.0"}]}], "}"}]}], "|>"}]}], ";",
+   "\n",
+   RowBox[{"obs", "=", RowBox[{"{", RowBox[{
+     RowBox[{"{", RowBox[{"1", ",", RowBox[{"70", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"2", ",", RowBox[{"20", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"3", ",", RowBox[{"-95", "Degree"}]}], "}"}]
+   }], "}"}]}], ";",
+   "\n",
+   RowBox[{"zMax", "=", "8.0"}], ";",
+   RowBox[{"sigmaHit", "=", "0.15"}], ";",
+   RowBox[{"wHit", "=", "0.95"}], ";",
+   RowBox[{"wRand", "=", "0.05"}], ";",
+   RowBox[{"maxDist", "=", "2.0"}], ";",
+   RowBox[{"sigmaBear", "=", RowBox[{"3", "Degree"}]}], ";",
+   RowBox[{"eps", "=", "0.10"}], ";",
+   "\n",
+   RowBox[{"logw", "=", RowBox[{"Table", "[",
+     RowBox[{
+      RowBox[{
+       RowBox[{"lidarLogLikelihood", "[", RowBox[{RowBox[{"particles", "[", RowBox[{"[", "i", "]"}], "]"}], ",", "ranges", ",", "angles", ",", "zMax", ",", "sigmaHit", ",", "wHit", ",", "wRand", ",", "maxDist"}], "]"}], "+",
+       RowBox[{"visionLogLikelihood", "[", RowBox[{RowBox[{"particles", "[", RowBox[{"[", "i", "]"}], "]"}], ",", "obs", ",", "landmarks", ",", "sigmaBear", ",", "eps"}], "]"}]
+      }],
+      ",", RowBox[{"{", RowBox[{"i", ",", "1", ",", RowBox[{"Length", "[", "particles", "]"}]}], "}"}]}], "]"}]}], ";",
+   "\n",
+   RowBox[{"lse", "=", RowBox[{"logSumExp", "[", "logw", "]"}]}], ";",
+   RowBox[{"w", "=", RowBox[{"Exp", "[", RowBox[{"logw", "-", "lse"}], "]"}]}], ";",
+   RowBox[{"w", "=", RowBox[{"w", "/", RowBox[{"Total", "[", "w", "]"}]}]}], ";",
+   "\n",
+   RowBox[{"logw", "\n", "w"}]
+  }]], "Input"]
+},
+WindowSize -> {1000, 700},
+StyleDefinitions -> "Default.nb"
+]
+      

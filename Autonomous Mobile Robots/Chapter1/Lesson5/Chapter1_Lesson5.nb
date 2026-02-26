@@ -1,0 +1,124 @@
+(* Chapter1_Lesson5.nb
+Autonomous Mobile Robots — Chapter 1, Lesson 5
+Typical AMR Failure Modes (drift, slip, occlusion)
+
+This file is a Wolfram Notebook expression (plain-text .nb) that can be opened
+in Wolfram Mathematica. It simulates a planar robot with drift/slip and
+intermittent landmark measurements with occlusion/outliers, then plots errors.
+*)
+
+Notebook[{
+  Cell["Chapter 1, Lesson 5 — Typical AMR Failure Modes (drift, slip, occlusion)", "Title"],
+  Cell["This notebook simulates a planar unicycle robot with (i) biased odometry drift, (ii) slip bursts, and (iii) landmark measurement occlusion/outliers.", "Text"],
+
+  Cell[BoxData@ToBoxes[
+    ClearAll[wrapToPi, unicycleStep, landmarkMeas, jacobianLandmark, simulate];
+    wrapToPi[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+    unicycleStep[x_, u_, dt_] := Module[{px=x[[1]], py=x[[2]], th=x[[3]], v=u[[1]], w=u[[2]]},
+      {px + dt v Cos[th], py + dt v Sin[th], wrapToPi[th + dt w]}
+    ];
+
+    landmarkMeas[x_, lm_] := Module[{dx=lm[[1]]-x[[1]], dy=lm[[2]]-x[[2]]},
+      {Sqrt[dx^2 + dy^2], wrapToPi[ArcTan[dx, dy] - x[[3]]]} (* ArcTan[x,y] = atan2(y,x) *)
+    ];
+
+    jacobianLandmark[x_, lm_] := Module[{dx=lm[[1]]-x[[1]], dy=lm[[2]]-x[[2]], q, r},
+      q = Max[dx^2 + dy^2, 10^-12];
+      r = Sqrt[q];
+      {
+        {-dx/r, -dy/r, 0},
+        {dy/q, -dx/q, -1}
+      }
+    ];
+
+    simulate[T_:40., dt_:0.02, seed_:7] := Module[
+      {N=Floor[T/dt], lm={8.,6.}, xTrue={0.,0.,0.}, xHat={0.,0.,0.},
+       bV=0.03, bW=-0.015, sV=1.03, sW=0.98,
+       sLongNom=0.05, sYawNom=0.03, burstProb=0.02, burstMag=0.35,
+       odoSigV=0.02, odoSigW=0.02, measSigR=0.08, measSigB=1.5 Degree,
+       R, P, gate=9.21, measPeriod=0.5, nextMeasT=0.0, pOcc=0.35, pOut=0.08,
+       tLog, XTrue, XHat, E, k, t, uCmd, u, burst, sLong, sYaw, uTrue, uOdo,
+       z, zHat, r, H, S, K, dx, used},
+      SeedRandom[seed];
+
+      R = DiagonalMatrix[{measSigR^2, measSigB^2}];
+      P = DiagonalMatrix[{0.2^2, 0.2^2, (5 Degree)^2}];
+
+      tLog = Table[(k-1) dt, {k,1,N}];
+      XTrue = ConstantArray[0., {N,3}];
+      XHat  = ConstantArray[0., {N,3}];
+
+      uCmd[t_] := {0.6 + 0.15 Sin[0.4 t], 0.25 Sin[0.25 t] + 0.20 Sin[0.05 t]};
+
+      For[k=1, k<=N, k++,
+        t = tLog[[k]];
+        u = uCmd[t];
+
+        burst = RandomReal[] < burstProb;
+        sLong = Min[0.9, Max[0., sLongNom + If[burst, burstMag, 0.]]];
+        sYaw  = Min[0.9, Max[0., sYawNom  + If[burst, 0.5 burstMag, 0.]]];
+
+        uTrue = {(1 - sLong) u[[1]], (1 - sYaw) u[[2]]};
+        xTrue = unicycleStep[xTrue, uTrue, dt];
+
+        uOdo = {sV u[[1]] + bV + odoSigV RandomVariate[NormalDistribution[]],
+               sW u[[2]] + bW + odoSigW RandomVariate[NormalDistribution[]]};
+        xHat = unicycleStep[xHat, uOdo, dt];
+
+        If[t >= nextMeasT - 10^-12,
+          nextMeasT = nextMeasT + measPeriod;
+          If[RandomReal[] >= pOcc,
+            z = landmarkMeas[xTrue, lm] + {measSigR RandomVariate[NormalDistribution[]],
+                                           measSigB RandomVariate[NormalDistribution[]]};
+            z[[2]] = wrapToPi[z[[2]]];
+            If[RandomReal[] < pOut,
+              z[[1]] = z[[1]] + 2.0 RandomVariate[NormalDistribution[]];
+              z[[2]] = wrapToPi[z[[2]] + 25 Degree RandomVariate[NormalDistribution[]]];
+            ];
+
+            zHat = landmarkMeas[xHat, lm];
+            r = {z[[1]] - zHat[[1]], wrapToPi[z[[2]] - zHat[[2]]]};
+            H = jacobianLandmark[xHat, lm];
+            S = H.P.Transpose[H] + R;
+
+            (* gate by quadratic form; use LinearSolve for robustness *)
+            If[r . LinearSolve[S, r] < gate,
+              K = P.Transpose[H].Inverse[S];
+              dx = K.r;
+              xHat = xHat + dx;
+              xHat[[3]] = wrapToPi[xHat[[3]]];
+              P = (IdentityMatrix[3] - K.H).P.Transpose[IdentityMatrix[3] - K.H] + K.R.Transpose[K];
+            ];
+          ];
+        ];
+
+        P = P + DiagonalMatrix[{10^-4, 10^-4, 10^-6}];
+        XTrue[[k]] = xTrue;
+        XHat[[k]]  = xHat;
+      ];
+
+      E = XHat - XTrue;
+      E[[All,3]] = wrapToPi /@ E[[All,3]];
+      <|"t"->tLog, "XTrue"->XTrue, "XHat"->XHat, "E"->E|>
+    ];
+  ], "Input"],
+
+  Cell[BoxData@ToBoxes[
+    data = simulate[];
+    t = data["t"]; XTrue = data["XTrue"]; XHat = data["XHat"]; E = data["E"];
+
+    trajPlot = ListLinePlot[{XTrue[[All,{1,2}]], XHat[[All,{1,2}]]},
+      PlotLegends -> {"true","estimated"},
+      AspectRatio -> Automatic,
+      AxesLabel -> {"x [m]","y [m]"},
+      PlotLabel -> "Trajectory: true vs estimated"];
+
+    errPlot = ListLinePlot[Transpose[E],
+      PlotLegends -> {"e_x","e_y","e_theta"},
+      AxesLabel -> {"k","error"},
+      PlotLabel -> "Estimation error (index domain)"];
+
+    {trajPlot, errPlot}
+  ], "Input"]
+}]

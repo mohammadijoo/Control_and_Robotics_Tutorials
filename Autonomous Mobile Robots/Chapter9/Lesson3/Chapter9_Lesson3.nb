@@ -1,0 +1,109 @@
+(* Chapter9_Lesson3.nb
+   Wolfram Language (Mathematica) script for feature-based mapping (landmarks):
+   - Range-bearing measurement model
+   - Jacobian wrt landmark
+   - EKF update step
+   - Simple simulation (pose known) *)
+
+ClearAll["Global`*"];
+
+wrapAngle[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+hRB[x_, m_] := Module[{dx, dy, r, b},
+  dx = m[[1]] - x[[1]];
+  dy = m[[2]] - x[[2]];
+  r = Sqrt[dx^2 + dy^2];
+  b = wrapAngle[ArcTan[dx, dy] - x[[3]]];
+  {r, b}
+];
+
+HRBwrtM[x_, m_] := Module[{dx, dy, q, r},
+  dx = m[[1]] - x[[1]];
+  dy = m[[2]] - x[[2]];
+  q = dx^2 + dy^2;
+  r = Sqrt[q];
+  If[r < 10^-9, r = 10^-9; q = r^2];
+  {{dx/r, dy/r}, {-dy/q, dx/q}}
+];
+
+invHRB[x_, z_] := Module[{r, b, ang},
+  r = z[[1]]; b = z[[2]];
+  ang = x[[3]] + b;
+  {x[[1]] + r Cos[ang], x[[2]] + r Sin[ang]}
+];
+
+ekfUpdateLandmark[x_, z_, mu_, P_, R_] := Module[
+  {H, zhat, y, S, K, muNew, PNew},
+  H = HRBwrtM[x, mu];
+  zhat = hRB[x, mu];
+  y = {z[[1]] - zhat[[1]], wrapAngle[z[[2]] - zhat[[2]]]};
+  S = H . P . Transpose[H] + R;
+  K = P . Transpose[H] . Inverse[S];
+  muNew = mu + K . y;
+  PNew = (IdentityMatrix[2] - K . H) . P;
+  PNew = (PNew + Transpose[PNew])/2;
+  {muNew, PNew}
+];
+
+(* ---- Demo simulation ---- *)
+SeedRandom[7];
+
+Mtrue = {{-6, 5}, {-2, -4}, {4, 6}, {7, -2}, {1, 3/2}, {-7, -6}};
+T = 120;
+ts = Subdivide[0, 2 Pi, T - 1];
+X = Table[
+  With[{t = ts[[k]]},
+    {2.5 Cos[t] + 0.5 Cos[3 t], 2.0 Sin[t],
+     wrapAngle[ArcTan[D[2.0 Sin[s], s] /. s -> t, D[2.5 Cos[s] + 0.5 Cos[3 s], s] /. s -> t]]}
+  ],
+  {k, 1, T}
+];
+
+sigmaR = 0.15; sigmaB = 2 Degree;
+R = DiagonalMatrix[{sigmaR^2, sigmaB^2}];
+rMax = 9.0;
+
+(* Initialize empty map *)
+muList = {}; PList = {};
+
+Do[
+  x = X[[k]];
+  Do[
+    z = hRB[x, m];
+    If[z[[1]] <= rMax,
+      zNoisy = {z[[1]] + RandomVariate[NormalDistribution[0, sigmaR]],
+                wrapAngle[z[[2]] + RandomVariate[NormalDistribution[0, sigmaB]]]};
+      If[Length[muList] == 0,
+        AppendTo[muList, invHRB[x, zNoisy]];
+        AppendTo[PList, IdentityMatrix[2] (1.5^2)],
+        (* naive association: nearest predicted measurement (for demo) *)
+        d2s = Table[
+          With[{H = HRBwrtM[x, muList[[j]]],
+                zhat = hRB[x, muList[[j]]],
+                P = PList[[j]]},
+            y = {zNoisy[[1]] - zhat[[1]], wrapAngle[zNoisy[[2]] - zhat[[2]]]};
+            S = H . P . Transpose[H] + R;
+            y . Inverse[S] . y
+          ],
+          {j, 1, Length[muList]}
+        ];
+        jStar = First@Ordering[d2s, 1];
+        If[d2s[[jStar]] <= 9.21,
+          upd = ekfUpdateLandmark[x, zNoisy, muList[[jStar]], PList[[jStar]], R];
+          muList[[jStar]] = upd[[1]];
+          PList[[jStar]] = upd[[2]],
+          AppendTo[muList, invHRB[x, zNoisy]];
+          AppendTo[PList, IdentityMatrix[2] (1.5^2)]
+        ]
+      ]
+    ],
+    {m, Mtrue}
+  ],
+  {k, 1, T}
+];
+
+Print["Estimated landmark means:"];
+Print[muList // N];
+
+(* Quick visualization *)
+ListLinePlot[X[[All, 1 ;; 2]], PlotLabel -> "Robot path (known)", AspectRatio -> 1]

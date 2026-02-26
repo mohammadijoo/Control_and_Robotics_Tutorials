@@ -1,0 +1,139 @@
+(* Chapter2_Lesson5.nb
+   Chapter 2 — Wheeled Locomotion Kinematics (Mobile-Specific)
+   Lesson 5 — Kinematic Calibration of Wheel Parameters
+
+   This is a plain-text Mathematica Notebook expression. Open in Wolfram Mathematica.
+*)
+
+Notebook[{
+  Cell["Chapter 2 — Lesson 5: Kinematic Calibration of Wheel Parameters", "Title"],
+  Cell["Nonlinear least-squares calibration for a differential-drive base.", "Text"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    ClearAll[wrapToPi, sinc1, cosc1, dsinc1, dcosc1, predict, residual, jacobian, simulate];
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    wrapToPi[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+    sinc1[x_] := Piecewise[{
+      {1 - x^2/6 + x^4/120, Abs[x] < 10^-6}
+    }, Sin[x]/x];
+
+    cosc1[x_] := Piecewise[{
+      {x/2 - x^3/24 + x^5/720, Abs[x] < 10^-6}
+    }, (1 - Cos[x])/x];
+
+    dsinc1[x_] := Piecewise[{
+      {-(x)/3 + x^3/30 - x^5/840, Abs[x] < 10^-5}
+    }, (x Cos[x] - Sin[x])/x^2];
+
+    dcosc1[x_] := Piecewise[{
+      {1/2 - x^2/8 + x^4/144, Abs[x] < 10^-5}
+    }, (x Sin[x] - (1 - Cos[x]))/x^2];
+  ], "Input"],
+
+  Cell["Prediction model: body-frame relative increment.", "Text"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    predict[{rL_, rR_, b_}, {dphiL_, dphiR_}] := Module[
+      {sL, sR, ds, dth, dx, dy},
+      sL = rL dphiL; sR = rR dphiR;
+      ds = (sR + sL)/2;
+      dth = (sR - sL)/b;
+      dx = ds*sinc1[dth];
+      dy = ds*cosc1[dth];
+      {dx, dy, dth}
+    ];
+  ], "Input"],
+
+  Cell["Residual vector for a dataset of segments.", "Text"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    residual[p_List, data_List] := Flatten[
+      Table[
+        With[{dphiL = data[[k, 1]], dphiR = data[[k, 2]],
+              dxgt = data[[k, 3]], dygt = data[[k, 4]], dthgt = data[[k, 5]]},
+          Module[{dx, dy, dth},
+            {dx, dy, dth} = predict[p, {dphiL, dphiR}];
+            {dx - dxgt, dy - dygt, wrapToPi[dth - dthgt]}
+          ]
+        ],
+        {k, Length[data]}
+      ]
+    ];
+  ], "Input"],
+
+  Cell["Analytic Jacobian (3N x 3).", "Text"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    jacobian[{rL_, rR_, b_}, data_List] := Module[
+      {N = Length[data], J, dphiL, dphiR, dxgt, dygt, dthgt, sL, sR, A, B, ds, dth,
+       f, g, fp, gp, ddsdrL, ddsdrR, ddthdrL, ddthdrR, ddthdb, ddxdrL, ddxdrR, ddxdb,
+       ddydrL, ddydrR, ddydb},
+      J = ConstantArray[0, {3 N, 3}];
+      Do[
+        dphiL = data[[k, 1]]; dphiR = data[[k, 2]];
+        sL = rL dphiL; sR = rR dphiR;
+        A = sR + sL; B = sR - sL;
+        ds = A/2; dth = B/b;
+
+        f = sinc1[dth]; g = cosc1[dth];
+        fp = dsinc1[dth]; gp = dcosc1[dth];
+
+        ddsdrL = dphiL/2; ddsdrR = dphiR/2;
+        ddthdrL = -dphiL/b; ddthdrR = dphiR/b; ddthdb = -B/b^2;
+
+        ddxdrL = ddsdrL*f + ds*fp*ddthdrL;
+        ddxdrR = ddsdrR*f + ds*fp*ddthdrR;
+        ddxdb  = 0*f      + ds*fp*ddthdb;
+
+        ddydrL = ddsdrL*g + ds*gp*ddthdrL;
+        ddydrR = ddsdrR*g + ds*gp*ddthdrR;
+        ddydb  = 0*g      + ds*gp*ddthdb;
+
+        J[[3 k - 2, 1]] = ddxdrL; J[[3 k - 2, 2]] = ddxdrR; J[[3 k - 2, 3]] = ddxdb;
+        J[[3 k - 1, 1]] = ddydrL; J[[3 k - 1, 2]] = ddydrR; J[[3 k - 1, 3]] = ddydb;
+        J[[3 k,     1]] = ddthdrL; J[[3 k,     2]] = ddthdrR; J[[3 k,     3]] = ddthdb;
+        ,
+        {k, 1, N}
+      ];
+      J
+    ];
+  ], "Input"],
+
+  Cell["Synthetic data generator.", "Text"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    simulate[N_Integer : 200, pTrue_List : {0.05, 0.051, 0.30}, noise_ : 0.002] := Module[
+      {dphiL, dphiR, u, dx, dy, dth, data},
+      SeedRandom[7];
+      dphiL = RandomVariate[NormalDistribution[0, 0.4], N];
+      dphiR = RandomVariate[NormalDistribution[0, 0.4], N];
+      u = RandomReal[{0, 1}, N];
+      dphiR = MapThread[
+        If[#2 < 0.35, #1 + RandomVariate[NormalDistribution[0, 0.03]],
+          If[#2 < 0.55, -#1 + RandomVariate[NormalDistribution[0, 0.03]], #1]
+        ] &,
+        {dphiL, u}
+      ];
+      {dx, dy, dth} = Transpose[predict[pTrue, #] & /@ Transpose[{dphiL, dphiR}]];
+      data = Transpose@{dphiL, dphiR,
+        dx + RandomVariate[NormalDistribution[0, noise], N],
+        dy + RandomVariate[NormalDistribution[0, noise], N],
+        dth + RandomVariate[NormalDistribution[0, 0.5 noise], N]};
+      data
+    ];
+  ], "Input"],
+
+  Cell["Run calibration with Gauss-Newton (manual normal-equation step inside FindMinimum).", "Text"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    data = simulate[];
+    p0 = {0.05, 0.05, 0.30};
+
+    cost[p_] := 1/2 residual[p, data].residual[p, data];
+
+    (* Use FindMinimum (derivative-free) as a robust baseline. *)
+    sol = FindMinimum[cost[{rL, rR, b}], {{rL, p0[[1]]}, {rR, p0[[2]]}, {b, p0[[3]]}},
+                      Method -> "QuasiNewton"];
+
+    pHat = {rL, rR, b} /. sol[[2]];
+    pHat
+  ], "Input"]
+}]

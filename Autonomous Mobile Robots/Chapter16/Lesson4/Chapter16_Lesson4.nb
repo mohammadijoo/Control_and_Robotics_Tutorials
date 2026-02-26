@@ -1,0 +1,108 @@
+(* ::Package:: *)
+
+(* Chapter16_Lesson4.nb
+   Prediction-Aware Local Navigation (sampling MPC with chance-constraint penalty)
+   Mathematica / Wolfram Language script-style content. *)
+
+ClearAll["Global`*"];
+
+wrapAngle[a_] := Module[{pi = Pi, b = Mod[a + Pi, 2 Pi]},
+  If[b < 0, b = b + 2 Pi];
+  b - Pi
+];
+
+unicycleStep[x_, u_, dt_] := Module[{px, py, th, v, w},
+  {px, py, th} = x; {v, w} = u;
+  {
+    px + dt*v*Cos[th],
+    py + dt*v*Sin[th],
+    wrapAngle[th + dt*w]
+  }
+];
+
+zValue[delta_] := Which[
+  Abs[delta - 0.1] < 10^-12, 1.281551565545,
+  Abs[delta - 0.05] < 10^-12, 1.644853626951,
+  Abs[delta - 0.02] < 10^-12, 2.053748910631,
+  Abs[delta - 0.01] < 10^-12, 2.326347874041,
+  Abs[delta - 0.005] < 10^-12, 2.575829303549,
+  Abs[delta - 0.001] < 10^-12, 3.090232306168,
+  True, 2.326347874041
+];
+
+predictTrack[track_, dt_] := Module[{F, Q, mu, Sigma},
+  F = {{1, 0, dt, 0},
+       {0, 1, 0, dt},
+       {0, 0, 1, 0},
+       {0, 0, 0, 1}};
+  Q = DiagonalMatrix[{0.05^2, 0.05^2, 0.2^2, 0.2^2}];
+  mu = F.track["mu"];
+  Sigma = F.track["Sigma"].Transpose[F] + Q;
+  Association[track, "mu" -> mu, "Sigma" -> Sigma]
+];
+
+chancePenaltyPoint[p_, track_, RSafe_, delta_] := Module[
+  {muO, Sigma2, muR, dist, n, m, s2, s, z, margin, violation},
+  muO = track["mu"][[{1, 2}]];
+  Sigma2 = track["Sigma"][[{1, 2}, {1, 2}]];
+  muR = p - muO;
+  dist = Norm[muR] + 10^-9;
+  n = muR/dist;
+  m = dist;
+  s2 = n.Sigma2.n;
+  s = Sqrt[Max[0, s2] + 10^-12];
+  z = zValue[delta];
+  margin = z*s;
+  violation = Max[0, margin - (m - RSafe)];
+  violation^2
+];
+
+rolloutCost[x0_, u_, goal_, tracks0_, dt_, N_, delta_, robotR_] := Module[
+  {wGoal = 1.0, wCtrl = 0.05, wRisk = 10.0, x = x0, tracks = tracks0, J = 0.0, k, e, risk},
+  For[k = 1, k <= N, k++,
+    tracks = predictTrack[#, dt] & /@ tracks;
+    x = unicycleStep[x, u, dt];
+    e = x[[{1, 2}]] - goal;
+    J = J + wGoal*(e.e) + wCtrl*(u.u);
+    risk = Total@Table[
+      chancePenaltyPoint[x[[{1, 2}]], tracks[[j]], robotR + tracks[[j]]["r"], delta],
+      {j, Length[tracks]}
+    ];
+    J = J + wRisk*risk;
+  ];
+  J
+];
+
+(* Demo setup *)
+x0 = {0.0, 0.0, 0.0};
+goal = {6.0, 0.0};
+dt = 0.1; N = 25; delta = 0.01; robotR = 0.25;
+
+tracks = {
+  <|"mu" -> {3.0, 1.0, 0.0, -0.6},
+    "Sigma" -> DiagonalMatrix[{0.15^2, 0.15^2, 0.3^2, 0.3^2}],
+    "r" -> 0.35, "name" -> "p1"|>,
+  <|"mu" -> {4.0, -1.2, 0.0, 0.7},
+    "Sigma" -> DiagonalMatrix[{0.15^2, 0.15^2, 0.3^2, 0.3^2}],
+    "r" -> 0.35, "name" -> "p2"|>
+};
+
+vRange = {0.0, 1.2};
+wRange = {-1.8, 1.8};
+nV = 13; nW = 31;
+
+bestU = {0.0, 0.0};
+bestJ = Infinity;
+
+Do[
+  v = vRange[[1]] + (vRange[[2]] - vRange[[1]])*(i - 1)/(nV - 1);
+  Do[
+    w = wRange[[1]] + (wRange[[2]] - wRange[[1]])*(j - 1)/(nW - 1);
+    J = rolloutCost[x0, {v, w}, goal, tracks, dt, N, delta, robotR];
+    If[J < bestJ, bestJ = J; bestU = {v, w};],
+    {j, 1, nW}
+  ],
+  {i, 1, nV}
+];
+
+Print["Best control u* = [v,w] = ", bestU, ", cost = ", bestJ];

@@ -1,0 +1,113 @@
+(* Chapter4_Lesson5.nb
+   Parameter Effects on Real Navigation (Mobile Robot Dynamics - Applied)
+
+   This notebook defines a simple differential-drive v/omega dynamic model,
+   simulates a nominal trajectory, and performs a parameter sweep.
+
+   Open in Wolfram Mathematica and evaluate the cells.
+*)
+
+Notebook[{
+ Cell["Chapter 4 - Lesson 5: Parameter Effects on Real Navigation", "Title"],
+ Cell["Model definition and RK4 simulation", "Section"],
+ Cell[BoxData@ToBoxes@Module[
+   {
+     (* nominal parameters *)
+     pNom = <|"m"->25.0, "Iz"->2.0, "b"->0.45, "r"->0.10, "mu"->0.8, "cv"->0.4, "cw"->0.6, "g"->9.81|>,
+     clamp, reference, dyn, rk4step, simulate, rms, sweep
+   },
+   clamp[x_, lo_, hi_] := Min[Max[x, lo], hi];
+
+   reference[t_] := {0.9 + 0.2 Sin[0.2 t], 0.35 + 0.15 Sin[0.17 t + 0.7]};
+
+   dyn[x_, {tauL_, tauR_}, p_] := Module[
+     {px,py,th,v,om,F,Mz,Fmax,vdot,omdot,pxdot,pydot,thdot},
+     {px,py,th,v,om} = x;
+     F  = (tauR + tauL)/p["r"];
+     Mz = (p["b"]/(2 p["r"])) (tauR - tauL);
+     Fmax = p["mu"] p["m"] p["g"];
+     F = clamp[F, -Fmax, Fmax];
+     vdot  = (1/p["m"]) F - p["cv"] v;
+     omdot = (1/p["Iz"]) Mz - p["cw"] om;
+     pxdot = v Cos[th];
+     pydot = v Sin[th];
+     thdot = om;
+     {pxdot, pydot, thdot, vdot, omdot}
+   ];
+
+   rk4step[x_, u_, dt_, p_] := Module[{k1,k2,k3,k4},
+     k1 = dyn[x,u,p];
+     k2 = dyn[x + 0.5 dt k1, u, p];
+     k3 = dyn[x + 0.5 dt k2, u, p];
+     k4 = dyn[x + dt k3, u, p];
+     x + (dt/6) (k1 + 2 k2 + 2 k3 + k4)
+   ];
+
+   (* nominal PI controller in generalized coordinates (F, Mz) mapped to wheel torques *)
+   simulate[pTrue_, pNom_, T_:35.0, dt_:0.01] := Module[
+     {N, ts, x, xs, iv=0.0, iw=0.0, kvp=180.0, kvi=35.0, kwp=18.0, kwi=4.0, tauMax=35.0,
+      vRef, omRef, ev, ew, Fcmd, Mcmd, tauR, tauL},
+     N = Floor[T/dt] + 1;
+     ts = Range[0, T, dt];
+     x  = {0,0,0,0,0};
+     xs = ConstantArray[0.0, {Length[ts], 5}];
+
+     Do[
+       {vRef, omRef} = reference[t];
+       ev = vRef - x[[4]];
+       ew = omRef - x[[5]];
+       iv = iv + ev dt;
+       iw = iw + ew dt;
+       Fcmd = pNom["m"]  (kvp ev + kvi iv) + pNom["m"]  pNom["cv"] x[[4]];
+       Mcmd = pNom["Iz"] (kwp ew + kwi iw) + pNom["Iz"] pNom["cw"] x[[5]];
+       tauR = 0.5 pNom["r"] (Fcmd + 2 Mcmd/pNom["b"]);
+       tauL = 0.5 pNom["r"] (Fcmd - 2 Mcmd/pNom["b"]);
+       tauR = clamp[tauR, -tauMax, tauMax];
+       tauL = clamp[tauL, -tauMax, tauMax];
+       x = rk4step[x, {tauL, tauR}, dt, pTrue];
+       xs[[i]] = x;
+     , {i,1,Length[ts]}, {t, {ts[[i]]}}];
+
+     <|"t"->ts, "x"->xs|>
+   ];
+
+   rms[v_] := Sqrt[Mean[v^2]];
+
+   (* baseline nominal *)
+   With[{base = simulate[pNom, pNom]},
+     Print["Baseline simulated."];
+     (* sweep *)
+     sweep = {
+       {"mass_m",      {15.0,25.0,40.0}},
+       {"yaw_Iz",      {1.2, 2.0, 3.5}},
+       {"wheel_r",     {0.095,0.10,0.105}},
+       {"wheelbase_b", {0.40,0.45,0.52}},
+       {"friction_mu", {0.5, 0.8, 1.0}}
+     };
+
+     Do[
+       Do[
+         pTrue = pNom;
+         Switch[name,
+           "mass_m",      pTrue = AssociateTo[pTrue, "m"->val],
+           "yaw_Iz",      pTrue = AssociateTo[pTrue, "Iz"->val],
+           "wheel_r",     pTrue = AssociateTo[pTrue, "r"->val],
+           "wheelbase_b", pTrue = AssociateTo[pTrue, "b"->val],
+           "friction_mu", pTrue = AssociateTo[pTrue, "mu"->val]
+         ];
+         sim = simulate[pTrue, pNom];
+         posErr = Norm /@ (sim["x"][[All, {1,2}]] - base["x"][[All, {1,2}]]);
+         thErr  = sim["x"][[All,3]] - base["x"][[All,3]];
+         Print[name, "=", val, " | pos_rms=", NumberForm[rms[posErr], {6,3}],
+               " m, theta_rms=", NumberForm[rms[thErr], {6,3}], " rad"];
+       , {val, vals}]
+     , { {name, vals}, sweep}];
+
+     (* quick visualization for one case *)
+     simEx = simulate[AssociateTo[pNom, "m"->40.0], pNom];
+     ListLinePlot[{base["x"][[All,1;;2]], simEx["x"][[All,1;;2]]},
+       PlotLegends->{"nominal","m=40kg"}, PlotRange->All, AxesLabel->{"x","y"}]
+   ];
+ ], "Input"]],
+ Cell["End", "Section"]
+}]

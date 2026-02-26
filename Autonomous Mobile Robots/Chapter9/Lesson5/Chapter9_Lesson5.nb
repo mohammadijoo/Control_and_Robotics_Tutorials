@@ -1,0 +1,156 @@
+(* ::Package:: *)
+
+(* Chapter 9 — Mapping Representations for Mobile Robots
+   Lesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR
+
+   This Mathematica notebook is provided as plain-text .nb content.
+   Open it in Wolfram Mathematica; it will evaluate as a notebook expression.
+
+   It simulates a 2D world, LiDAR scans, and constructs an occupancy grid using log-odds.
+*)
+
+Notebook[{
+  Cell["Chapter 9 — Mapping Representations for Mobile Robots\nLesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR", "Title"],
+
+  Cell["1. Utilities: logit/logistic and simple ray intersections", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    logit[p_] := Log[ Clip[p, {10^-9, 1 - 10^-9}] / (1 - Clip[p, {10^-9, 1 - 10^-9}]) ];
+    logistic[l_] := 1/(1 + Exp[-l]);
+
+    rayCircleIntersection[p_, d_, c_, r_] := Module[{o = p - c, b, cterm, disc, s, t1, t2, cand},
+      b = 2 (o.d);
+      cterm = (o.o) - r^2;
+      disc = b^2 - 4 cterm;
+      If[disc < 0, Infinity,
+        s = Sqrt[disc];
+        t1 = (-b - s)/2; t2 = (-b + s)/2;
+        cand = Select[{t1, t2}, # >= 0 &];
+        If[cand === {}, Infinity, Min[cand]]
+      ]
+    ];
+
+    rayAABBIntersection[p_, d_, xmin_, xmax_, ymin_, ymax_] := Module[{px=p[[1]], py=p[[2]], dx=d[[1]], dy=d[[2]],
+      tmin=-Infinity, tmax=Infinity, tx1, tx2, ty1, ty2},
+      If[Abs[dx] < 10^-12, If[px < xmin || px > xmax, Return[Infinity]],
+        tx1 = (xmin - px)/dx; tx2 = (xmax - px)/dx;
+        tmin = Max[tmin, Min[tx1, tx2]];
+        tmax = Min[tmax, Max[tx1, tx2]];
+      ];
+      If[Abs[dy] < 10^-12, If[py < ymin || py > ymax, Return[Infinity]],
+        ty1 = (ymin - py)/dy; ty2 = (ymax - py)/dy;
+        tmin = Max[tmin, Min[ty1, ty2]];
+        tmax = Min[tmax, Max[ty1, ty2]];
+      ];
+      If[tmax < 0 || tmin > tmax, Infinity, If[tmin >= 0, tmin, tmax]]
+    ];
+  ], "Input"],
+
+  Cell["2. World, LiDAR simulation, and occupancy-grid mapping", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SeedRandom[7];
+
+    (* World bounds and obstacles *)
+    bounds = <|"xmin"->-10, "xmax"->10, "ymin"->-10, "ymax"->10|>;
+    circles = {
+      <|"c"->{-3.0,  2.0}, "r"->1.2|>,
+      <|"c"->{ 2.5, -1.0}, "r"->1.0|>,
+      <|"c"->{ 4.0,  4.0}, "r"->1.5|>,
+      <|"c"->{-4.5, -4.0}, "r"->1.0|>
+    };
+
+    (* LiDAR params *)
+    nBeams = 360; zMax = 8.0;
+    angles = Subdivide[-Pi, Pi, nBeams + 1][[;; -2]];
+
+    (* Grid params *)
+    res = 0.1; origin = {-10, -10}; widthM = 20; heightM = 20;
+    w = Ceiling[widthM/res]; h = Ceiling[heightM/res];
+    l0 = logit[0.5]; lMin = -8; lMax = 8;
+    logOdds = ConstantArray[l0, {h, w}];
+
+    (* Sensor model *)
+    pOcc = 0.70; pFree = 0.30;
+    lOcc = logit[pOcc]; lFree = logit[pFree];
+    alpha = 0.2;
+
+    worldToGrid[{x_, y_}] := Module[{i, j},
+      i = Floor[(x - origin[[1]])/res] + 1;
+      j = Floor[(y - origin[[2]])/res] + 1;
+      If[1 <= i <= w && 1 <= j <= h, {i, j}, Missing["OutOfBounds"]]
+    ];
+
+    bresenham[{i0_, j0_}, {i1_, j1_}] := Module[{di = Abs[i1 - i0], dj = Abs[j1 - j0],
+      si = If[i0 < i1, 1, -1], sj = If[j0 < j1, 1, -1], err, i=i0, j=j0, cells = {} , e2},
+      err = di - dj;
+      While[True,
+        AppendTo[cells, {i, j}];
+        If[i == i1 && j == j1, Break[]];
+        e2 = 2 err;
+        If[e2 > -dj, err -= dj; i += si];
+        If[e2 <  di, err += di; j += sj];
+      ];
+      cells
+    ];
+
+    simulateScan[{x_, y_, th_}] := Module[{ranges, px=x, py=y, hits, dx, dy, tWall, tCirc, a, ang, best},
+      ranges = ConstantArray[zMax, nBeams];
+      Do[
+        a = angles[[k]];
+        ang = th + a;
+        dx = Cos[ang]; dy = Sin[ang];
+        hits = {};
+        tWall = rayAABBIntersection[{px, py}, {dx, dy}, bounds["xmin"], bounds["xmax"], bounds["ymin"], bounds["ymax"]];
+        If[tWall < Infinity, AppendTo[hits, tWall]];
+        Do[
+          tCirc = rayCircleIntersection[{px, py}, {dx, dy}, circles[[m]]["c"], circles[[m]]["r"]];
+          If[tCirc < Infinity, AppendTo[hits, tCirc]],
+          {m, Length[circles]}
+        ];
+        If[hits =!= {}, best = Min[hits]; If[best <= zMax, ranges[[k]] = Clip[best + RandomVariate[NormalDistribution[0, 0.02]], {0, zMax}]]],
+        {k, nBeams}
+      ];
+      ranges
+    ];
+
+    updateRay[{x_, y_, th_}, aBody_, r_] := Module[{start, end, cells, hit, freeCells, i, j, ie, je, ex, ey, ang},
+      start = worldToGrid[{x, y}];
+      If[start === Missing["OutOfBounds"], Return[]];
+      ang = th + aBody;
+      ex = x + r Cos[ang]; ey = y + r Sin[ang];
+      end = worldToGrid[{ex, ey}];
+      If[end === Missing["OutOfBounds"], Return[]];
+      cells = bresenham[start, end];
+      If[Length[cells] <= 1, Return[]];
+      hit = r < (zMax - 0.5 alpha);
+      freeCells = If[hit, cells[[2 ;; -2]], cells[[2 ;;]]];
+      Do[
+        {i, j} = freeCells[[q]];
+        logOdds[[j, i]] = Clip[logOdds[[j, i]] + (lFree - l0), {lMin, lMax}],
+        {q, Length[freeCells]}
+      ];
+      If[hit,
+        {ie, je} = Last[cells];
+        logOdds[[je, ie]] = Clip[logOdds[[je, ie]] + (lOcc - l0), {lMin, lMax}]
+      ];
+    ];
+
+    (* Trajectory *)
+    T = 220;
+    poses = Table[
+      ang = 2 Pi (t - 1)/T;
+      {6 Cos[ang], 6 Sin[ang], ang + Pi/2},
+      {t, T}
+    ];
+
+    Do[
+      scan = simulateScan[poses[[t]]];
+      Do[ updateRay[poses[[t]], angles[[k]], scan[[k]]], {k, nBeams} ],
+      {t, T}
+    ];
+
+    P = logistic[logOdds];
+
+    ArrayPlot[P, ColorFunction -> "SolarColors", Frame -> False,
+      PlotLabel -> "2D Occupancy Grid from Simulated LiDAR (p(occ))"]
+  ], "Input"]
+}]
