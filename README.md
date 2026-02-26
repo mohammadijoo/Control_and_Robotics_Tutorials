@@ -12,11 +12,12 @@ This repository is the **code companion** for a comprehensive, course-based tuto
 
 ✅ **Courses currently included (5):**
 
-- **Advanced Robotics Course** — [`./Advanced%20Robotics%20Course`](./Advanced%20Robotics%20Course)
 - **Introduction to Robotics Course** — [`./Introduction%20to%20Robotics%20Course`](./Introduction%20to%20Robotics%20Course)
 - **Linear Control Course** — [`./Linear%20Control%20Course`](./Linear%20Control%20Course)
 - **Robot Control Course** — [`./Robot%20Control%20Course`](./Robot%20Control%20Course)
 - **Robotics Kinematics and Dynamics Course** — [`./Robotics%20Kinematics%20and%20Dynamics%20Course`](./Robotics%20Kinematics%20and%20Dynamics%20Course)
+- **Advanced Robotics Course** — [`./Advanced%20Robotics%20Course`](./Advanced%20Robotics%20Course)
+- **Autonomous Mobile Robots Course** — [`./Autonomous%20Mobile%20Robots%20Course`](./Autonomous%20Mobile%20Robots%20Course)
 
 > More courses will be added over time until the series reaches **35 courses**.
 
@@ -40,6 +41,9 @@ Each item below is a clickable link to the course playlist.
 
 # Advanced Robotics Course
 [![Advanced Robotics Course](https://i.ytimg.com/vi/EGmB-qn23wY/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2Bx_OqM5196AcAsNNq1x3OcH)
+
+# Autonomous Mobile Robots Course
+[![Autonomous Mobile Robots Course](https://i.ytimg.com/vi/DwIzJa6lkXg/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BwR4mlwN-dpBxUhvfnDt7yj)
 
 ---
 
