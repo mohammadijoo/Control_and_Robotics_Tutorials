@@ -12,12 +12,12 @@ This repository is the **code companion** for a comprehensive, course-based tuto
 
 ✅ **Courses currently included (5):**
 
-- **Introduction to Robotics Course** — [`./Introduction%20to%20Robotics%20Course`](./Introduction%20to%20Robotics%20Course)
-- **Linear Control Course** — [`./Linear%20Control%20Course`](./Linear%20Control%20Course)
-- **Robot Control Course** — [`./Robot%20Control%20Course`](./Robot%20Control%20Course)
-- **Robotics Kinematics and Dynamics Course** — [`./Robotics%20Kinematics%20and%20Dynamics%20Course`](./Robotics%20Kinematics%20and%20Dynamics%20Course)
-- **Advanced Robotics Course** — [`./Advanced%20Robotics%20Course`](./Advanced%20Robotics%20Course)
-- **Autonomous Mobile Robots Course** — [`./Autonomous%20Mobile%20Robots%20Course`](./Autonomous%20Mobile%20Robots%20Course)
+- **Introduction to Robotics Course** — [`./Introduction%20to%20Robotics%20Course`](./Introduction_to_Robotics_Course)
+- **Linear Control Course** — [`./Linear%20Control%20Course`](./Linear_Control_Course)
+- **Robot Control Course** — [`./Robot%20Control%20Course`](./Robot_Control_Course)
+- **Robotics Kinematics and Dynamics Course** — [`./Robotics%20Kinematics%20and%20Dynamics%20Course`](./Robotics_Kinematics_and_Dynamics_Course)
+- **Advanced Robotics Course** — [`./Advanced%20Robotics%20Course`](./Advanced_Robotics_Course)
+- **Autonomous Mobile Robots Course** — [`./Autonomous%20Mobile%20Robots%20Course`](./Autonomous_Mobile_Robots_Course)
 
 > More courses will be added over time until the series reaches **35 courses**.
 
@@ -51,9 +51,9 @@ Each item below is a clickable link to the course playlist.
 
 At the top level, **each course lives in its own directory**, e.g.
 
-- `Introduction to Robotics Course/`
-- `Linear Control Course/`
-- `Robot Control Course/`
+- `Introduction_to_Robotics_Course/`
+- `Linear_Control_Course/`
+- `Robot_Control_Course/`
 - ...
 
 Inside each course directory you can expect typical items such as:
