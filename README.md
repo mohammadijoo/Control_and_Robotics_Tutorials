@@ -10,7 +10,7 @@ This repository is the **code companion** for a comprehensive, course-based tuto
 
 ## Repository status (today)
 
-✅ **Courses currently included (5):**
+✅ **Courses currently included (6):**
 
 - **Introduction to Robotics Course** — [`./Introduction_to_Robotics_Course`](./Introduction_to_Robotics_Course)
 - **Linear Control Course** — [`./Linear_Control_Course`](./Linear_Control_Course)
