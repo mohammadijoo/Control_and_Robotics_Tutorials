@@ -39,7 +39,7 @@ Each item below is a clickable link to the course playlist.
 [![System Dynamics Course](https://i.ytimg.com/vi/kD9kvr1Ntjo/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2BxLOM_tPEzBj3lsG_87mkRb)
 
 # Modern Control Course
-[![Modern Control Course](https://i.ytimg.com/vi/qDPHgFH0M7U/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByCoSUI7vwi369U0JA5cZR5)
+[![Modern Control Course](https://i.ytimg.com/vi/Pvguis6A39k/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByCoSUI7vwi369U0JA5cZR5)
 
 # Robotics Kinematics and Dynamics Course
 [![Robotics Kinematics and Dynamics Course](https://i.ytimg.com/vi/miyV8Msk0qU/maxresdefault.jpg)](https://www.youtube.com/playlist?list=PLdUBuoJCa2ByUYXn64GUrAuZVK6CRNZO1)
