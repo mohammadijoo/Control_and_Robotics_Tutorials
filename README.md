@@ -12,14 +12,14 @@ The repository is organized around complete courses. Each course folder contains
 
 | Course | Repository Folder |
 |---|---|
-| Introduction to Robotics | [`Introduction_to_Robotics_Course`](./Introduction_to_Robotics_Course) |
-| Linear Control | [`Linear_Control_Course`](./Linear_Control_Course) |
-| System Dynamics | [`System_Dynamics_Course`](./System_Dynamics_Course) |
-| Modern Control | [`Modern_Control_Course`](./Modern_Control_Course) |
-| Robotics Kinematics and Dynamics | [`Robotics_Kinematics_and_Dynamics_Course`](./Robotics_Kinematics_and_Dynamics_Course) |
-| Robot Control | [`Robot_Control_Course`](./Robot_Control_Course) |
-| Advanced Robotics | [`Advanced_Robotics_Course`](./Advanced_Robotics_Course) |
-| Autonomous Mobile Robots | [`Autonomous_Mobile_Robots_Course`](./Autonomous_Mobile_Robots_Course) |
+| Introduction to Robotics | [`Introduction_to_Robotics_Course`](./Tutorials/Lectures/Introduction_to_Robotics_Course) |
+| Linear Control | [`Linear_Control_Course`](./Tutorials/Lectures/Linear_Control_Course) |
+| System Dynamics | [`System_Dynamics_Course`](./Tutorials/Lectures/System_Dynamics_Course) |
+| Modern Control | [`Modern_Control_Course`](./Tutorials/Lectures/Modern_Control_Course) |
+| Robotics Kinematics and Dynamics | [`Robotics_Kinematics_and_Dynamics_Course`](./Tutorials/Lectures/Robotics_Kinematics_and_Dynamics_Course) |
+| Robot Control | [`Robot_Control_Course`](./Tutorials/Lectures/Robot_Control_Course) |
+| Advanced Robotics | [`Advanced_Robotics_Course`](./Tutorials/Lectures/Advanced_Robotics_Course) |
+| Autonomous Mobile Robots | [`Autonomous_Mobile_Robots_Course`](./Tutorials/Lectures/Autonomous_Mobile_Robots_Course) |
 
 ---
 
