@@ -68,8 +68,6 @@ Codes/Course_Name/
 └── ...
 ```
 
-Not every lesson necessarily includes every programming language. Code availability depends on the topic and the educational purpose of the lesson.
-
 ---
 
 ## Languages and Tools
