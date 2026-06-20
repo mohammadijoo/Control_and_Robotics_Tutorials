@@ -37,7 +37,7 @@ The repository is intended to be useful for students, instructors, researchers, 
 
 ## General Folder Structure
 
-The exact internal structure may vary by course, but the repository generally follows this pattern:
+The exact internal structure may vary by course, but the repository generally follows this pattern, both for codes and lectures:
 
 ```text
 Control_and_Robotics_Tutorials/
@@ -49,14 +49,12 @@ Control_and_Robotics_Tutorials/
 ├── Robot_Control_Course/
 ├── Advanced_Robotics_Course/
 ├── Autonomous_Mobile_Robots_Course/
-├── LICENSE
-└── README.md
 ```
 
-Inside each course folder, material is organized by chapters and lessons. A typical course may contain:
+Inside codes folder, material is organized by courses. A typical course may contain:
 
 ```text
-Course_Name/
+Codes/Course_Name/
 ├── Chapter1/
 │   ├── Lesson1/
 │   │   ├── Chapter1_Lesson1.html
@@ -185,8 +183,6 @@ Commercial use includes, but is not limited to:
 - Selling modified or unmodified copies of the material.
 
 For commercial licensing, contact the author.
-
-> Important: If the repository contains a separate `LICENSE` file, make sure that file is updated to match these terms. If the old MIT license remains in the repository, it may conflict with the non-commercial policy stated here.
 
 ---
 
