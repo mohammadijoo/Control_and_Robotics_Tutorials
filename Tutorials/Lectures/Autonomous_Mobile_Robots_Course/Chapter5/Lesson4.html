@@ -1,0 +1,2542 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 5: Odometry and Dead Reckoning - Lesson 4: Practical Odometry Filtering | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 5: Odometry and Dead Reckoning</h1>
+    <h3><strong>Lesson 4: Practical Odometry Filtering</strong></h3>
+    <p>
+      This lesson develops deterministic, implementable filtering techniques for
+      wheel- and IMU-based odometry streams before introducing fully
+      probabilistic Bayes filters in Chapter 6. We formalize low-pass and
+      moving-average filters, derive their discrete-time forms from
+      continuous-time models, analyze stability and frequency response, and
+      construct a complementary fusion method for heading that is widely used in
+      ground robots. We also cover robust outlier suppression and slip-aware
+      gating, emphasizing what filtering can and cannot fix (high-frequency
+      jitter vs. low-frequency bias drift).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Learning Objectives and Context -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Learning Objectives and Context</h2>
+    <div class="down-content">
+      <p>By the end of this lesson, you will be able to:</p>
+      <ul>
+        <li>
+          Design and implement practical discrete-time filters for odometry
+          streams (velocities, increments, heading).
+        </li>
+        <li>
+          Prove stability conditions for common IIR filters and compute
+          frequency responses for FIR/IIR filters used in practice.
+        </li>
+        <li>
+          Build a complementary heading fusion filter combining wheel-derived
+          heading (low-frequency reference) and IMU yaw-rate integration
+          (high-frequency dynamics).
+        </li>
+        <li>
+          Apply robust statistics (median/MAD) for outlier suppression and
+          implement slip-aware gating rules consistent with mobile robot
+          kinematic limits.
+        </li>
+      </ul>
+
+      <p>
+        In Chapter 5 (Lessons 1–3), you built raw odometry from wheel encoders
+        and integrated IMU angular rates, and you analyzed drift sources (bias,
+        slip, quantization, wheel radius uncertainty). This lesson focuses on
+        <em>practical filtering</em> that:
+      </p>
+      <ul>
+        <li>reduces high-frequency noise and quantization jitter,</li>
+        <li>rejects occasional spikes/outliers,</li>
+        <li>limits integration damage under short slip episodes,</li>
+        <li>
+          does <strong>not</strong> “solve” long-term bias drift (handled
+          rigorously in probabilistic localization later).
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Raw sensors: encoders + IMU yaw-rate"] --> B["Compute v_w, w_w and theta_w (wheel heading)"]
+  B --> C["Sanity checks: limits, time-stamps, dt"]
+  C --> D["Outlier suppression: median/MAD window"]
+  D --> E["Low-pass filtering: v_f, w_f"]
+  E --> F["Slip-aware gating: compare gyro vs wheel yaw-rate"]
+  F --> G["Heading fusion: complementary filter -> theta_hat"]
+  G --> H["Integrate pose: x,y,theta using v_f and theta_hat"]
+  H --> I["Publish filtered odometry"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Odometry Streams as Signals: What Filtering Targets -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Odometry Streams as Signals: What Filtering Targets</h2>
+    <div class="down-content">
+      <p>
+        For ground robots in this chapter, we treat planar motion with pose
+        <strong>\( \mathbf{p}_k = (x_k, y_k, \theta_k) \)</strong>. From Lesson
+        1, a typical pipeline produces wheel-based linear and angular velocities
+        <strong>\( v_w[k] \)</strong> and <strong>\( \omega_w[k] \)</strong>,
+        and from Lesson 2 we obtain IMU yaw rate
+        <strong>\( \omega_g[k] \)</strong>. We will filter these streams prior
+        to integration:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} v_w[k] &= v[k] + n_v[k] + o_v[k],\\ \omega_w[k] &=
+        \omega[k] + n_{\omega,w}[k] + o_{\omega,w}[k],\\ \omega_g[k] &=
+        \omega[k] + b_g[k] + n_{\omega,g}[k]. \end{aligned} \]
+      </h4>
+
+      <p>
+        Here <strong>\( n[\cdot] \)</strong> denotes “ordinary” noise
+        (quantization + sensor noise), <strong>\( o[\cdot] \)</strong> denotes
+        sporadic outliers (spikes from slip, missed ticks, timestamp glitches),
+        and <strong>\( b_g[k] \)</strong> is the gyro bias (slow drift).
+      </p>
+
+      <p>
+        A key limitation can be stated precisely: if
+        <strong>\( b_g[k] \)</strong> has a nonzero mean over time, then
+        integrating <strong>\( \omega_g \)</strong> yields an orientation drift
+        whose expected magnitude grows with time. Filtering can attenuate
+        <em>high-frequency</em> components but cannot eliminate an unknown
+        constant or slowly varying bias without a reference.
+      </p>
+
+      <p>
+        In practice we also create a wheel-based heading reference by
+        integrating the wheel yaw-rate:
+        <strong>\( \theta_w[k] \)</strong>. With sampling time
+        <strong>\( T_s \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \theta_w[k] = \mathrm{wrap}\!\left(\theta_w[k-1] + T_s \,
+        \omega_w[k]\right), \quad \theta_g[k] =
+        \mathrm{wrap}\!\left(\theta_g[k-1] + T_s \, \omega_g[k]\right). \]
+      </h4>
+
+      <p>
+        Wheel heading is typically <em>less affected by gyro bias</em> but is
+        vulnerable to wheel slip and uneven terrain; gyro integration is
+        <em>smooth and responsive</em> but drifts in the long term. This is the
+        exact scenario complementary filtering was designed for.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: First-Order Low-Pass Filter: Derivation, Stability, Frequency Response -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      3. First-Order Low-Pass Filter: Derivation, Stability, Frequency Response
+    </h2>
+    <div class="down-content">
+      <p>
+        A workhorse in odometry filtering is the discrete first-order IIR
+        low-pass filter. We derive it from a continuous-time model to obtain a
+        physically meaningful parameter (cutoff / time constant), then prove
+        stability and compute the frequency response.
+      </p>
+
+      <p>
+        Consider the continuous-time low-pass dynamics (analog “RC” form):
+        <strong>\( x(t) \)</strong> is the noisy measurement (e.g., raw
+        velocity), and <strong>\( y(t) \)</strong> is the filtered output.
+      </p>
+
+      <h4 class="mathJax">
+        \[ &bsol;tau \, \dot{y}(t) + y(t) = x(t), \quad &bsol;tau &gt; 0. \]
+      </h4>
+
+      <p>
+        Using a zero-order hold (ZOH) assumption on
+        <strong>\( x(t) \)</strong> over each interval
+        <strong>\( [kT_s,(k+1)T_s) \)</strong>, the exact discrete-time update
+        is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ y[k] = \alpha\, y[k-1] + (1-\alpha)\,x[k], \quad \alpha =
+        \exp\!\left(-\frac{T_s}{&bsol;tau}\right). \]
+      </h4>
+
+      <p>
+        It is often convenient to select the cutoff frequency
+        <strong>\( f_c \)</strong> (Hz) and set
+        <strong>\( &bsol;tau = \frac{1}{2\pi f_c} \)</strong>, giving:
+      </p>
+
+      <h4 class="mathJax">\[ \alpha = \exp\!\left(-2\pi f_c T_s\right). \]</h4>
+
+      <h3>3.1 BIBO Stability Proof</h3>
+      <p>
+        The Z-transform transfer function from <strong>\( x \)</strong> to
+        <strong>\( y \)</strong> is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ H(z) = \frac{Y(z)}{X(z)} = \frac{1-\alpha}{1-\alpha z^{-1}}. \]
+      </h4>
+
+      <p>
+        The impulse response is obtained by expanding as a geometric series for
+        <strong>\( |z| &gt; |\alpha| \)</strong>:
+      </p>
+
+      <h4 class="mathJax">\[ h[k] = (1-\alpha)\alpha^k u[k], \]</h4>
+
+      <p>
+        where <strong>\( u[k] \)</strong> is the unit step. The filter is
+        BIBO-stable if
+        <strong>\( \sum_{k=0}^{\infty} |h[k]| &lt; \infty \)</strong>. For
+        <strong>\( 0 &lt; \alpha &lt; 1 \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \sum_{k=0}^{\infty} |h[k]| = \sum_{k=0}^{\infty} (1-\alpha)\alpha^k =
+        (1-\alpha)\frac{1}{1-\alpha} = 1. \]
+      </h4>
+
+      <p>
+        Hence the filter is BIBO-stable for
+        <strong>\( |\alpha| &lt; 1 \)</strong>; in practical low-pass usage we
+        pick <strong>\( 0 &lt; \alpha &lt; 1 \)</strong>.
+      </p>
+
+      <h3>3.2 Frequency Response and Practical Interpretation</h3>
+      <p>
+        On the unit circle <strong>\( z = e^{j\Omega} \)</strong> (discrete
+        rad/sample), the frequency response is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ H(e^{j\Omega}) = \frac{1-\alpha}{1-\alpha e^{-j\Omega}}, \quad
+        \left|H(e^{j\Omega})\right| =
+        \frac{1-\alpha}{\sqrt{1+\alpha^2-2\alpha\cos\Omega}}. \]
+      </h4>
+
+      <p>
+        Large <strong>\( \alpha \)</strong> (close to 1) yields stronger
+        smoothing but more phase lag; smaller
+        <strong>\( \alpha \)</strong> tracks changes faster but filters less. In
+        odometry, that trade-off is critical: lag in
+        <strong>\( \omega \)</strong> causes heading lag, which can distort
+        integrated trajectories during turning.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Moving Average (FIR) and Group Delay -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Moving Average (FIR) and Group Delay</h2>
+    <div class="down-content">
+      <p>
+        A moving-average filter is common when encoder quantization causes
+        jitter. For window length <strong>\( N \)</strong>:
+      </p>
+
+      <h4 class="mathJax">\[ y[k] = \frac{1}{N}\sum_{i=0}^{N-1} x[k-i]. \]</h4>
+
+      <p>Its frequency response is (a standard FIR result):</p>
+
+      <h4 class="mathJax">
+        \[ H(e^{j\Omega}) = \frac{1}{N}e^{-j\Omega\frac{N-1}{2}}
+        \frac{\sin\left(\frac{N\Omega}{2}\right)}{\sin\left(\frac{\Omega}{2}\right)}.
+        \]
+      </h4>
+
+      <p>
+        The magnitude term yields “notches” at
+        <strong>\( \Omega = \frac{2\pi m}{N} \)</strong> for integers
+        <strong>\( m \neq 0 \)</strong>, while the linear phase factor
+        <strong>\( e^{-j\Omega\frac{N-1}{2}} \)</strong> implies constant group
+        delay:
+      </p>
+
+      <h4 class="mathJax">\[ \tau_g = \frac{N-1}{2}\;T_s. \]</h4>
+
+      <p>
+        This delay is often acceptable for smoothing
+        <strong>\( v \)</strong> when odometry is used for mapping/localization
+        offline, but it can destabilize fast feedback loops if you close control
+        on filtered velocity. In mobile robots, a common compromise is:
+      </p>
+      <ul>
+        <li>use mild filtering on <strong>\( v \)</strong> (small delay),</li>
+        <li>
+          use stronger filtering on <strong>\( \omega \)</strong> only if an
+          IMU-based heading fusion is present (Section 5),
+        </li>
+        <li>always gate slip/outliers before applying filters (Section 6).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Complementary Heading Fusion (Wheel Heading + Gyro Integration) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Complementary Heading Fusion (Wheel Heading + Gyro Integration)</h2>
+    <div class="down-content">
+      <p>
+        Complementary filtering fuses two estimates of the same quantity whose
+        error spectra are complementary: wheel-based heading
+        <strong>\( \theta_w \)</strong> provides a low-frequency reference
+        (bounded drift when wheels do not slip), while gyro integration provides
+        high-frequency responsiveness but suffers low-frequency drift from bias.
+      </p>
+
+      <h3>5.1 Continuous-Time Construction and “Sum to One” Property</h3>
+      <p>
+        Define a first-order low-pass and high-pass pair with time constant
+        <strong>\( &bsol;tau \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ H_{LP}(s) = \frac{1}{1+s&bsol;tau}, \quad H_{HP}(s) =
+        \frac{s&bsol;tau}{1+s&bsol;tau}. \]
+      </h4>
+
+      <p>They satisfy the complementary identity:</p>
+
+      <h4 class="mathJax">\[ H_{LP}(s) + H_{HP}(s) = 1. \]</h4>
+
+      <p>
+        For heading fusion, interpret gyro output as yaw-rate; integrate then
+        high-pass:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \hat{\theta}(s) = H_{HP}(s)\frac{1}{s}\Omega_g(s) +
+        H_{LP}(s)\Theta_w(s). \]
+      </h4>
+
+      <p>
+        If <strong>\( \Omega_g(s) = s\Theta(s) + B(s) \)</strong> with bias term
+        <strong>\( B(s) \)</strong>, then
+        <strong
+          >\( \frac{1}{s}\Omega_g(s) = \Theta(s) + \frac{1}{s}B(s) \)</strong
+        >. The high-pass attenuates the bias-induced low-frequency drift, while
+        the low-pass injects the low-frequency reference from wheels.
+      </p>
+
+      <h3>5.2 Discrete Implementation Used in Practice</h3>
+      <p>
+        Using the same discretization idea as Section 3, pick
+        <strong>\( \alpha = \exp\!\left(-\frac{T_s}{&bsol;tau}\right) \)</strong
+        >. A standard discrete complementary filter for heading is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \hat{\theta}[k] = \alpha \,\mathrm{wrap}\!\left(\hat{\theta}[k-1] +
+        T_s \,\omega_g[k]\right) + (1-\alpha)\,\theta_w[k]. \]
+      </h4>
+
+      <p>
+        This formula is simple, stable for
+        <strong>\( 0 &lt; \alpha &lt; 1 \)</strong>, and computationally
+        trivial. The tuning parameter is effectively the crossover frequency
+        (how quickly you trust the wheels to correct drift vs. how strongly you
+        trust IMU integration for fast motion).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  G["Gyro yaw-rate omega_g"] --> I["Integrate: theta_pred"]
+  I --> HP["High-frequency path (dominant when fast)"]
+  W["Wheel heading theta_w"] --> LP["Low-frequency path (dominant when slow)"]
+  HP --> S["Sum -> theta_hat"]
+  LP --> S
+  S --> OUT["Heading used for pose integration"]
+        </pre>
+      </div>
+
+      <p>
+        Practical note: when slip is detected (Section 6), you can temporarily
+        increase <strong>\( \alpha \)</strong> to rely more on the gyro path.
+        This is a deterministic heuristic that significantly improves behavior
+        during brief wheel slip events.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Robust Outlier Suppression and Slip-Aware Gating -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Robust Outlier Suppression and Slip-Aware Gating</h2>
+    <div class="down-content">
+      <p>
+        Odometry failures are often dominated by rare but large spikes (missed
+        ticks, sudden slip, timestamp glitches). Classical low-pass filters are
+        not robust: a single spike can pollute the filter state for multiple
+        time steps. Therefore, in practice:
+      </p>
+      <ul>
+        <li>apply robust outlier suppression before low-pass filtering,</li>
+        <li>apply physical feasibility gates (max speed, max yaw rate),</li>
+        <li>
+          apply cross-sensor consistency checks (wheel vs gyro yaw-rate) to
+          detect slip.
+        </li>
+      </ul>
+
+      <h3>6.1 Hampel Filter (Median + MAD)</h3>
+      <p>
+        For a window
+        <strong>\( \mathcal{W}_k = \{x[k-m],\dots,x[k+m]\} \)</strong>, define
+        the median <strong>\( \mathrm{med}_k \)</strong> and median absolute
+        deviation (MAD):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{med}_k = \mathrm{median}(\mathcal{W}_k), \quad \mathrm{MAD}_k
+        =
+        \mathrm{median}\left(\left|x[i]-\mathrm{med}_k\right|\right)_{i\in\mathcal{W}_k}.
+        \]
+      </h4>
+
+      <p>
+        A robust scale estimate is
+        <strong>\( \hat{\sigma}_k = 1.4826\,\mathrm{MAD}_k \)</strong>
+        (Gaussian-consistent). The Hampel rule replaces an outlier by the
+        median:
+      </p>
+
+      <h4 class="mathJax">
+        \[ x[k] \; &larr; \begin{cases} \mathrm{med}_k, & \text{if }
+        \left|x[k]-\mathrm{med}_k\right| &gt; n_{\sigma}\hat{\sigma}_k,\\ x[k],
+        & \text{otherwise.} \end{cases} \]
+      </h4>
+
+      <p>
+        Robustness intuition (formalized in Problems): the median has a 50%
+        breakdown point, so a minority of arbitrarily large spikes cannot drag
+        it arbitrarily far.
+      </p>
+
+      <h3>6.2 Slip-Aware Gating Using Wheel vs Gyro Yaw-Rate</h3>
+      <p>
+        Define a consistency residual:
+        <strong>\( r_{\omega}[k] = \omega_g[k]-\omega_w[k] \)</strong>. When
+        <strong>\( |r_{\omega}[k]| \)</strong> exceeds a threshold, treat wheel
+        yaw-rate as unreliable (slip or encoder glitch) and temporarily rely
+        more on gyro integration.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \alpha_{\mathrm{eff}}[k] = \begin{cases} \min(\alpha + \Delta\alpha,
+        \, 0.995), & \text{if } |r_{\omega}[k]| &gt; \gamma,\\ \alpha, &
+        \text{otherwise.} \end{cases} \]
+      </h4>
+
+      <p>
+        Choosing <strong>\( \gamma \)</strong>: a practical rule is
+        <strong>\( \gamma \approx 3\sigma_r \)</strong>, where
+        <strong
+          >\( \sigma_r^2 \approx \sigma_{\omega,g}^2 + \sigma_{\omega,w}^2
+          \)</strong
+        >
+        if noises are roughly independent. This is a deterministic “3-sigma”
+        gate; probabilistic gating will be formalized in Chapter 6.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Pose Integration with Filtered Streams -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Pose Integration with Filtered Streams</h2>
+    <div class="down-content">
+      <p>
+        After filtering, integrate the planar pose using the fused heading
+        <strong>\( \hat{\theta}[k] \)</strong> and filtered linear velocity
+        <strong>\( \hat{v}[k] \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} x[k] &= x[k-1] + T_s
+        \,\hat{v}[k]\cos(\hat{\theta}[k]),\\ y[k] &= y[k-1] + T_s
+        \,\hat{v}[k]\sin(\hat{\theta}[k]),\\ \hat{\theta}[k] &=
+        \mathrm{wrap}(\hat{\theta}[k]) \quad \text{(numerical hygiene)}.
+        \end{aligned} \]
+      </h4>
+
+      <p>
+        Practical note: filtering <strong>\( \omega \)</strong> and then
+        integrating can introduce lag during fast turns; complementary fusion
+        mitigates this because the gyro path preserves higher-frequency yaw
+        dynamics. For wheel-only odometry, you must choose conservative
+        smoothing or accept heading lag.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Implementations (Python / C++ / Java / MATLAB-Simulink / Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following implementations demonstrate the same algorithmic
+        structure: Hampel outlier suppression, low-pass filtering, slip-aware
+        gating, complementary heading fusion, and pose integration.
+      </p>
+
+      <h3>8.1 Python (NumPy/SciPy/Matplotlib; ROS2 integration notes)</h3>
+      <p><strong>File:</strong> Chapter5_Lesson4.py</p>
+      <pre><code class="language-python">
+"""
+Chapter5_Lesson4.py
+Autonomous Mobile Robots — Chapter 5 Lesson 4: Practical Odometry Filtering
+
+This script demonstrates practical, deterministic filtering for odometry streams:
+- Robust outlier suppression (Hampel filter)
+- First-order low-pass filtering (IIR)
+- Complementary heading fusion: wheel-based heading (low-frequency) + gyro integration (high-frequency)
+- Simple kinematic integration of planar pose (x, y, theta)
+
+Dependencies: numpy, scipy (optional, only for comparison), matplotlib
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def wrap_to_pi(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    a = (a + math.pi) % (2.0 * math.pi) - math.pi
+    return a
+
+
+@dataclass
+class FirstOrderLowPass:
+    """y[k] = alpha*y[k-1] + (1-alpha)*x[k] with 0&lt;alpha&lt;1."""
+    alpha: float
+    y: float = 0.0
+    initialized: bool = False
+
+    @staticmethod
+    def from_cutoff(fc_hz: float, dt: float) -&gt; "FirstOrderLowPass":
+        # Exact discretization of tau*dy/dt + y = x with tau = 1/(2*pi*fc)
+        tau = 1.0 / (2.0 * math.pi * fc_hz)
+        alpha = math.exp(-dt / tau)
+        return FirstOrderLowPass(alpha=alpha)
+
+    def step(self, x: float) -&gt; float:
+        if not self.initialized:
+            self.y = x
+            self.initialized = True
+            return self.y
+        self.y = self.alpha * self.y + (1.0 - self.alpha) * x
+        return self.y
+
+
+@dataclass
+class HampelFilter:
+    """
+    Hampel filter for outlier suppression:
+      x[k] replaced by median if |x[k]-median| &gt; n_sigmas * 1.4826*MAD
+    """
+    window: int = 11
+    n_sigmas: float = 3.0
+
+    def apply(self, x: np.ndarray) -&gt; np.ndarray:
+        assert self.window % 2 == 1, "window must be odd"
+        k = self.window // 2
+        y = x.copy()
+        for i in range(k, len(x) - k):
+            w = x[i - k : i + k + 1]
+            med = np.median(w)
+            mad = np.median(np.abs(w - med)) + 1e-12
+            sigma = 1.4826 * mad
+            if abs(x[i] - med) &gt; self.n_sigmas * sigma:
+                y[i] = med
+        return y
+
+
+@dataclass
+class ComplementaryHeadingFilter:
+    """
+    Discrete complementary fusion for heading:
+        theta_hat[k] = alpha*(theta_hat[k-1] + dt*omega_g[k]) + (1-alpha)*theta_w[k]
+    where theta_w is wheel-based heading (low-freq stable), omega_g is gyro yaw rate (high-freq responsive).
+    """
+    alpha: float
+    theta_hat: float = 0.0
+    initialized: bool = False
+
+    @staticmethod
+    def from_cutoff(fc_hz: float, dt: float) -&gt; "ComplementaryHeadingFilter":
+        tau = 1.0 / (2.0 * math.pi * fc_hz)
+        alpha = math.exp(-dt / tau)
+        return ComplementaryHeadingFilter(alpha=alpha)
+
+    def step(self, omega_g: float, theta_w: float, dt: float) -&gt; float:
+        if not self.initialized:
+            self.theta_hat = theta_w
+            self.initialized = True
+            return self.theta_hat
+        pred = wrap_to_pi(self.theta_hat + dt * omega_g)
+        self.theta_hat = wrap_to_pi(self.alpha * pred + (1.0 - self.alpha) * theta_w)
+        return self.theta_hat
+
+
+@dataclass
+class OdometryFilterConfig:
+    dt: float = 0.01
+    v_fc_hz: float = 5.0
+    w_fc_hz: float = 8.0
+    theta_fc_hz: float = 0.7
+    v_max: float = 2.0
+    w_max: float = 3.0
+    slip_gate_rad_s: float = 1.2  # gate residual between gyro and wheel yaw rate
+
+
+class OdometryFilter:
+    def __init__(self, cfg: OdometryFilterConfig):
+        self.cfg = cfg
+        self.v_lp = FirstOrderLowPass.from_cutoff(cfg.v_fc_hz, cfg.dt)
+        self.w_lp = FirstOrderLowPass.from_cutoff(cfg.w_fc_hz, cfg.dt)
+        self.theta_cf = ComplementaryHeadingFilter.from_cutoff(cfg.theta_fc_hz, cfg.dt)
+
+        self.x = 0.0
+        self.y = 0.0
+        self.theta = 0.0
+
+    def step(self, v_w: float, w_w: float, w_g: float, theta_w: float) -&gt; Tuple[float, float, float]:
+        # Physical sanity clamp
+        v_w = float(np.clip(v_w, -self.cfg.v_max, self.cfg.v_max))
+        w_w = float(np.clip(w_w, -self.cfg.w_max, self.cfg.w_max))
+        w_g = float(np.clip(w_g, -self.cfg.w_max, self.cfg.w_max))
+
+        # Slip gating: if wheel yaw rate disagrees strongly with gyro, downweight wheel yaw (use gyro path more)
+        resid = abs(w_g - w_w)
+        if resid &gt; self.cfg.slip_gate_rad_s:
+            # increase alpha temporarily (more reliance on gyro integration)
+            alpha_eff = min(0.995, self.theta_cf.alpha + 0.15)
+        else:
+            alpha_eff = self.theta_cf.alpha
+
+        # Low-pass filter velocities (reduces quantization and high-frequency jitter)
+        v_f = self.v_lp.step(v_w)
+        w_f = self.w_lp.step(w_w)
+
+        # Complementary heading fusion (use gyro yaw rate w_g, wheel heading theta_w)
+        # Use alpha_eff for this step
+        pred = wrap_to_pi(self.theta + self.cfg.dt * w_g)
+        theta_hat = wrap_to_pi(alpha_eff * pred + (1.0 - alpha_eff) * theta_w)
+
+        # Integrate pose using filtered linear velocity and fused heading
+        self.theta = theta_hat
+        self.x += self.cfg.dt * v_f * math.cos(self.theta)
+        self.y += self.cfg.dt * v_f * math.sin(self.theta)
+
+        return self.x, self.y, self.theta
+
+
+def simulate_truth(T: float, dt: float) -&gt; Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate ground-truth v(t), w(t), and theta(t) for a planar robot."""
+    N = int(T / dt)
+    t = np.arange(N) * dt
+
+    # piecewise commands
+    v = np.zeros(N)
+    w = np.zeros(N)
+    for k in range(N):
+        if 1.0 &lt;= t[k] &lt; 6.0:
+            v[k] = 1.1
+            w[k] = 0.0
+        elif 6.0 &lt;= t[k] &lt; 12.0:
+            v[k] = 0.8
+            w[k] = 0.35
+        elif 12.0 &lt;= t[k] &lt; 16.0:
+            v[k] = 0.0
+            w[k] = -0.6
+        elif 16.0 &lt;= t[k] &lt; 20.0:
+            v[k] = 1.0
+            w[k] = 0.15
+
+    theta = np.zeros(N)
+    for k in range(1, N):
+        theta[k] = wrap_to_pi(theta[k - 1] + dt * w[k])
+    return t, v, w, theta
+
+
+def make_measurements(v_true: np.ndarray, w_true: np.ndarray, theta_true: np.ndarray, dt: float, seed: int = 2):
+    rng = np.random.default_rng(seed)
+
+    # Wheel measurements: noise + quantization + sporadic slip spikes
+    v_w = v_true + 0.05 * rng.standard_normal(len(v_true))
+    w_w = w_true + 0.08 * rng.standard_normal(len(w_true))
+
+    # quantization effect (like finite encoder resolution, mapped to velocity)
+    qv = 0.02
+    qw = 0.02
+    v_w = np.round(v_w / qv) * qv
+    w_w = np.round(w_w / qw) * qw
+
+    # Inject slip spikes
+    spike_idx = rng.choice(len(v_true), size=12, replace=False)
+    w_w[spike_idx] += rng.normal(loc=0.0, scale=2.0, size=len(spike_idx))
+    v_w[spike_idx] += rng.normal(loc=0.0, scale=0.8, size=len(spike_idx))
+
+    # Wheel heading from integrating wheel yaw rate (raw)
+    theta_w = np.zeros_like(theta_true)
+    for k in range(1, len(theta_w)):
+        theta_w[k] = wrap_to_pi(theta_w[k - 1] + dt * w_w[k])
+
+    # Gyro yaw rate: bias + noise + slow bias drift
+    bias0 = 0.03
+    bias_rw = 0.0005
+    bias = np.zeros_like(w_true)
+    bias[0] = bias0
+    for k in range(1, len(bias)):
+        bias[k] = bias[k - 1] + bias_rw * rng.standard_normal()
+    w_g = w_true + bias + 0.05 * rng.standard_normal(len(w_true))
+
+    return v_w, w_w, theta_w, w_g
+
+
+def main():
+    dt = 0.01
+    T = 20.0
+
+    t, v_true, w_true, theta_true = simulate_truth(T, dt)
+    v_w, w_w, theta_w, w_g = make_measurements(v_true, w_true, theta_true, dt)
+
+    # Robust pre-filter: Hampel suppresses spikes before low-pass
+    hampel = HampelFilter(window=11, n_sigmas=3.0)
+    v_w_h = hampel.apply(v_w)
+    w_w_h = hampel.apply(w_w)
+
+    cfg = OdometryFilterConfig(dt=dt)
+    filt = OdometryFilter(cfg)
+
+    x_f = np.zeros_like(t)
+    y_f = np.zeros_like(t)
+    th_f = np.zeros_like(t)
+
+    for k in range(len(t)):
+        x_f[k], y_f[k], th_f[k] = filt.step(v_w_h[k], w_w_h[k], w_g[k], theta_w[k])
+
+    # Ground-truth position
+    x_true = np.zeros_like(t)
+    y_true = np.zeros_like(t)
+    for k in range(1, len(t)):
+        x_true[k] = x_true[k - 1] + dt * v_true[k] * math.cos(theta_true[k])
+        y_true[k] = y_true[k - 1] + dt * v_true[k] * math.sin(theta_true[k])
+
+    # Plots
+    fig1 = plt.figure()
+    plt.plot(t, v_true, label="v true")
+    plt.plot(t, v_w, label="v wheel raw", alpha=0.5)
+    plt.plot(t, v_w_h, label="v wheel Hampel", alpha=0.8)
+    plt.xlabel("t [s]")
+    plt.ylabel("v [m/s]")
+    plt.legend()
+    plt.title("Linear velocity filtering")
+
+    fig2 = plt.figure()
+    plt.plot(t, w_true, label="w true")
+    plt.plot(t, w_w, label="w wheel raw", alpha=0.5)
+    plt.plot(t, w_w_h, label="w wheel Hampel", alpha=0.8)
+    plt.plot(t, w_g, label="w gyro", alpha=0.6)
+    plt.xlabel("t [s]")
+    plt.ylabel("w [rad/s]")
+    plt.legend()
+    plt.title("Yaw-rate streams (wheel vs gyro)")
+
+    fig3 = plt.figure()
+    plt.plot(x_true, y_true, label="truth")
+    plt.plot(x_f, y_f, label="filtered odometry")
+    plt.axis("equal")
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
+    plt.legend()
+    plt.title("Trajectory comparison")
+
+    fig4 = plt.figure()
+    e_th = np.array([wrap_to_pi(th_f[k] - theta_true[k]) for k in range(len(t))])
+    plt.plot(t, e_th)
+    plt.xlabel("t [s]")
+    plt.ylabel("heading error [rad]")
+    plt.title("Heading error after complementary fusion")
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <h3>8.2 C++ (Standard Library; ROS2 integration notes)</h3>
+      <p><strong>File:</strong> Chapter5_Lesson4.cpp</p>
+      <pre><code class="language-cpp">
+// Chapter5_Lesson4.cpp
+// Autonomous Mobile Robots — Chapter 5 Lesson 4: Practical Odometry Filtering
+//
+// Demonstrates:
+//  - Hampel outlier suppression (median + MAD)
+//  - First-order low-pass filter for velocities
+//  - Complementary fusion for heading: wheel heading (low-freq) + gyro integration (high-freq)
+//  - Planar pose integration
+//
+// Notes on robotics integration:
+//  - In ROS2, subscribe to sensor_msgs::msg::Imu (yaw rate) and encoder-derived twist,
+//    publish nav_msgs::msg::Odometry with filtered pose/twist.
+//  - For message synchronization and time stamps, consider message_filters.
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter5_Lesson4.cpp -o odo_filter
+//
+// Output:
+//   Writes CSV "chapter5_lesson4_out.csv" with columns: t,x,y,theta,v_f,w_f
+
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;fstream&gt;
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+
+static double wrapToPi(double a) {
+  a = std::fmod(a + M_PI, 2.0 * M_PI);
+  if (a &lt; 0) a += 2.0 * M_PI;
+  return a - M_PI;
+}
+
+struct FirstOrderLowPass {
+  double alpha;
+  double y;
+  bool initialized;
+  explicit FirstOrderLowPass(double alpha_) : alpha(alpha_), y(0.0), initialized(false) {}
+
+  static FirstOrderLowPass fromCutoff(double fc_hz, double dt) {
+    const double tau = 1.0 / (2.0 * M_PI * fc_hz);
+    const double alpha = std::exp(-dt / tau);
+    return FirstOrderLowPass(alpha);
+  }
+
+  double step(double x) {
+    if (!initialized) {
+      y = x;
+      initialized = true;
+      return y;
+    }
+    y = alpha * y + (1.0 - alpha) * x;
+    return y;
+  }
+};
+
+static double median(std::vector&lt;double&gt; w) {
+  std::nth_element(w.begin(), w.begin() + w.size() / 2, w.end());
+  return w[w.size() / 2];
+}
+
+static double mad(const std::vector&lt;double&gt;&amp; w, double med) {
+  std::vector&lt;double&gt; d(w.size());
+  for (size_t i = 0; i &lt; w.size(); ++i) d[i] = std::abs(w[i] - med);
+  return median(d);
+}
+
+static std::vector&lt;double&gt; hampelFilter(const std::vector&lt;double&gt;&amp; x, int window, double nSigmas) {
+  if (window % 2 == 0) throw std::runtime_error("window must be odd");
+  const int k = window / 2;
+  std::vector&lt;double&gt; y = x;
+
+  for (int i = k; i &lt; static_cast&lt;int&gt;(x.size()) - k; ++i) {
+    std::vector&lt;double&gt; w;
+    w.reserve(window);
+    for (int j = i - k; j &lt;= i + k; ++j) w.push_back(x[j]);
+
+    const double med = median(w);
+    const double MAD = mad(w, med) + 1e-12;
+    const double sigma = 1.4826 * MAD;
+    if (std::abs(x[i] - med) &gt; nSigmas * sigma) y[i] = med;
+  }
+  return y;
+}
+
+struct ComplementaryHeadingFilter {
+  double alpha;
+  double thetaHat;
+  bool initialized;
+
+  explicit ComplementaryHeadingFilter(double alpha_) : alpha(alpha_), thetaHat(0.0), initialized(false) {}
+
+  static ComplementaryHeadingFilter fromCutoff(double fc_hz, double dt) {
+    const double tau = 1.0 / (2.0 * M_PI * fc_hz);
+    const double alpha = std::exp(-dt / tau);
+    return ComplementaryHeadingFilter(alpha);
+  }
+
+  double step(double omegaGyro, double thetaWheel, double dt, double alphaEff) {
+    if (!initialized) {
+      thetaHat = thetaWheel;
+      initialized = true;
+      return thetaHat;
+    }
+    const double pred = wrapToPi(thetaHat + dt * omegaGyro);
+    thetaHat = wrapToPi(alphaEff * pred + (1.0 - alphaEff) * thetaWheel);
+    return thetaHat;
+  }
+};
+
+struct Config {
+  double dt = 0.01;
+  double vFcHz = 5.0;
+  double wFcHz = 8.0;
+  double thetaFcHz = 0.7;
+  double vMax = 2.0;
+  double wMax = 3.0;
+  double slipGate = 1.2;
+};
+
+int main() {
+  Config cfg;
+  const double T = 20.0;
+  const int N = static_cast&lt;int&gt;(T / cfg.dt);
+
+  std::vector&lt;double&gt; t(N), vTrue(N), wTrue(N), thetaTrue(N, 0.0);
+  for (int k = 0; k &lt; N; ++k) {
+    t[k] = k * cfg.dt;
+    if (t[k] &gt;= 1.0 &amp;&amp; t[k] &lt; 6.0) {
+      vTrue[k] = 1.1;
+      wTrue[k] = 0.0;
+    } else if (t[k] &gt;= 6.0 &amp;&amp; t[k] &lt; 12.0) {
+      vTrue[k] = 0.8;
+      wTrue[k] = 0.35;
+    } else if (t[k] &gt;= 12.0 &amp;&amp; t[k] &lt; 16.0) {
+      vTrue[k] = 0.0;
+      wTrue[k] = -0.6;
+    } else if (t[k] &gt;= 16.0 &amp;&amp; t[k] &lt; 20.0) {
+      vTrue[k] = 1.0;
+      wTrue[k] = 0.15;
+    } else {
+      vTrue[k] = 0.0;
+      wTrue[k] = 0.0;
+    }
+  }
+  for (int k = 1; k &lt; N; ++k) thetaTrue[k] = wrapToPi(thetaTrue[k - 1] + cfg.dt * wTrue[k]);
+
+  std::mt19937 rng(2);
+  std::normal_distribution&lt;double&gt; n01(0.0, 1.0);
+
+  // Wheel measurements (noise + quantization + spikes)
+  std::vector&lt;double&gt; vW(N), wW(N);
+  const double qv = 0.02, qw = 0.02;
+  for (int k = 0; k &lt; N; ++k) {
+    vW[k] = vTrue[k] + 0.05 * n01(rng);
+    wW[k] = wTrue[k] + 0.08 * n01(rng);
+    vW[k] = std::round(vW[k] / qv) * qv;
+    wW[k] = std::round(wW[k] / qw) * qw;
+  }
+  // inject spikes
+  for (int s = 0; s &lt; 12; ++s) {
+    const int idx = rng() % N;
+    wW[idx] += 2.0 * n01(rng);
+    vW[idx] += 0.8 * n01(rng);
+  }
+
+  // Wheel heading from integrating wheel yaw rate
+  std::vector&lt;double&gt; thetaW(N, 0.0);
+  for (int k = 1; k &lt; N; ++k) thetaW[k] = wrapToPi(thetaW[k - 1] + cfg.dt * wW[k]);
+
+  // Gyro yaw rate: bias + noise + random walk bias drift
+  std::vector&lt;double&gt; wG(N), bias(N);
+  bias[0] = 0.03;
+  for (int k = 1; k &lt; N; ++k) bias[k] = bias[k - 1] + 0.0005 * n01(rng);
+  for (int k = 0; k &lt; N; ++k) wG[k] = wTrue[k] + bias[k] + 0.05 * n01(rng);
+
+  // Robust prefilter
+  const std::vector&lt;double&gt; vWh = hampelFilter(vW, 11, 3.0);
+  const std::vector&lt;double&gt; wWh = hampelFilter(wW, 11, 3.0);
+
+  FirstOrderLowPass vLP = FirstOrderLowPass::fromCutoff(cfg.vFcHz, cfg.dt);
+  FirstOrderLowPass wLP = FirstOrderLowPass::fromCutoff(cfg.wFcHz, cfg.dt);
+  ComplementaryHeadingFilter thetaCF = ComplementaryHeadingFilter::fromCutoff(cfg.thetaFcHz, cfg.dt);
+
+  double x = 0.0, y = 0.0, theta = 0.0;
+
+  std::ofstream out("chapter5_lesson4_out.csv");
+  out &lt;&lt; "t,x,y,theta,v_f,w_f\n";
+
+  for (int k = 0; k &lt; N; ++k) {
+    double v = std::clamp(vWh[k], -cfg.vMax, cfg.vMax);
+    double ww = std::clamp(wWh[k], -cfg.wMax, cfg.wMax);
+    double wg = std::clamp(wG[k], -cfg.wMax, cfg.wMax);
+
+    const double resid = std::abs(wg - ww);
+    const double alphaEff = (resid &gt; cfg.slipGate) ? std::min(0.995, thetaCF.alpha + 0.15) : thetaCF.alpha;
+
+    const double vF = vLP.step(v);
+    const double wF = wLP.step(ww);
+
+    theta = thetaCF.step(wg, thetaW[k], cfg.dt, alphaEff);
+
+    x += cfg.dt * vF * std::cos(theta);
+    y += cfg.dt * vF * std::sin(theta);
+
+    out &lt;&lt; t[k] &lt;&lt; "," &lt;&lt; x &lt;&lt; "," &lt;&lt; y &lt;&lt; "," &lt;&lt; theta &lt;&lt; "," &lt;&lt; vF &lt;&lt; "," &lt;&lt; wF &lt;&lt; "\n";
+  }
+
+  out.close();
+  std::cout &lt;&lt; "Wrote chapter5_lesson4_out.csv\n";
+  return 0;
+}
+      </code></pre>
+
+      <h3>8.3 Java (Library-light; EJML/rosjava notes)</h3>
+      <p><strong>File:</strong> Chapter5_Lesson4.java</p>
+      <pre><code class="language-java">
+// Chapter5_Lesson4.java
+// Autonomous Mobile Robots — Chapter 5 Lesson 4: Practical Odometry Filtering
+//
+// Demonstrates practical deterministic odometry filtering:
+//  - Hampel outlier suppression (median + MAD)
+//  - First-order low-pass filtering (IIR)
+//  - Complementary heading fusion: wheel heading (low-freq) + gyro integration (high-freq)
+//  - Planar pose integration
+//
+// Notes on robotics integration:
+//  - In ROS ecosystems, Java integrations exist (e.g., rosjava) but are less common in AMR stacks.
+//  - This code is written to be library-light. If you want matrix utilities, EJML is a good choice.
+//
+// Compile:
+//   javac Chapter5_Lesson4.java
+// Run:
+//   java Chapter5_Lesson4
+//
+// Output:
+//   Writes CSV "chapter5_lesson4_out_java.csv".
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Random;
+
+public class Chapter5_Lesson4 {
+
+  static double wrapToPi(double a) {
+    a = (a + Math.PI) % (2.0 * Math.PI);
+    if (a &lt; 0) a += 2.0 * Math.PI;
+    return a - Math.PI;
+  }
+
+  static class FirstOrderLowPass {
+    final double alpha;
+    double y = 0.0;
+    boolean initialized = false;
+
+    FirstOrderLowPass(double alpha) { this.alpha = alpha; }
+
+    static FirstOrderLowPass fromCutoff(double fcHz, double dt) {
+      double tau = 1.0 / (2.0 * Math.PI * fcHz);
+      double alpha = Math.exp(-dt / tau);
+      return new FirstOrderLowPass(alpha);
+    }
+
+    double step(double x) {
+      if (!initialized) {
+        y = x;
+        initialized = true;
+        return y;
+      }
+      y = alpha * y + (1.0 - alpha) * x;
+      return y;
+    }
+  }
+
+  static double median(double[] w) {
+    double[] c = w.clone();
+    Arrays.sort(c);
+    return c[c.length / 2];
+  }
+
+  static double mad(double[] w, double med) {
+    double[] d = new double[w.length];
+    for (int i = 0; i &lt; w.length; i++) d[i] = Math.abs(w[i] - med);
+    return median(d);
+  }
+
+  static double[] hampelFilter(double[] x, int window, double nSigmas) {
+    if (window % 2 == 0) throw new IllegalArgumentException("window must be odd");
+    int k = window / 2;
+    double[] y = x.clone();
+
+    for (int i = k; i &lt; x.length - k; i++) {
+      double[] w = new double[window];
+      for (int j = 0; j &lt; window; j++) w[j] = x[i - k + j];
+
+      double med = median(w);
+      double MAD = mad(w, med) + 1e-12;
+      double sigma = 1.4826 * MAD;
+      if (Math.abs(x[i] - med) &gt; nSigmas * sigma) y[i] = med;
+    }
+    return y;
+  }
+
+  static class ComplementaryHeadingFilter {
+    final double alpha;
+    double thetaHat = 0.0;
+    boolean initialized = false;
+
+    ComplementaryHeadingFilter(double alpha) { this.alpha = alpha; }
+
+    static ComplementaryHeadingFilter fromCutoff(double fcHz, double dt) {
+      double tau = 1.0 / (2.0 * Math.PI * fcHz);
+      double alpha = Math.exp(-dt / tau);
+      return new ComplementaryHeadingFilter(alpha);
+    }
+
+    double step(double omegaGyro, double thetaWheel, double dt, double alphaEff) {
+      if (!initialized) {
+        thetaHat = thetaWheel;
+        initialized = true;
+        return thetaHat;
+      }
+      double pred = wrapToPi(thetaHat + dt * omegaGyro);
+      thetaHat = wrapToPi(alphaEff * pred + (1.0 - alphaEff) * thetaWheel);
+      return thetaHat;
+    }
+  }
+
+  static double clamp(double x, double lo, double hi) {
+    return Math.max(lo, Math.min(hi, x));
+  }
+
+  public static void main(String[] args) throws IOException {
+    double dt = 0.01;
+    double T = 20.0;
+    int N = (int)(T / dt);
+
+    double[] t = new double[N];
+    double[] vTrue = new double[N];
+    double[] wTrue = new double[N];
+    double[] thetaTrue = new double[N];
+
+    for (int k = 0; k &lt; N; k++) {
+      t[k] = k * dt;
+      if (t[k] &gt;= 1.0 &amp;&amp; t[k] &lt; 6.0) { vTrue[k] = 1.1; wTrue[k] = 0.0; }
+      else if (t[k] &gt;= 6.0 &amp;&amp; t[k] &lt; 12.0) { vTrue[k] = 0.8; wTrue[k] = 0.35; }
+      else if (t[k] &gt;= 12.0 &amp;&amp; t[k] &lt; 16.0) { vTrue[k] = 0.0; wTrue[k] = -0.6; }
+      else if (t[k] &gt;= 16.0 &amp;&amp; t[k] &lt; 20.0) { vTrue[k] = 1.0; wTrue[k] = 0.15; }
+      else { vTrue[k] = 0.0; wTrue[k] = 0.0; }
+    }
+
+    for (int k = 1; k &lt; N; k++) thetaTrue[k] = wrapToPi(thetaTrue[k - 1] + dt * wTrue[k]);
+
+    Random rng = new Random(2);
+    // Wheel measurements: noise + quantization + spikes
+    double[] vW = new double[N];
+    double[] wW = new double[N];
+    double qv = 0.02, qw = 0.02;
+
+    for (int k = 0; k &lt; N; k++) {
+      vW[k] = vTrue[k] + 0.05 * rng.nextGaussian();
+      wW[k] = wTrue[k] + 0.08 * rng.nextGaussian();
+      vW[k] = Math.rint(vW[k] / qv) * qv;
+      wW[k] = Math.rint(wW[k] / qw) * qw;
+    }
+
+    for (int s = 0; s &lt; 12; s++) {
+      int idx = rng.nextInt(N);
+      wW[idx] += 2.0 * rng.nextGaussian();
+      vW[idx] += 0.8 * rng.nextGaussian();
+    }
+
+    // Wheel heading from integrating wheel yaw rate
+    double[] thetaW = new double[N];
+    for (int k = 1; k &lt; N; k++) thetaW[k] = wrapToPi(thetaW[k - 1] + dt * wW[k]);
+
+    // Gyro yaw rate: bias + noise + random walk bias drift
+    double[] wG = new double[N];
+    double[] bias = new double[N];
+    bias[0] = 0.03;
+    for (int k = 1; k &lt; N; k++) bias[k] = bias[k - 1] + 0.0005 * rng.nextGaussian();
+    for (int k = 0; k &lt; N; k++) wG[k] = wTrue[k] + bias[k] + 0.05 * rng.nextGaussian();
+
+    // Robust pre-filter
+    double[] vWh = hampelFilter(vW, 11, 3.0);
+    double[] wWh = hampelFilter(wW, 11, 3.0);
+
+    // Filters
+    double vFcHz = 5.0, wFcHz = 8.0, thetaFcHz = 0.7;
+    double vMax = 2.0, wMax = 3.0, slipGate = 1.2;
+
+    FirstOrderLowPass vLP = FirstOrderLowPass.fromCutoff(vFcHz, dt);
+    FirstOrderLowPass wLP = FirstOrderLowPass.fromCutoff(wFcHz, dt);
+    ComplementaryHeadingFilter thetaCF = ComplementaryHeadingFilter.fromCutoff(thetaFcHz, dt);
+
+    double x = 0.0, y = 0.0, theta = 0.0;
+
+    FileWriter out = new FileWriter("chapter5_lesson4_out_java.csv");
+    out.write("t,x,y,theta,v_f,w_f\n");
+
+    for (int k = 0; k &lt; N; k++) {
+      double v = clamp(vWh[k], -vMax, vMax);
+      double ww = clamp(wWh[k], -wMax, wMax);
+      double wg = clamp(wG[k], -wMax, wMax);
+
+      double resid = Math.abs(wg - ww);
+      double alphaEff = (resid &gt; slipGate) ? Math.min(0.995, thetaCF.alpha + 0.15) : thetaCF.alpha;
+
+      double vF = vLP.step(v);
+      double wF = wLP.step(ww);
+
+      theta = thetaCF.step(wg, thetaW[k], dt, alphaEff);
+
+      x += dt * vF * Math.cos(theta);
+      y += dt * vF * Math.sin(theta);
+
+      out.write(String.format(java.util.Locale.US, "%f,%f,%f,%f,%f,%f\n",
+          t[k], x, y, theta, vF, wF));
+    }
+
+    out.close();
+    System.out.println("Wrote chapter5_lesson4_out_java.csv");
+  }
+}
+      </code></pre>
+
+      <h3>8.4 MATLAB / Simulink (Robotics System Toolbox optional)</h3>
+      <p><strong>File:</strong> Chapter5_Lesson4.m</p>
+      <pre><code class="language-matlab">
+% Chapter5_Lesson4.m
+% Autonomous Mobile Robots — Chapter 5 Lesson 4: Practical Odometry Filtering
+%
+% Demonstrates:
+%  - Hampel outlier suppression (median + MAD)
+%  - First-order low-pass filtering (IIR)
+%  - Complementary heading fusion: wheel heading (low-freq) + gyro integration (high-freq)
+%  - Planar pose integration
+%  - Programmatic construction of a simple Simulink model implementing the same filter logic
+%
+% Toolboxes (optional but useful):
+%  - Robotics System Toolbox (for ROS message types, not required here)
+%  - Simulink (required to build the model)
+%
+% Run:
+%   Chapter5_Lesson4
+%
+% Output:
+%   - Plots
+%   - A Simulink model file: Chapter5_Lesson4_OdometryFilter.slx (if Simulink is available)
+
+clear; clc; close all;
+
+dt = 0.01;
+T = 20.0;
+N = floor(T/dt);
+t = (0:N-1)' * dt;
+
+% --- Truth signals
+vTrue = zeros(N,1);
+wTrue = zeros(N,1);
+for k = 1:N
+    if t(k) &gt;= 1.0 &amp;&amp; t(k) &lt; 6.0
+        vTrue(k) = 1.1; wTrue(k) = 0.0;
+    elseif t(k) &gt;= 6.0 &amp;&amp; t(k) &lt; 12.0
+        vTrue(k) = 0.8; wTrue(k) = 0.35;
+    elseif t(k) &gt;= 12.0 &amp;&amp; t(k) &lt; 16.0
+        vTrue(k) = 0.0; wTrue(k) = -0.6;
+    elseif t(k) &gt;= 16.0 &amp;&amp; t(k) &lt; 20.0
+        vTrue(k) = 1.0; wTrue(k) = 0.15;
+    end
+end
+
+thetaTrue = zeros(N,1);
+for k = 2:N
+    thetaTrue(k) = wrapToPi(thetaTrue(k-1) + dt*wTrue(k));
+end
+
+% --- Measurements
+rng(2);
+vW = vTrue + 0.05*randn(N,1);
+wW = wTrue + 0.08*randn(N,1);
+
+qv = 0.02; qw = 0.02;
+vW = round(vW/qv)*qv;
+wW = round(wW/qw)*qw;
+
+spikeIdx = randperm(N, 12);
+vW(spikeIdx) = vW(spikeIdx) + 0.8*randn(12,1);
+wW(spikeIdx) = wW(spikeIdx) + 2.0*randn(12,1);
+
+thetaW = zeros(N,1);
+for k = 2:N
+    thetaW(k) = wrapToPi(thetaW(k-1) + dt*wW(k));
+end
+
+bias = zeros(N,1);
+bias(1) = 0.03;
+for k = 2:N
+    bias(k) = bias(k-1) + 0.0005*randn();
+end
+wG = wTrue + bias + 0.05*randn(N,1);
+
+% --- Hampel filter
+vWh = hampel1d(vW, 11, 3.0);
+wWh = hampel1d(wW, 11, 3.0);
+
+% --- Low-pass coefficients (exact discretization)
+vFc = 5.0;  wFc = 8.0;  thFc = 0.7;
+vAlpha = exp(-dt / (1/(2*pi*vFc)));
+wAlpha = exp(-dt / (1/(2*pi*wFc)));
+thAlpha = exp(-dt / (1/(2*pi*thFc)));
+
+vMax = 2.0; wMax = 3.0; slipGate = 1.2;
+
+% --- Filtering loop
+xF = zeros(N,1); yF = zeros(N,1); thF = zeros(N,1);
+vF = zeros(N,1); wF = zeros(N,1);
+
+for k = 1:N
+    v = min(max(vWh(k), -vMax), vMax);
+    ww = min(max(wWh(k), -wMax), wMax);
+    wg = min(max(wG(k), -wMax), wMax);
+
+    if k == 1
+        vF(k) = v; wF(k) = ww; thF(k) = thetaW(k);
+    else
+        vF(k) = vAlpha*vF(k-1) + (1-vAlpha)*v;
+        wF(k) = wAlpha*wF(k-1) + (1-wAlpha)*ww;
+
+        resid = abs(wg - ww);
+        alphaEff = thAlpha;
+        if resid &gt; slipGate
+            alphaEff = min(0.995, thAlpha + 0.15);
+        end
+
+        pred = wrapToPi(thF(k-1) + dt*wg);
+        thF(k) = wrapToPi(alphaEff*pred + (1-alphaEff)*thetaW(k));
+    end
+
+    if k == 1
+        xF(k) = 0; yF(k) = 0;
+    else
+        xF(k) = xF(k-1) + dt*vF(k)*cos(thF(k));
+        yF(k) = yF(k-1) + dt*vF(k)*sin(thF(k));
+    end
+end
+
+% --- Truth position
+xTrue = zeros(N,1); yTrue = zeros(N,1);
+for k = 2:N
+    xTrue(k) = xTrue(k-1) + dt*vTrue(k)*cos(thetaTrue(k));
+    yTrue(k) = yTrue(k-1) + dt*vTrue(k)*sin(thetaTrue(k));
+end
+
+figure; plot(t, vTrue, 'LineWidth', 1.2); hold on;
+plot(t, vW, 'LineWidth', 0.7);
+plot(t, vWh, 'LineWidth', 1.0);
+legend('v true','v wheel raw','v wheel Hampel'); xlabel('t [s]'); ylabel('v [m/s]');
+title('Linear velocity filtering');
+
+figure; plot(t, wTrue, 'LineWidth', 1.2); hold on;
+plot(t, wW, 'LineWidth', 0.7);
+plot(t, wWh, 'LineWidth', 1.0);
+plot(t, wG, 'LineWidth', 0.9);
+legend('w true','w wheel raw','w wheel Hampel','w gyro'); xlabel('t [s]'); ylabel('w [rad/s]');
+title('Yaw-rate streams');
+
+figure; plot(xTrue, yTrue, 'LineWidth', 1.2); hold on;
+plot(xF, yF, 'LineWidth', 1.2); axis equal; grid on;
+legend('truth','filtered odometry'); xlabel('x [m]'); ylabel('y [m]');
+title('Trajectory comparison');
+
+figure; eTh = wrapToPi(thF - thetaTrue);
+plot(t, eTh, 'LineWidth', 1.2); xlabel('t [s]'); ylabel('heading error [rad]');
+title('Heading error after complementary fusion');
+
+% --- Build Simulink model programmatically (optional)
+try
+    buildSimulinkModel();
+    disp('Built Simulink model: Chapter5_Lesson4_OdometryFilter.slx');
+catch ME
+    disp('Simulink model build skipped (Simulink may be unavailable):');
+    disp(ME.message);
+end
+
+% ---------- Local functions ----------
+function y = wrapToPi(a)
+    y = mod(a + pi, 2*pi) - pi;
+end
+
+function y = hampel1d(x, window, nSigmas)
+    if mod(window,2) == 0
+        error('window must be odd');
+    end
+    k = floor(window/2);
+    y = x;
+    for i = (k+1):(length(x)-k)
+        w = x((i-k):(i+k));
+        med = median(w);
+        MAD = median(abs(w-med)) + 1e-12;
+        sigma = 1.4826*MAD;
+        if abs(x(i)-med) &gt; nSigmas*sigma
+            y(i) = med;
+        end
+    end
+end
+
+function buildSimulinkModel()
+    mdl = 'Chapter5_Lesson4_OdometryFilter';
+    if bdIsLoaded(mdl)
+        close_system(mdl, 0);
+    end
+    new_system(mdl);
+    open_system(mdl);
+
+    % Blocks: In1 (v), In1 (w_g), In1 (theta_w), Unit Delay, Gain, Sum, etc.
+    % This is a compact educational model (not a full ROS pipeline).
+
+    add_block('simulink/Sources/In1', [mdl '/v_w'], 'Position', [30 50 60 70]);
+    add_block('simulink/Sources/In1', [mdl '/omega_g'], 'Position', [30 120 60 140]);
+    add_block('simulink/Sources/In1', [mdl '/theta_w'], 'Position', [30 190 60 210]);
+
+    % Discrete low-pass for v: y = alpha*z^-1*y + (1-alpha)*x
+    add_block('simulink/Discrete/Unit Delay', [mdl '/z1_v'], 'Position', [150 45 190 75]);
+    add_block('simulink/Math Operations/Gain', [mdl '/alpha_v'], 'Gain', '0.9', 'Position', [230 45 280 75]);
+    add_block('simulink/Math Operations/Gain', [mdl '/one_minus_alpha_v'], 'Gain', '0.1', 'Position', [230 90 280 120]);
+    add_block('simulink/Math Operations/Sum', [mdl '/sum_v'], 'Inputs', '++', 'Position', [320 60 350 100]);
+
+    add_line(mdl, 'v_w/1', 'one_minus_alpha_v/1');
+    add_line(mdl, 'z1_v/1', 'alpha_v/1');
+    add_line(mdl, 'alpha_v/1', 'sum_v/1');
+    add_line(mdl, 'one_minus_alpha_v/1', 'sum_v/2');
+    add_line(mdl, 'sum_v/1', 'z1_v/1');
+
+    add_block('simulink/Sinks/Out1', [mdl '/v_f'], 'Position', [390 70 420 90]);
+    add_line(mdl, 'sum_v/1', 'v_f/1');
+
+    % Complementary heading: theta = alpha*(z^-1*theta + dt*omega_g) + (1-alpha)*theta_w
+    add_block('simulink/Discrete/Unit Delay', [mdl '/z1_theta'], 'Position', [150 160 190 190]);
+    add_block('simulink/Math Operations/Gain', [mdl '/dt'], 'Gain', '0.01', 'Position', [150 110 190 140]);
+    add_block('simulink/Math Operations/Sum', [mdl '/pred'], 'Inputs', '++', 'Position', [230 135 260 175]);
+
+    add_block('simulink/Math Operations/Gain', [mdl '/alpha_theta'], 'Gain', '0.95', 'Position', [300 135 350 165]);
+    add_block('simulink/Math Operations/Gain', [mdl '/one_minus_alpha_theta'], 'Gain', '0.05', 'Position', [300 195 350 225]);
+    add_block('simulink/Math Operations/Sum', [mdl '/sum_theta'], 'Inputs', '++', 'Position', [390 160 420 200]);
+    add_block('simulink/Sinks/Out1', [mdl '/theta_f'], 'Position', [460 170 490 190]);
+
+    add_line(mdl, 'omega_g/1', 'dt/1');
+    add_line(mdl, 'dt/1', 'pred/2');
+    add_line(mdl, 'z1_theta/1', 'pred/1');
+
+    add_line(mdl, 'pred/1', 'alpha_theta/1');
+    add_line(mdl, 'theta_w/1', 'one_minus_alpha_theta/1');
+    add_line(mdl, 'alpha_theta/1', 'sum_theta/1');
+    add_line(mdl, 'one_minus_alpha_theta/1', 'sum_theta/2');
+    add_line(mdl, 'sum_theta/1', 'z1_theta/1');
+    add_line(mdl, 'sum_theta/1', 'theta_f/1');
+
+    set_param(mdl, 'StopTime', '20');
+    save_system(mdl);
+    close_system(mdl, 1);
+end
+      </code></pre>
+
+      <h3>8.5 Wolfram Mathematica</h3>
+      <p><strong>File:</strong> Chapter5_Lesson4.nb</p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter5_Lesson4.nb
+   Autonomous Mobile Robots — Chapter 5 Lesson 4: Practical Odometry Filtering
+
+   This notebook-style script (saved as .nb text) derives and demonstrates:
+   - Discrete first-order low-pass filter (exact discretization)
+   - Moving-average frequency response
+   - Complementary heading fusion in discrete time
+*)
+
+Notebook[{
+  Cell["Chapter 5 Lesson 4: Practical Odometry Filtering", "Title"],
+  Cell["1. First-order low-pass filter: exact discretization", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      (* Continuous-time model: tau y'(t) + y(t) = x(t) *)
+      "tau y'(t) + y(t) = x(t)"
+    ], "Text"
+  ],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      (* Exact discrete update with zero-order hold on x *)
+      "y[k] = alpha y[k-1] + (1-alpha) x[k],  alpha = Exp[-Ts/tau]"
+    ], "Text"
+  ],
+  Cell[BoxData@ToBoxes@
+    Module[{tau = 0.3, Ts = 0.01, alpha, n = 2000, x, y},
+      alpha = Exp[-Ts/tau];
+      x = Join[ConstantArray[0, 200], ConstantArray[1, n - 200]];
+      y = NestList[alpha #1 + (1 - alpha) #2 &, x[[1]], Rest[x]];
+      ListLinePlot[{x, y}, PlotLegends -&gt; {"x[k]", "y[k]"}, AxesLabel -&gt; {"k", "value"}]
+    ], "Input"
+  ],
+  Cell["2. Moving average frequency response", "Section"],
+  Cell[BoxData@ToBoxes@
+    Module[{N = 15, w},
+      w = Subdivide[0, Pi, 500];
+      (* |H(e^{jw})| for moving average *)
+      ListLinePlot[
+        Transpose@{w, Abs[Sin[N w/2]/(N Sin[w/2])]},
+        AxesLabel -&gt; {"w", "|H(e^{jw})|"},
+        PlotRange -&gt; All
+      ]
+    ], "Input"
+  ],
+  Cell["3. Complementary heading fusion (discrete)", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      "theta_hat[k] = alpha (theta_hat[k-1] + Ts omega_g[k]) + (1-alpha) theta_w[k]"
+    ], "Text"
+  ],
+  Cell[BoxData@ToBoxes@
+    Module[{Ts = 0.01, tau = 0.5, alpha, n = 3000, t, wTrue, bias, wG, wW, thetaW, thetaHat},
+      alpha = Exp[-Ts/tau];
+      t = Range[0, n - 1] Ts;
+      wTrue = 0.4 Exp[-(t - 5)^2/5] + 0.2 UnitStep[t - 10];
+      bias = 0.03 + Accumulate[0.0002 RandomVariate[NormalDistribution[], n]];
+      wG = wTrue + bias + 0.05 RandomVariate[NormalDistribution[], n];
+      wW = wTrue + 0.10 RandomVariate[NormalDistribution[], n];
+      thetaW = FoldList[Mod[#1 + Ts #2 + Pi, 2 Pi] - Pi &, 0, wW];
+      thetaHat = FoldList[
+        Mod[alpha (Mod[#1 + Ts #2 + Pi, 2 Pi] - Pi) + (1 - alpha) #3 + Pi, 2 Pi] - Pi &,
+        thetaW[[1]], Transpose[{wG, thetaW}]
+      ];
+      ListLinePlot[{thetaW, thetaHat}, PlotLegends -&gt; {"wheel heading", "complementary theta_hat"},
+        AxesLabel -&gt; {"k", "rad"}]
+    ], "Input"
+  ]
+},
+WindowSize -&gt; {1100, 700},
+WindowTitle -&gt; "Chapter5_Lesson4"
+]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong
+          >Problem 1 (Exact discretization of a first-order low-pass):</strong
+        >
+        Starting from the continuous-time model
+        <strong>\( &bsol;tau \dot{y}(t) + y(t) = x(t) \)</strong>, assume ZOH on
+        <strong>\( x(t) \)</strong> over each sampling interval of length
+        <strong>\( T_s \)</strong>. Derive the exact discrete recursion and show
+        that <strong>\( 0 &lt; \alpha &lt; 1 \)</strong> when
+        <strong>\( &bsol;tau &gt; 0 \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Solve the linear ODE on
+        <strong>\( [kT_s,(k+1)T_s) \)</strong> with constant input
+        <strong>\( x(t)=x[k] \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{y}(t) + \frac{1}{&bsol;tau}y(t) = \frac{1}{&bsol;tau}x[k]. \]
+      </h4>
+      <p>
+        The solution with initial condition
+        <strong>\( y(kT_s)=y[k-1] \)</strong> is:
+      </p>
+      <h4 class="mathJax">
+        \[ y((k+1)T_s) = e^{-\frac{T_s}{&bsol;tau}} y[k-1] +
+        \left(1-e^{-\frac{T_s}{&bsol;tau}}\right) x[k]. \]
+      </h4>
+      <p>
+        Define <strong>\( \alpha = e^{-\frac{T_s}{&bsol;tau}} \)</strong> to
+        obtain <strong>\( y[k] = \alpha y[k-1] + (1-\alpha)x[k] \)</strong>. If
+        <strong>\( &bsol;tau &gt; 0 \)</strong> and
+        <strong>\( T_s &gt; 0 \)</strong> then
+        <strong>\( -\frac{T_s}{&bsol;tau} &lt; 0 \)</strong>, hence
+        <strong>\( 0 &lt; e^{-\frac{T_s}{&bsol;tau}} &lt; 1 \)</strong>, i.e.,
+        <strong>\( 0 &lt; \alpha &lt; 1 \)</strong>.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong
+          >Problem 2 (Moving average linear phase and group delay):</strong
+        >
+        Show that the moving average filter
+        <strong>\( y[k]=\frac{1}{N}\sum_{i=0}^{N-1}x[k-i] \)</strong>
+        has linear phase and group delay
+        <strong>\( \tau_g=\frac{N-1}{2}T_s \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> The impulse response is
+        <strong>\( h[i]=\frac{1}{N} \)</strong> for
+        <strong>\( i=0,\dots,N-1 \)</strong>, and
+        <strong>\( 0 \)</strong> otherwise. This is symmetric about
+        <strong>\( \frac{N-1}{2} \)</strong>, i.e.,
+        <strong>\( h[i]=h[N-1-i] \)</strong>. Such symmetric FIR filters have
+        linear phase. The frequency response can be written as:
+      </p>
+      <h4 class="mathJax">
+        \[ H(e^{j\Omega}) = e^{-j\Omega\frac{N-1}{2}} A(\Omega), \]
+      </h4>
+      <p>
+        where <strong>\( A(\Omega) \)</strong> is real and even. Therefore the
+        phase is <strong>\( -\Omega\frac{N-1}{2} \)</strong> (modulo sign flips
+        at zeros), and group delay is
+        <strong
+          >\( \tau_g =
+          -\frac{d}{d\Omega}\left(-\Omega\frac{N-1}{2}\right)T_s=\frac{N-1}{2}T_s
+          \)</strong
+        >.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 3 (Complementary identity and steady behavior):</strong>
+        Prove that <strong>\( H_{LP}(s)+H_{HP}(s)=1 \)</strong> for
+        <strong>\( H_{LP}(s)=\frac{1}{1+s&bsol;tau} \)</strong>,
+        <strong>\( H_{HP}(s)=\frac{s&bsol;tau}{1+s&bsol;tau} \)</strong>. Then
+        interpret what this means when the gyro has a constant bias
+        <strong>\( b_0 \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Direct algebra yields:
+      </p>
+      <h4 class="mathJax">
+        \[ H_{LP}(s)+H_{HP}(s) = \frac{1}{1+s&bsol;tau} +
+        \frac{s&bsol;tau}{1+s&bsol;tau} = \frac{1+s&bsol;tau}{1+s&bsol;tau} = 1.
+        \]
+      </h4>
+      <p>
+        Thus, across frequencies, the two paths “sum” to unity gain. If the gyro
+        has constant bias <strong>\( b_0 \)</strong>, then integrating yaw-rate
+        adds a ramp component to heading. The high-pass path attenuates
+        low-frequency (including near-DC) components, reducing the contribution
+        of bias-induced drift, while the low-pass path injects wheel heading at
+        low frequencies to anchor the estimate.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 4 (Robustness of the Hampel median rule):</strong>
+        Explain why a median-based center estimate can tolerate up to (nearly)
+        50% arbitrary outliers in a window without diverging.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The median is an order statistic: it depends only on the rank ordering.
+        If fewer than half the samples are corrupted, the median must still lie
+        within the range of the uncorrupted samples (because at least half the
+        data remain “good”, so the middle-ranked element cannot be forced beyond
+        the good set). Hence its breakdown point is 50%, meaning an adversary
+        must corrupt at least half the data in the window to drive the median
+        arbitrarily far. The Hampel filter inherits this robustness because it
+        uses the median and MAD (also median-based) to detect and replace
+        spikes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Summary</h2>
+    <div class="down-content">
+      <p>
+        We treated odometry as a set of discrete-time signals and derived
+        practical filters that are widely used before introducing probabilistic
+        localization. You derived the exact discrete first-order low-pass from a
+        continuous-time model, proved stability via impulse-response
+        summability, and analyzed FIR moving-average phase delay. You then
+        constructed a complementary heading fusion method combining wheel
+        heading and gyro integration, and integrated robust statistics (Hampel)
+        and slip-aware gating to handle outliers. These methods provide a strong
+        baseline and a clean bridge to Chapter 6, where uncertainty and Bayes
+        filtering will be made explicit.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. References</h2>
+    <ol>
+      <li>
+        Borenstein, J., Everett, H.R., Feng, L., &amp; Wehe, D. (1997). Mobile
+        robot position estimation and localization using dead-reckoning and
+        inertial sensors.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >.
+      </li>
+      <li>
+        Borenstein, J., &amp; Feng, L. (1996). Measurement and correction of
+        systematic odometry errors in mobile robots.
+        <em>IEEE Transactions on Robotics and Automation</em>, 12(6), 869–880.
+      </li>
+      <li>
+        Kleeman, L. (1992). A three-dimensional localiser for autonomous robot
+        vehicles.
+        <em>Proceedings of SPIE Mobile Robots</em>, 1831, 174–185.
+      </li>
+      <li>
+        Mahony, R., Hamel, T., &amp; Pflimlin, J.-M. (2008). Nonlinear
+        complementary filters on the special orthogonal group.
+        <em>IEEE Transactions on Automatic Control</em>, 53(5), 1203–1218.
+      </li>
+      <li>
+        Madgwick, S.O.H., Harrison, A.J.L., &amp; Vaidyanathan, R. (2011).
+        Estimation of IMU and MARG orientation using a gradient descent
+        algorithm.
+        <em
+          >Proceedings of the IEEE International Conference on Rehabilitation
+          Robotics (ICORR)</em
+        >.
+      </li>
+      <li>
+        Hampel, F.R. (1974). The influence curve and its role in robust
+        estimation.
+        <em>Journal of the American Statistical Association</em>, 69(346),
+        383–393.
+      </li>
+      <li>
+        Oppenheim, A.V., &amp; Schafer, R.W. (2010).
+        <em>Discrete-Time Signal Processing</em>. Prentice Hall.
+      </li>
+      <li>
+        Thrun, S., Burgard, W., &amp; Fox, D. (2005).
+        <em>Probabilistic Robotics</em>. MIT Press. (Background for Chapter 6
+        onward.)
+      </li>
+      <li>
+        Kelly, A. (2004). Mobile robot localization from the ground up: An
+        introduction to estimation algorithms for localization.
+        <em>Technical report / lecture notes</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter5/Lesson3.html">
+          Lesson 3: Drift Sources and Bias Accumulation
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter5/Lesson5.html">
+          Lesson 5: Lab: Characterizing Odometry Error
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="active-lesson" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

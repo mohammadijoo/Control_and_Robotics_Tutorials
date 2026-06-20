@@ -1,0 +1,2919 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 8: Particle-Filter Localization - Lesson 5: Lab: Implement MCL on a Map | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 8: Particle-Filter Localization</h1>
+    <h3><strong>Lesson 5: Lab: Implement MCL on a Map</strong></h3>
+    <p>
+      This lab builds a full Monte Carlo Localization (MCL) pipeline for a
+      ground robot in a known 2D map. You will implement (i) a sampled odometry
+      motion model, (ii) a range-sensor likelihood model using ray casting,
+      (iii) weight normalization and degeneracy diagnostics, and (iv) resampling
+      with optional random-particle injection for global recovery. We emphasize
+      the Bayesian foundations, the importance-sampling derivation of particle
+      weights, and the numerical stability details required for a robust
+      implementation.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Goal and System Setup -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Goal and System Setup</h2>
+    <div class="down-content">
+      <p>
+        <strong>Goal:</strong> Implement an MCL estimator that maintains a
+        belief over robot pose
+        <strong> \( \mathbf{x}_t = [x_t, y_t, \theta_t]^T \):</strong>
+        and recursively updates this belief using (A) odometry increments
+        <strong> \( \mathbf{u}_t \):</strong> and (B) range measurements
+        <strong> \( \mathbf{z}_t \):</strong> within a known occupancy map
+        <strong> \( m \):</strong>.
+      </p>
+
+      <p>
+        <strong>Inputs (per time step):</strong>
+      </p>
+      <ul>
+        <li>
+          Odometry increment (differential-drive friendly)
+          <strong>
+            \( \Delta = (\delta_{\text{rot}1}, \delta_{\text{trans}},
+            \delta_{\text{rot}2}) \):</strong
+          >
+          computed from encoder-derived pose change.
+        </li>
+        <li>
+          Range scan as a set of beam ranges
+          <strong> \( \mathbf{z}_t = [z_{t,1}, \dots, z_{t,K}]^T \):</strong>
+          at known beam angles
+          <strong> \( \boldsymbol{\phi} = [\phi_1,\dots,\phi_K]^T \):</strong>.
+        </li>
+      </ul>
+
+      <p>
+        <strong>Outputs:</strong> a filtered pose estimate
+        <strong> \( \hat{\mathbf{x}}_t \):</strong>
+        and an uncertainty proxy (e.g., weighted covariance) plus diagnostics
+        like effective sample size.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Start"] --> B["Load occupancy grid map"]
+  B --> C["Initialize N particles on free space"]
+  C --> D["Loop over time"]
+  D --> E["Read odometry increment"]
+  E --> F["Sample motion model for each particle"]
+  F --> G["Read range scan"]
+  G --> H["Compute likelihood weight from map ray casting"]
+  H --> I["Normalize weights and compute Neff"]
+  I --> J["Resample if degeneracy detected"]
+  J --> K["Compute pose estimate and log results"]
+  K --> D
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Bayesian Formulation and Particle Approximation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Bayesian Formulation and Particle Approximation</h2>
+    <div class="down-content">
+      <p>
+        The Bayes filter for localization in a known map updates the posterior
+        belief
+        <strong> \( \mathrm{bel}(\mathbf{x}_t) \):</strong> using motion and
+        measurement models. The canonical recursion is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{bel}(\mathbf{x}_t) = \eta \; p(\mathbf{z}_t \mid
+        \mathbf{x}_t, m) \int p(\mathbf{x}_t \mid \mathbf{u}_t,
+        \mathbf{x}_{t-1}) \; \mathrm{bel}(\mathbf{x}_{t-1}) \; d\mathbf{x}_{t-1}
+        \]
+      </h4>
+
+      <p>
+        MCL approximates the belief with a weighted empirical measure:
+        <strong>
+          \( \mathcal{X}_t = \{(\mathbf{x}_t^{(i)}, w_t^{(i)})\}_{i=1}^N
+          \):</strong
+        >
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{bel}(\mathbf{x}_t) \approx \sum_{i=1}^{N} w_t^{(i)} \,
+        \delta\!\left(\mathbf{x}_t - \mathbf{x}_t^{(i)}\right), \quad
+        \sum_{i=1}^{N} w_t^{(i)} = 1, \quad w_t^{(i)} \ge 0 \]
+      </h4>
+
+      <p>
+        The posterior expectation of any test function
+        <strong> \( f(\mathbf{x}) \):</strong>
+        is approximated by a Monte Carlo estimator:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbb{E}[f(\mathbf{x}_t) \mid \mathbf{z}_{1:t}, \mathbf{u}_{1:t}]
+        \approx \sum_{i=1}^{N} w_t^{(i)} f(\mathbf{x}_t^{(i)}). \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Importance Sampling Derivation of the Weight Update -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Importance Sampling Derivation of the Weight Update</h2>
+    <div class="down-content">
+      <p>
+        Suppose we want to approximate a target posterior density
+        <strong>
+          \( \pi(\mathbf{x}_t) \propto p(\mathbf{z}_t \mid \mathbf{x}_t, m) \,
+          \bar{\pi}(\mathbf{x}_t) \):</strong
+        >
+        where <strong> \( \bar{\pi}(\mathbf{x}_t) \):</strong> denotes the
+        predicted prior produced by the motion model integral. We sample from a
+        proposal <strong> \( q(\mathbf{x}_t) \):</strong> and correct with
+        weights.
+      </p>
+
+      <p>
+        <strong>Key identity:</strong> for any integrable function
+        <strong> \( f \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \int f(\mathbf{x}_t)\,\pi(\mathbf{x}_t)\,d\mathbf{x}_t = \int
+        f(\mathbf{x}_t)\,\frac{\pi(\mathbf{x}_t)}{q(\mathbf{x}_t)}\,q(\mathbf{x}_t)\,d\mathbf{x}_t
+        \approx \frac{1}{N}\sum_{i=1}^{N} f(\mathbf{x}_t^{(i)}) \,
+        \tilde{w}_t^{(i)}, \quad
+        \tilde{w}_t^{(i)}=\frac{\pi(\mathbf{x}_t^{(i)})}{q(\mathbf{x}_t^{(i)})}.
+        \]
+      </h4>
+
+      <p>
+        In standard MCL, the proposal is the motion model:
+        <strong>
+          \( q(\mathbf{x}_t \mid \mathbf{x}_{t-1}^{(i)}, \mathbf{u}_t) =
+          p(\mathbf{x}_t \mid \mathbf{u}_t, \mathbf{x}_{t-1}^{(i)}) \):</strong
+        >
+        and each particle is propagated by sampling this transition. Then the
+        unnormalized importance weight becomes:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \tilde{w}_t^{(i)} \propto w_{t-1}^{(i)} \, p(\mathbf{z}_t \mid
+        \mathbf{x}_t^{(i)}, m). \]
+      </h4>
+
+      <p>
+        <strong>Interpretation:</strong> motion sampling spreads particles
+        according to odometry uncertainty; the sensor likelihood concentrates
+        weight near poses consistent with the map.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Motion Model (Odometry Increment) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Motion Model (Sampled Odometry Model)</h2>
+    <div class="down-content">
+      <p>
+        For differential-drive ground robots, a convenient incremental odometry
+        parameterization is:
+        <strong>
+          \( \Delta = (\delta_{\text{rot}1}, \delta_{\text{trans}},
+          \delta_{\text{rot}2}) \):</strong
+        >
+        representing an initial rotation, a translation, then a final rotation.
+      </p>
+
+      <p>
+        The sampled model uses noise parameters
+        <strong>
+          \( \boldsymbol{\alpha} = (\alpha_1,\alpha_2,\alpha_3,\alpha_4)
+          \):</strong
+        >
+        and draws noisy increments:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} \hat{\delta}_{\text{rot}1} &= \delta_{\text{rot}1} +
+        \varepsilon_1, \quad \varepsilon_1 \sim \mathcal{N}\!\left(0,\; \alpha_1
+        \delta_{\text{rot}1}^2 + \alpha_2 \delta_{\text{trans}}^2 \right),\\
+        \hat{\delta}_{\text{trans}} &= \delta_{\text{trans}} + \varepsilon_2,
+        \quad \varepsilon_2 \sim \mathcal{N}\!\left(0,\; \alpha_3
+        \delta_{\text{trans}}^2 + \alpha_4 (\delta_{\text{rot}1}^2 +
+        \delta_{\text{rot}2}^2) \right),\\ \hat{\delta}_{\text{rot}2} &=
+        \delta_{\text{rot}2} + \varepsilon_3, \quad \varepsilon_3 \sim
+        \mathcal{N}\!\left(0,\; \alpha_1 \delta_{\text{rot}2}^2 + \alpha_2
+        \delta_{\text{trans}}^2 \right). \end{aligned} \]
+      </h4>
+
+      <p>
+        Each particle pose
+        <strong> \( \mathbf{x}=[x,y,\theta]^T \):</strong>
+        is propagated by:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} x' &= x + \hat{\delta}_{\text{trans}} \cos(\theta +
+        \hat{\delta}_{\text{rot}1}),\\ y' &= y + \hat{\delta}_{\text{trans}}
+        \sin(\theta + \hat{\delta}_{\text{rot}1}),\\ \theta' &=
+        \mathrm{wrap}\!\left(\theta + \hat{\delta}_{\text{rot}1} +
+        \hat{\delta}_{\text{rot}2}\right). \end{aligned} \]
+      </h4>
+
+      <p>
+        Practical detail: if a sampled pose lands inside an occupied cell,
+        common choices are rejection (keep old pose), projection to nearest free
+        cell, or assigning near-zero likelihood at the sensor-update stage. This
+        lab uses a simple rejection.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Sensor Model (Range Likelihood via Ray Casting) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Sensor Model (Range Likelihood via Ray Casting)</h2>
+    <div class="down-content">
+      <p>
+        Let beam <strong> \( k \):</strong> have angle
+        <strong> \( \phi_k \):</strong> in the robot frame and measured range
+        <strong> \( z_k \):</strong> clipped to
+        <strong> \( [0, r_{\max}] \):</strong>. For a candidate pose
+        <strong> \( \mathbf{x} \):</strong> and map <strong> \( m \):</strong>,
+        ray casting gives the expected range:
+        <strong> \( z_k^{\ast}(\mathbf{x}, m) \):</strong>.
+      </p>
+
+      <p>A robust yet simple mixture likelihood per beam is:</p>
+
+      <h4 class="mathJax">
+        \[ p(z_k \mid \mathbf{x}, m) = z_{\text{hit}} \;
+        \mathcal{N}\!\left(z_k;\; z_k^{\ast}(\mathbf{x}, m),\;
+        \sigma_{\text{hit}}^2 \right) + z_{\text{rand}} \;
+        \mathcal{U}\!\left(0,\; r_{\max}\right), \quad z_{\text{hit}} +
+        z_{\text{rand}} = 1. \]
+      </h4>
+
+      <p>
+        Assuming conditional independence of beams given pose and map (an
+        approximation), the scan likelihood is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(\mathbf{z} \mid \mathbf{x}, m) = \prod_{k=1}^{K} p(z_k \mid
+        \mathbf{x}, m). \]
+      </h4>
+
+      <p>
+        <strong>Numerical stability:</strong> use log-likelihood accumulation:
+        <strong>
+          \( \log p(\mathbf{z} \mid \mathbf{x}, m) = \sum_k \log p(z_k \mid
+          \mathbf{x}, m) \):</strong
+        >
+        then exponentiate after subtracting the maximum log value across
+        particles (avoids underflow).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Degeneracy, Neff, and Resampling -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Degeneracy, Effective Sample Size, and Resampling</h2>
+    <div class="down-content">
+      <p>
+        Weight degeneracy occurs when a few particles carry almost all
+        probability mass. A common diagnostic is the effective sample size:
+        <strong> \( N_{\text{eff}} \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ N_{\text{eff}} = \frac{1}{\sum_{i=1}^{N} \left(w^{(i)}\right)^2}. \]
+      </h4>
+
+      <p>A standard policy is to resample when:</p>
+
+      <h4 class="mathJax">
+        \[ N_{\text{eff}} \; &lt; \; \rho N, \quad \text{with } \rho \in (0,1)
+        \text{ (e.g., } \rho=0.5 \text{).} \]
+      </h4>
+
+      <p>
+        This lab uses <em>systematic resampling</em> (low variance, simple,
+        fast). After resampling, reset weights to <strong> \( 1/N \):</strong>.
+        To handle the kidnapped robot problem, inject a small fraction of
+        uniformly random particles in free space.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+graph TD
+A["After sensor update"] --> B["Compute Neff = 1 / sum(w*w)"]
+B --> C{Neff below threshold?}
+C -->|No| D["Keep particle set"]
+C -->|Yes| E["Systematic resampling"]
+E --> F["Reset weights to 1/N"]
+F --> G["Inject small random fraction"]
+D --> H["Compute estimate and continue"]
+G --> H
+</pre
+        >
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Implementation Checklist and Validation Protocol -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Implementation Checklist and Validation Protocol</h2>
+    <div class="down-content">
+      <p><strong>Minimum implementation checklist:</strong></p>
+      <ol>
+        <li>
+          Represent a binary occupancy grid map and define world &harr; grid
+          transforms.
+        </li>
+        <li>
+          Initialize particles on free space (uniform over free cells; random
+          headings).
+        </li>
+        <li>
+          Implement ray casting to obtain
+          <strong> \( z_k^{\ast}(\mathbf{x}, m) \):</strong> for each beam.
+        </li>
+        <li>
+          Implement the sampled odometry motion model with
+          <strong> \( \boldsymbol{\alpha} \):</strong>.
+        </li>
+        <li>
+          Implement sensor likelihood and stable weight normalization (log
+          domain).
+        </li>
+        <li>
+          Compute <strong> \( N_{\text{eff}} \):</strong>, resample when needed,
+          and inject random particles for global recovery.
+        </li>
+        <li>
+          Estimate pose using weighted mean for x,y and circular mean for
+          heading.
+        </li>
+      </ol>
+
+      <p><strong>Validation protocol (what you should observe):</strong></p>
+      <ul>
+        <li>
+          With correct sensor model and enough particles, the estimate converges
+          from a broad initial distribution to the true trajectory (after a
+          transient).
+        </li>
+        <li>
+          With too few particles, the filter can collapse to the wrong mode;
+          increasing random injection helps recovery but increases jitter.
+        </li>
+        <li>
+          Overconfident sensor model (too small
+          <strong> \( \sigma_{\text{hit}} \):</strong>) causes weight collapse
+          and frequent resampling; underconfident model slows convergence.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Python Implementation (Standalone MCL Demo) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Python Implementation (Standalone MCL Demo)</h2>
+    <div class="down-content">
+      <p>
+        <strong>Libraries:</strong> <code>numpy</code> (vectorized math),
+        <code>matplotlib</code> (visualization). In real robots, common stacks
+        include ROS 2 (<code>rclpy</code>) and Nav2 AMCL, but this lab stays
+        fully standalone.
+      </p>
+
+      <p><strong>File:</strong> Chapter8_Lesson5.py</p>
+      <pre><code class="language-python">
+&quot;&quot;&quot;
+Chapter8_Lesson5.py
+Autonomous Mobile Robots — Chapter 8 (Particle-Filter Localization)
+Lesson 5 Lab: Implement MCL on a Map
+
+Standalone educational implementation of Monte Carlo Localization (MCL)
+on a 2D occupancy-grid &quot;map&quot; with a simple differential-drive odometry model
+and a 2D range sensor (multiple beams) likelihood model.
+
+Dependencies: numpy, matplotlib
+&quot;&quot;&quot;
+
+from __future__ import annotations
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# Utilities
+# -----------------------------
+def wrap_angle(theta: float) -&gt; float:
+    &quot;&quot;&quot;Wrap angle to (-pi, pi].&quot;&quot;&quot;
+    return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+def systematic_resample(weights: np.ndarray, rng: np.random.Generator) -&gt; np.ndarray:
+    &quot;&quot;&quot;Systematic resampling. Returns indices.&quot;&quot;&quot;
+    N = weights.size
+    positions = (rng.random() + np.arange(N)) / N
+    cumsum = np.cumsum(weights)
+    idx = np.zeros(N, dtype=int)
+    i, j = 0, 0
+    while i &lt; N:
+        if positions[i] &lt; cumsum[j]:
+            idx[i] = j
+            i += 1
+        else:
+            j += 1
+    return idx
+
+# -----------------------------
+# Map and ray casting
+# -----------------------------
+class OccupancyGrid:
+    &quot;&quot;&quot;
+    Binary occupancy grid map.
+
+    grid[y, x] = 1 means occupied, 0 means free.
+    The world coordinate frame is aligned with the grid:
+      x in [0, W*res), y in [0, H*res)
+    &quot;&quot;&quot;
+    def __init__(self, grid: np.ndarray, resolution: float):
+        assert grid.ndim == 2
+        self.grid = (grid &gt; 0).astype(np.uint8)
+        self.res = float(resolution)
+        self.H, self.W = self.grid.shape
+
+    def in_bounds(self, x: int, y: int) -&gt; bool:
+        return 0 &lt;= x &lt; self.W and 0 &lt;= y &lt; self.H
+
+    def is_occupied(self, x: int, y: int) -&gt; bool:
+        if not self.in_bounds(x, y):
+            return True  # treat outside as occupied (walls)
+        return bool(self.grid[y, x])
+
+    def world_to_grid(self, wx: float, wy: float) -&gt; tuple[int, int]:
+        gx = int(wx / self.res)
+        gy = int(wy / self.res)
+        return gx, gy
+
+    def grid_to_world(self, gx: int, gy: int) -&gt; tuple[float, float]:
+        wx = (gx + 0.5) * self.res
+        wy = (gy + 0.5) * self.res
+        return wx, wy
+
+def make_demo_map(W: int = 220, H: int = 160) -&gt; OccupancyGrid:
+    &quot;&quot;&quot;
+    Construct a simple indoor-like map with walls and rectangular obstacles.
+    &quot;&quot;&quot;
+    grid = np.zeros((H, W), dtype=np.uint8)
+
+    # outer walls
+    grid[0, :] = 1
+    grid[-1, :] = 1
+    grid[:, 0] = 1
+    grid[:, -1] = 1
+
+    # obstacles
+    grid[30:55, 40:160] = 1
+    grid[85:110, 20:90] = 1
+    grid[85:140, 140:170] = 1
+    grid[15:40, 180:205] = 1
+    return OccupancyGrid(grid, resolution=0.05)  # 5 cm/cell
+
+def ray_cast(map_: OccupancyGrid, x: float, y: float, theta: float, r_max: float, step: float = 0.02) -&gt; float:
+    &quot;&quot;&quot;
+    Ray-cast from (x, y) along theta (world units). Returns first-hit range (&lt;= r_max).
+    step is in meters (world units).
+    &quot;&quot;&quot;
+    r = 0.0
+    while r &lt; r_max:
+        wx = x + r * math.cos(theta)
+        wy = y + r * math.sin(theta)
+        gx, gy = map_.world_to_grid(wx, wy)
+        if map_.is_occupied(gx, gy):
+            return r
+        r += step
+    return r_max
+
+# -----------------------------
+# MCL / Particle filter
+# -----------------------------
+class MCL:
+    &quot;&quot;&quot;
+    Monte Carlo Localization for 2D pose (x, y, theta).
+
+    Motion model: odometry increments (delta_rot1, delta_trans, delta_rot2)
+                 with noise parameters alpha1..alpha4 (Probabilistic Robotics).
+    Sensor model: range beams with mixture p(z|x) = z_hit*N(z; z*, sigma_hit) + z_rand*U(0,r_max)
+                  using expected ranges z* from ray casting on the map.
+    &quot;&quot;&quot;
+    def __init__(
+        self,
+        map_: OccupancyGrid,
+        N: int = 1000,
+        r_max: float = 6.0,
+        beam_angles: np.ndarray | None = None,
+        sigma_hit: float = 0.15,
+        z_hit: float = 0.85,
+        z_rand: float = 0.15,
+        alpha: tuple[float, float, float, float] = (0.03, 0.01, 0.03, 0.01),
+        rng: np.random.Generator | None = None,
+    ):
+        self.map = map_
+        self.N = int(N)
+        self.r_max = float(r_max)
+        self.sigma_hit = float(sigma_hit)
+        self.z_hit = float(z_hit)
+        self.z_rand = float(z_rand)
+        self.alpha1, self.alpha2, self.alpha3, self.alpha4 = map(float, alpha)
+        self.rng = rng if rng is not None else np.random.default_rng(0)
+
+        if beam_angles is None:
+            # 13 beams from -90 to +90 degrees
+            self.beam_angles = np.deg2rad(np.linspace(-90, 90, 13)).astype(float)
+        else:
+            self.beam_angles = np.array(beam_angles, dtype=float)
+
+        self.particles = np.zeros((self.N, 3), dtype=float)  # [x,y,theta]
+        self.weights = np.full(self.N, 1.0 / self.N, dtype=float)
+
+    def initialize_uniform(self):
+        &quot;&quot;&quot;Uniformly sample particles over free cells.&quot;&quot;&quot;
+        free = np.argwhere(self.map.grid == 0)
+        if free.size == 0:
+            raise RuntimeError(&quot;Map has no free cells.&quot;)
+        idx = self.rng.integers(0, free.shape[0], size=self.N)
+        cells = free[idx]
+        # place at cell centers
+        xs = (cells[:, 1] + 0.5) * self.map.res
+        ys = (cells[:, 0] + 0.5) * self.map.res
+        thetas = self.rng.uniform(-math.pi, math.pi, size=self.N)
+        self.particles[:, 0] = xs
+        self.particles[:, 1] = ys
+        self.particles[:, 2] = thetas
+        self.weights.fill(1.0 / self.N)
+
+    def motion_update(self, odom: tuple[float, float, float]):
+        &quot;&quot;&quot;
+        Apply the sampled odometry motion model.
+        odom = (delta_rot1, delta_trans, delta_rot2)
+        &quot;&quot;&quot;
+        d_rot1, d_trans, d_rot2 = map(float, odom)
+
+        # standard deviations per Probabilistic Robotics
+        std_rot1 = math.sqrt(self.alpha1 * d_rot1**2 + self.alpha2 * d_trans**2)
+        std_trans = math.sqrt(self.alpha3 * d_trans**2 + self.alpha4 * (d_rot1**2 + d_rot2**2))
+        std_rot2 = math.sqrt(self.alpha1 * d_rot2**2 + self.alpha2 * d_trans**2)
+
+        # sample noises
+        d_rot1_hat = d_rot1 + self.rng.normal(0.0, std_rot1, size=self.N)
+        d_trans_hat = d_trans + self.rng.normal(0.0, std_trans, size=self.N)
+        d_rot2_hat = d_rot2 + self.rng.normal(0.0, std_rot2, size=self.N)
+
+        x = self.particles[:, 0]
+        y = self.particles[:, 1]
+        th = self.particles[:, 2]
+
+        x_new = x + d_trans_hat * np.cos(th + d_rot1_hat)
+        y_new = y + d_trans_hat * np.sin(th + d_rot1_hat)
+        th_new = th + d_rot1_hat + d_rot2_hat
+
+        # reject particles that land in obstacles by simple &quot;bounce-back&quot; to old pose
+        for i in range(self.N):
+            gx, gy = self.map.world_to_grid(float(x_new[i]), float(y_new[i]))
+            if self.map.is_occupied(gx, gy):
+                x_new[i] = x[i]
+                y_new[i] = y[i]
+
+        self.particles[:, 0] = x_new
+        self.particles[:, 1] = y_new
+        self.particles[:, 2] = np.vectorize(wrap_angle)(th_new)
+
+    def sensor_update(self, ranges: np.ndarray):
+        &quot;&quot;&quot;
+        Compute importance weights from a vector of measured ranges (one per beam angle).
+        Uses a stable log-likelihood accumulation, then exponentiates with max-subtraction.
+        &quot;&quot;&quot;
+        z = np.clip(np.array(ranges, dtype=float), 0.0, self.r_max)
+        assert z.shape == self.beam_angles.shape
+
+        # Precompute constants
+        sigma = self.sigma_hit
+        inv_sigma2 = 1.0 / (sigma * sigma)
+        norm_hit = 1.0 / (math.sqrt(2.0 * math.pi) * sigma)
+        unif = 1.0 / self.r_max
+
+        log_w = np.zeros(self.N, dtype=float)
+        for bi, ba in enumerate(self.beam_angles):
+            # expected range for each particle for beam i
+            exp_r = np.zeros(self.N, dtype=float)
+            for p in range(self.N):
+                x, y, th = self.particles[p]
+                exp_r[p] = ray_cast(self.map, float(x), float(y), float(th + ba), self.r_max)
+
+            dz = z[bi] - exp_r
+            p_hit = self.z_hit * norm_hit * np.exp(-0.5 * (dz * dz) * inv_sigma2)
+            p_rand = self.z_rand * unif
+            p = p_hit + p_rand
+            log_w += np.log(p + 1e-12)
+
+        # convert log weights to normalized weights
+        log_w -= np.max(log_w)
+        w = np.exp(log_w)
+        w_sum = np.sum(w)
+        if not np.isfinite(w_sum) or w_sum &lt;= 0.0:
+            self.weights.fill(1.0 / self.N)
+        else:
+            self.weights = w / w_sum
+
+    def neff(self) -&gt; float:
+        &quot;&quot;&quot;Effective sample size.&quot;&quot;&quot;
+        return 1.0 / float(np.sum(self.weights * self.weights))
+
+    def resample_if_needed(self, neff_ratio: float = 0.5, inject_random: float = 0.02):
+        &quot;&quot;&quot;
+        Resample if Neff &lt; neff_ratio*N. Optionally inject a small fraction of random particles
+        (helps kidnapped robot / global recovery).
+        &quot;&quot;&quot;
+        if self.neff() &gt;= neff_ratio * self.N:
+            return
+
+        idx = systematic_resample(self.weights, self.rng)
+        self.particles = self.particles[idx].copy()
+        self.weights.fill(1.0 / self.N)
+
+        # random injection
+        k = int(round(inject_random * self.N))
+        if k &gt; 0:
+            free = np.argwhere(self.map.grid == 0)
+            ridx = self.rng.integers(0, free.shape[0], size=k)
+            cells = free[ridx]
+            xs = (cells[:, 1] + 0.5) * self.map.res
+            ys = (cells[:, 0] + 0.5) * self.map.res
+            thetas = self.rng.uniform(-math.pi, math.pi, size=k)
+            self.particles[:k, 0] = xs
+            self.particles[:k, 1] = ys
+            self.particles[:k, 2] = thetas
+
+    def estimate(self) -&gt; tuple[float, float, float, np.ndarray]:
+        &quot;&quot;&quot;Return weighted mean pose and 3x3 weighted covariance.&quot;&quot;&quot;
+        w = self.weights
+        x = float(np.sum(w * self.particles[:, 0]))
+        y = float(np.sum(w * self.particles[:, 1]))
+
+        # circular mean for theta
+        s = float(np.sum(w * np.sin(self.particles[:, 2])))
+        c = float(np.sum(w * np.cos(self.particles[:, 2])))
+        th = math.atan2(s, c)
+
+        mu = np.array([x, y, th], dtype=float)
+
+        # covariance: handle theta by wrapping residuals
+        diff = self.particles - mu[None, :]
+        diff[:, 2] = np.vectorize(wrap_angle)(diff[:, 2])
+        cov = (diff.T * w) @ diff
+        return x, y, th, cov
+
+# -----------------------------
+# Simulation for the lab demo
+# -----------------------------
+def simulate_step(true_pose: np.ndarray, v: float, w: float, dt: float) -&gt; np.ndarray:
+    x, y, th = map(float, true_pose)
+    x2 = x + v * math.cos(th) * dt
+    y2 = y + v * math.sin(th) * dt
+    th2 = wrap_angle(th + w * dt)
+    return np.array([x2, y2, th2], dtype=float)
+
+def odom_from_true(pose1: np.ndarray, pose2: np.ndarray) -&gt; tuple[float, float, float]:
+    &quot;&quot;&quot;
+    Convert pose increment to (delta_rot1, delta_trans, delta_rot2) in the local frame.
+    &quot;&quot;&quot;
+    x1, y1, th1 = map(float, pose1)
+    x2, y2, th2 = map(float, pose2)
+    dx = x2 - x1
+    dy = y2 - y1
+    d_trans = math.sqrt(dx*dx + dy*dy)
+    direction = math.atan2(dy, dx)
+    d_rot1 = wrap_angle(direction - th1) if d_trans &gt; 1e-9 else 0.0
+    d_rot2 = wrap_angle(th2 - th1 - d_rot1)
+    return (d_rot1, d_trans, d_rot2)
+
+def range_scan(map_: OccupancyGrid, pose: np.ndarray, beam_angles: np.ndarray, r_max: float, noise_sigma: float, rng: np.random.Generator) -&gt; np.ndarray:
+    x, y, th = map(float, pose)
+    z = []
+    for ba in beam_angles:
+        r = ray_cast(map_, x, y, th + float(ba), r_max)
+        r = r + rng.normal(0.0, noise_sigma)
+        z.append(float(np.clip(r, 0.0, r_max)))
+    return np.array(z, dtype=float)
+
+def main():
+    rng = np.random.default_rng(1)
+    map_ = make_demo_map()
+    mcl = MCL(map_, N=1200, rng=rng, sigma_hit=0.20, r_max=6.0)
+    mcl.initialize_uniform()
+
+    # True trajectory (inside map)
+    true = np.array([2.0, 2.0, 0.0], dtype=float)  # meters
+    dt = 0.25
+    T = 180
+    v_cmd = 0.35
+    w_cmd = 0.25
+
+    true_hist = []
+    est_hist = []
+
+    for t in range(T):
+        true_next = simulate_step(true, v=v_cmd, w=w_cmd, dt=dt)
+
+        # ensure we don&#x27;t go through walls; if collision, turn in place
+        gx, gy = map_.world_to_grid(float(true_next[0]), float(true_next[1]))
+        if map_.is_occupied(gx, gy):
+            true_next = simulate_step(true, v=0.0, w=0.8, dt=dt)
+
+        odom = odom_from_true(true, true_next)
+
+        # sensor measurement
+        z = range_scan(map_, true_next, mcl.beam_angles, mcl.r_max, noise_sigma=0.05, rng=rng)
+
+        # MCL update
+        mcl.motion_update(odom)
+        mcl.sensor_update(z)
+        mcl.resample_if_needed(neff_ratio=0.55, inject_random=0.03)
+        est = mcl.estimate()
+
+        true = true_next
+        true_hist.append(true.copy())
+        est_hist.append(np.array(est[:3], dtype=float))
+
+    true_hist = np.array(true_hist)
+    est_hist = np.array(est_hist)
+
+    # Plot map and trajectories
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.imshow(map_.grid, origin=&quot;lower&quot;, cmap=&quot;gray_r&quot;,
+              extent=[0, map_.W*map_.res, 0, map_.H*map_.res])
+    ax.plot(true_hist[:, 0], true_hist[:, 1], label=&quot;true&quot;)
+    ax.plot(est_hist[:, 0], est_hist[:, 1], label=&quot;MCL estimate&quot;)
+    ax.set_xlabel(&quot;x [m]&quot;)
+    ax.set_ylabel(&quot;y [m]&quot;)
+    ax.set_title(&quot;Monte Carlo Localization on an Occupancy Grid Map&quot;)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == &quot;__main__&quot;:
+    main()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. C++ Implementation (Standalone, CSV Output)</h2>
+    <div class="down-content">
+      <p>
+        <strong>Libraries:</strong> Standard C++17 only (no external
+        dependencies). For robotics stacks, common choices include ROS 2
+        (<code>rclcpp</code>) and map/sensor interfaces via nav_msgs /
+        sensor_msgs, but this demo stays standalone.
+      </p>
+
+      <p><strong>File:</strong> Chapter8_Lesson5.cpp</p>
+      <pre><code class="language-cpp">
+// Chapter8_Lesson5.cpp
+// Autonomous Mobile Robots — Chapter 8 (Particle-Filter Localization)
+// Lesson 5 Lab: Implement MCL on a Map (standalone)
+//
+// Minimal C++17 implementation of MCL on a binary occupancy grid with
+// (i) odometry motion model and (ii) multi-beam range sensor with Gaussian likelihood.
+// Output: CSV files for estimated and true trajectories (plot externally).
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter8_Lesson5.cpp -o mcl_demo
+// Run:
+//   ./mcl_demo
+//
+// No external dependencies.
+
+#include &lt;cmath&gt;
+#include &lt;cstdint&gt;
+#include &lt;fstream&gt;
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+
+static constexpr double PI = 3.14159265358979323846;
+
+static double wrap_angle(double a) {
+  a = std::fmod(a + PI, 2.0 * PI);
+  if (a &lt; 0) a += 2.0 * PI;
+  return a - PI;
+}
+
+struct GridMap {
+  int W = 0, H = 0;
+  double res = 0.05; // meters per cell
+  std::vector&lt;uint8_t&gt; occ; // 1 occupied, 0 free, row-major (y*W + x)
+
+  uint8_t at(int x, int y) const {
+    if (x &lt; 0 || x &gt;= W || y &lt; 0 || y &gt;= H) return 1; // outside = wall
+    return occ[y * W + x];
+  }
+
+  static GridMap demo() {
+    GridMap m;
+    m.W = 220; m.H = 160; m.res = 0.05;
+    m.occ.assign(m.W * m.H, 0);
+
+    // outer walls
+    for (int x = 0; x &lt; m.W; ++x) { m.occ[0 * m.W + x] = 1; m.occ[(m.H - 1) * m.W + x] = 1; }
+    for (int y = 0; y &lt; m.H; ++y) { m.occ[y * m.W + 0] = 1; m.occ[y * m.W + (m.W - 1)] = 1; }
+
+    auto fill_rect = [&amp;](int x0, int y0, int x1, int y1) {
+      for (int y = y0; y &lt; y1; ++y) for (int x = x0; x &lt; x1; ++x) m.occ[y * m.W + x] = 1;
+    };
+
+    fill_rect(40, 30, 160, 55);
+    fill_rect(20, 85, 90, 110);
+    fill_rect(140, 85, 170, 140);
+    fill_rect(180, 15, 205, 40);
+    return m;
+  }
+
+  void world_to_grid(double wx, double wy, int &amp;gx, int &amp;gy) const {
+    gx = static_cast&lt;int&gt;(wx / res);
+    gy = static_cast&lt;int&gt;(wy / res);
+  }
+};
+
+static double ray_cast(const GridMap &amp;m, double x, double y, double th, double r_max, double step = 0.02) {
+  double r = 0.0;
+  while (r &lt; r_max) {
+    double wx = x + r * std::cos(th);
+    double wy = y + r * std::sin(th);
+    int gx, gy;
+    m.world_to_grid(wx, wy, gx, gy);
+    if (m.at(gx, gy)) return r;
+    r += step;
+  }
+  return r_max;
+}
+
+struct Particle { double x, y, th, w; };
+
+static std::vector&lt;int&gt; systematic_resample(const std::vector&lt;double&gt; &amp;w, std::mt19937 &amp;gen) {
+  int N = static_cast&lt;int&gt;(w.size());
+  std::uniform_real_distribution&lt;double&gt; uni(0.0, 1.0 / N);
+  double r0 = uni(gen);
+  std::vector&lt;double&gt; cdf(N);
+  double s = 0.0;
+  for (int i = 0; i &lt; N; ++i) { s += w[i]; cdf[i] = s; }
+
+  std::vector&lt;int&gt; idx(N);
+  int j = 0;
+  for (int i = 0; i &lt; N; ++i) {
+    double u = r0 + static_cast&lt;double&gt;(i) / N;
+    while (u &gt; cdf[j] &amp;&amp; j &lt; N - 1) j++;
+    idx[i] = j;
+  }
+  return idx;
+}
+
+struct MCL {
+  GridMap map;
+  int N = 1000;
+  double r_max = 6.0;
+  std::vector&lt;double&gt; beam_angles;
+  double sigma_hit = 0.20;
+  double z_hit = 0.85;
+  double z_rand = 0.15;
+  double a1 = 0.03, a2 = 0.01, a3 = 0.03, a4 = 0.01;
+
+  std::mt19937 gen;
+  std::normal_distribution&lt;double&gt; n01{0.0, 1.0};
+  std::uniform_real_distribution&lt;double&gt; uni01{0.0, 1.0};
+
+  std::vector&lt;Particle&gt; P;
+
+  explicit MCL(const GridMap &amp;m, int N_) : map(m), N(N_), gen(1) {
+    for (int i = 0; i &lt; 13; ++i) {
+      double deg = -90.0 + 180.0 * (static_cast&lt;double&gt;(i) / 12.0);
+      beam_angles.push_back(deg * PI / 180.0);
+    }
+    P.resize(N);
+  }
+
+  void init_uniform() {
+    // collect free cells
+    std::vector&lt;std::pair&lt;int,int&gt;&gt; free_cells;
+    free_cells.reserve(map.W * map.H);
+    for (int y = 0; y &lt; map.H; ++y)
+      for (int x = 0; x &lt; map.W; ++x)
+        if (!map.at(x, y)) free_cells.emplace_back(x, y);
+
+    std::uniform_int_distribution&lt;int&gt; pick(0, static_cast&lt;int&gt;(free_cells.size()) - 1);
+    std::uniform_real_distribution&lt;double&gt; uth(-PI, PI);
+
+    for (int i = 0; i &lt; N; ++i) {
+      auto [gx, gy] = free_cells[pick(gen)];
+      P[i].x = (gx + 0.5) * map.res;
+      P[i].y = (gy + 0.5) * map.res;
+      P[i].th = uth(gen);
+      P[i].w = 1.0 / N;
+    }
+  }
+
+  void motion_update(double d_rot1, double d_trans, double d_rot2) {
+    auto std_rot = [&amp;](double d_rot) { return std::sqrt(a1 * d_rot * d_rot + a2 * d_trans * d_trans); };
+    double sr1 = std_rot(d_rot1);
+    double st  = std::sqrt(a3 * d_trans * d_trans + a4 * (d_rot1 * d_rot1 + d_rot2 * d_rot2));
+    double sr2 = std_rot(d_rot2);
+
+    for (auto &amp;p : P) {
+      double dr1 = d_rot1 + n01(gen) * sr1;
+      double dt  = d_trans + n01(gen) * st;
+      double dr2 = d_rot2 + n01(gen) * sr2;
+
+      double xn = p.x + dt * std::cos(p.th + dr1);
+      double yn = p.y + dt * std::sin(p.th + dr1);
+      double thn = wrap_angle(p.th + dr1 + dr2);
+
+      int gx, gy;
+      map.world_to_grid(xn, yn, gx, gy);
+      if (!map.at(gx, gy)) { p.x = xn; p.y = yn; p.th = thn; }
+    }
+  }
+
+  void sensor_update(const std::vector&lt;double&gt; &amp;z) {
+    const double sigma = sigma_hit;
+    const double inv_sigma2 = 1.0 / (sigma * sigma);
+    const double norm_hit = 1.0 / (std::sqrt(2.0 * PI) * sigma);
+    const double unif = 1.0 / r_max;
+
+    std::vector&lt;double&gt; logw(N, 0.0);
+
+    for (size_t bi = 0; bi &lt; beam_angles.size(); ++bi) {
+      for (int i = 0; i &lt; N; ++i) {
+        const auto &amp;p = P[i];
+        double zexp = ray_cast(map, p.x, p.y, p.th + beam_angles[bi], r_max);
+        double dz = z[bi] - zexp;
+        double p_hit = z_hit * norm_hit * std::exp(-0.5 * dz * dz * inv_sigma2);
+        double p_rand = z_rand * unif;
+        double prob = p_hit + p_rand;
+        logw[i] += std::log(prob + 1e-12);
+      }
+    }
+
+    // normalize via max-subtraction
+    double mx = logw[0];
+    for (int i = 1; i &lt; N; ++i) mx = std::max(mx, logw[i]);
+
+    std::vector&lt;double&gt; w(N);
+    double sum = 0.0;
+    for (int i = 0; i &lt; N; ++i) { w[i] = std::exp(logw[i] - mx); sum += w[i]; }
+    if (!(sum &gt; 0.0) || !std::isfinite(sum)) {
+      for (auto &amp;p : P) p.w = 1.0 / N;
+      return;
+    }
+    for (int i = 0; i &lt; N; ++i) { P[i].w = w[i] / sum; }
+  }
+
+  double neff() const {
+    double s = 0.0;
+    for (const auto &amp;p : P) s += p.w * p.w;
+    return 1.0 / s;
+  }
+
+  void resample_if_needed(double neff_ratio = 0.55, double inject_random = 0.03) {
+    if (neff() &gt;= neff_ratio * N) return;
+
+    std::vector&lt;double&gt; w(N);
+    for (int i = 0; i &lt; N; ++i) w[i] = P[i].w;
+    auto idx = systematic_resample(w, gen);
+
+    std::vector&lt;Particle&gt; P2(N);
+    for (int i = 0; i &lt; N; ++i) P2[i] = P[idx[i]];
+    for (int i = 0; i &lt; N; ++i) P2[i].w = 1.0 / N;
+    P.swap(P2);
+
+    // inject random particles for global recovery
+    int k = static_cast&lt;int&gt;(std::round(inject_random * N));
+    if (k &lt;= 0) return;
+
+    std::vector&lt;std::pair&lt;int,int&gt;&gt; free_cells;
+    for (int y = 0; y &lt; map.H; ++y)
+      for (int x = 0; x &lt; map.W; ++x)
+        if (!map.at(x, y)) free_cells.emplace_back(x, y);
+
+    std::uniform_int_distribution&lt;int&gt; pick(0, static_cast&lt;int&gt;(free_cells.size()) - 1);
+    std::uniform_real_distribution&lt;double&gt; uth(-PI, PI);
+
+    for (int i = 0; i &lt; k; ++i) {
+      auto [gx, gy] = free_cells[pick(gen)];
+      P[i].x = (gx + 0.5) * map.res;
+      P[i].y = (gy + 0.5) * map.res;
+      P[i].th = uth(gen);
+    }
+  }
+
+  void estimate(double &amp;x, double &amp;y, double &amp;th) const {
+    double mx = 0.0, my = 0.0;
+    double s = 0.0, c = 0.0;
+    for (const auto &amp;p : P) {
+      mx += p.w * p.x;
+      my += p.w * p.y;
+      s  += p.w * std::sin(p.th);
+      c  += p.w * std::cos(p.th);
+    }
+    x = mx; y = my; th = std::atan2(s, c);
+  }
+};
+
+static void simulate_step(double &amp;x, double &amp;y, double &amp;th, double v, double w, double dt) {
+  x += v * std::cos(th) * dt;
+  y += v * std::sin(th) * dt;
+  th = wrap_angle(th + w * dt);
+}
+
+static void odom_from_true(double x1, double y1, double th1,
+                           double x2, double y2, double th2,
+                           double &amp;d_rot1, double &amp;d_trans, double &amp;d_rot2) {
+  double dx = x2 - x1;
+  double dy = y2 - y1;
+  d_trans = std::sqrt(dx*dx + dy*dy);
+  double dir = std::atan2(dy, dx);
+  d_rot1 = (d_trans &gt; 1e-9) ? wrap_angle(dir - th1) : 0.0;
+  d_rot2 = wrap_angle(th2 - th1 - d_rot1);
+}
+
+static std::vector&lt;double&gt; range_scan(const GridMap &amp;m, double x, double y, double th,
+                                      const std::vector&lt;double&gt; &amp;beam_angles, double r_max,
+                                      double noise_sigma, std::mt19937 &amp;gen) {
+  std::normal_distribution&lt;double&gt; n(0.0, noise_sigma);
+  std::vector&lt;double&gt; z;
+  z.reserve(beam_angles.size());
+  for (double a : beam_angles) {
+    double r = ray_cast(m, x, y, th + a, r_max);
+    r += n(gen);
+    if (r &lt; 0.0) r = 0.0;
+    if (r &gt; r_max) r = r_max;
+    z.push_back(r);
+  }
+  return z;
+}
+
+int main() {
+  GridMap map = GridMap::demo();
+  MCL mcl(map, 1200);
+  mcl.init_uniform();
+
+  // true pose
+  double tx = 2.0, ty = 2.0, tth = 0.0;
+  const double dt = 0.25;
+  const int T = 180;
+  double v_cmd = 0.35, w_cmd = 0.25;
+
+  std::mt19937 gen(7);
+
+  std::ofstream ftrue(&quot;true_traj.csv&quot;);
+  std::ofstream fest(&quot;est_traj.csv&quot;);
+  ftrue &lt;&lt; &quot;t,x,y,theta\n&quot;;
+  fest  &lt;&lt; &quot;t,x,y,theta\n&quot;;
+
+  for (int t = 0; t &lt; T; ++t) {
+    double tx2 = tx, ty2 = ty, tth2 = tth;
+    simulate_step(tx2, ty2, tth2, v_cmd, w_cmd, dt);
+
+    int gx, gy;
+    map.world_to_grid(tx2, ty2, gx, gy);
+    if (map.at(gx, gy)) {
+      tx2 = tx; ty2 = ty; tth2 = tth;
+      simulate_step(tx2, ty2, tth2, 0.0, 0.8, dt);
+    }
+
+    double d_rot1, d_trans, d_rot2;
+    odom_from_true(tx, ty, tth, tx2, ty2, tth2, d_rot1, d_trans, d_rot2);
+
+    auto z = range_scan(map, tx2, ty2, tth2, mcl.beam_angles, mcl.r_max, 0.05, gen);
+
+    mcl.motion_update(d_rot1, d_trans, d_rot2);
+    mcl.sensor_update(z);
+    mcl.resample_if_needed(0.55, 0.03);
+
+    double ex, ey, eth;
+    mcl.estimate(ex, ey, eth);
+
+    tx = tx2; ty = ty2; tth = tth2;
+    ftrue &lt;&lt; t &lt;&lt; &quot;,&quot; &lt;&lt; tx &lt;&lt; &quot;,&quot; &lt;&lt; ty &lt;&lt; &quot;,&quot; &lt;&lt; tth &lt;&lt; &quot;\n&quot;;
+    fest  &lt;&lt; t &lt;&lt; &quot;,&quot; &lt;&lt; ex &lt;&lt; &quot;,&quot; &lt;&lt; ey &lt;&lt; &quot;,&quot; &lt;&lt; eth &lt;&lt; &quot;\n&quot;;
+  }
+
+  std::cout &lt;&lt; &quot;Wrote true_traj.csv and est_traj.csv\n&quot;;
+  std::cout &lt;&lt; &quot;Plot them (e.g., in Python/Matlab) over your map.\n&quot;;
+  return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Java Implementation (Standalone, CSV Output)</h2>
+    <div class="down-content">
+      <p>
+        <strong>Libraries:</strong> Standard Java only. For robotics ecosystems,
+        Java options include ROSJava, but this lab remains standalone to focus
+        on the probabilistic core.
+      </p>
+
+      <p><strong>File:</strong> Chapter8_Lesson5.java</p>
+      <pre><code class="language-java">
+// Chapter8_Lesson5.java
+// Autonomous Mobile Robots — Chapter 8 (Particle-Filter Localization)
+// Lesson 5 Lab: Implement MCL on a Map (standalone)
+//
+// Minimal Java 17 implementation of MCL on a binary occupancy grid.
+// Output: CSV files for true and estimated trajectories.
+//
+// Compile:
+//   javac Chapter8_Lesson5.java
+// Run:
+//   java Chapter8_Lesson5
+
+import java.io.*;
+import java.util.*;
+
+public class Chapter8_Lesson5 {
+
+  static final double PI = Math.PI;
+
+  static double wrapAngle(double a) {
+    a = (a + PI) % (2.0 * PI);
+    if (a &lt; 0) a += 2.0 * PI;
+    return a - PI;
+  }
+
+  static class GridMap {
+    int W, H;
+    double res;
+    byte[] occ; // row-major
+
+    GridMap(int W, int H, double res) {
+      this.W = W; this.H = H; this.res = res;
+      this.occ = new byte[W * H];
+    }
+
+    byte at(int x, int y) {
+      if (x &lt; 0 || x &gt;= W || y &lt; 0 || y &gt;= H) return 1;
+      return occ[y * W + x];
+    }
+
+    void worldToGrid(double wx, double wy, int[] out) {
+      out[0] = (int)(wx / res);
+      out[1] = (int)(wy / res);
+    }
+
+    static GridMap demo() {
+      GridMap m = new GridMap(220, 160, 0.05);
+      // walls
+      for (int x = 0; x &lt; m.W; x++) { m.occ[0*m.W + x] = 1; m.occ[(m.H-1)*m.W + x] = 1; }
+      for (int y = 0; y &lt; m.H; y++) { m.occ[y*m.W + 0] = 1; m.occ[y*m.W + (m.W-1)] = 1; }
+      m.fillRect(40, 30, 160, 55);
+      m.fillRect(20, 85, 90, 110);
+      m.fillRect(140, 85, 170, 140);
+      m.fillRect(180, 15, 205, 40);
+      return m;
+    }
+
+    void fillRect(int x0, int y0, int x1, int y1) {
+      for (int y = y0; y &lt; y1; y++)
+        for (int x = x0; x &lt; x1; x++)
+          occ[y * W + x] = 1;
+    }
+  }
+
+  static double rayCast(GridMap m, double x, double y, double th, double rMax, double step) {
+    double r = 0.0;
+    int[] g = new int[2];
+    while (r &lt; rMax) {
+      double wx = x + r * Math.cos(th);
+      double wy = y + r * Math.sin(th);
+      m.worldToGrid(wx, wy, g);
+      if (m.at(g[0], g[1]) != 0) return r;
+      r += step;
+    }
+    return rMax;
+  }
+
+  static class Particle { double x, y, th, w; }
+
+  static int[] systematicResample(double[] w, Random rng) {
+    int N = w.length;
+    double r0 = rng.nextDouble() / N;
+    double[] cdf = new double[N];
+    double s = 0.0;
+    for (int i = 0; i &lt; N; i++) { s += w[i]; cdf[i] = s; }
+    int[] idx = new int[N];
+    int j = 0;
+    for (int i = 0; i &lt; N; i++) {
+      double u = r0 + (double)i / N;
+      while (j &lt; N-1 &amp;&amp; u &gt; cdf[j]) j++;
+      idx[i] = j;
+    }
+    return idx;
+  }
+
+  static class MCL {
+    GridMap map;
+    int N;
+    double rMax = 6.0;
+    double[] beamAngles;
+    double sigmaHit = 0.20;
+    double zHit = 0.85, zRand = 0.15;
+    double a1 = 0.03, a2 = 0.01, a3 = 0.03, a4 = 0.01;
+
+    Particle[] P;
+    Random rng = new Random(1);
+
+    MCL(GridMap map, int N) {
+      this.map = map; this.N = N;
+      this.P = new Particle[N];
+      for (int i = 0; i &lt; N; i++) P[i] = new Particle();
+      this.beamAngles = new double[13];
+      for (int i = 0; i &lt; 13; i++) {
+        double deg = -90.0 + 180.0 * ((double)i / 12.0);
+        beamAngles[i] = deg * PI / 180.0;
+      }
+    }
+
+    void initUniform() {
+      ArrayList&lt;int[]&gt; free = new ArrayList&lt;&gt;();
+      for (int y = 0; y &lt; map.H; y++)
+        for (int x = 0; x &lt; map.W; x++)
+          if (map.at(x,y)==0) free.add(new int[]{x,y});
+
+      for (int i = 0; i &lt; N; i++) {
+        int[] c = free.get(rng.nextInt(free.size()));
+        P[i].x = (c[0] + 0.5) * map.res;
+        P[i].y = (c[1] + 0.5) * map.res;
+        P[i].th = -PI + 2.0*PI*rng.nextDouble();
+        P[i].w = 1.0 / N;
+      }
+    }
+
+    double randn(double std) {
+      return std * rng.nextGaussian();
+    }
+
+    void motionUpdate(double dRot1, double dTrans, double dRot2) {
+      double sr1 = Math.sqrt(a1*dRot1*dRot1 + a2*dTrans*dTrans);
+      double st  = Math.sqrt(a3*dTrans*dTrans + a4*(dRot1*dRot1 + dRot2*dRot2));
+      double sr2 = Math.sqrt(a1*dRot2*dRot2 + a2*dTrans*dTrans);
+
+      int[] g = new int[2];
+      for (int i = 0; i &lt; N; i++) {
+        Particle p = P[i];
+        double dr1 = dRot1 + randn(sr1);
+        double dt  = dTrans + randn(st);
+        double dr2 = dRot2 + randn(sr2);
+
+        double xn = p.x + dt * Math.cos(p.th + dr1);
+        double yn = p.y + dt * Math.sin(p.th + dr1);
+        double thn = wrapAngle(p.th + dr1 + dr2);
+
+        map.worldToGrid(xn, yn, g);
+        if (map.at(g[0], g[1]) == 0) { p.x = xn; p.y = yn; p.th = thn; }
+      }
+    }
+
+    void sensorUpdate(double[] z) {
+      double sigma = sigmaHit;
+      double invSigma2 = 1.0/(sigma*sigma);
+      double normHit = 1.0/(Math.sqrt(2.0*PI)*sigma);
+      double unif = 1.0/rMax;
+
+      double[] logw = new double[N];
+      for (int bi = 0; bi &lt; beamAngles.length; bi++) {
+        for (int i = 0; i &lt; N; i++) {
+          Particle p = P[i];
+          double zexp = rayCast(map, p.x, p.y, p.th + beamAngles[bi], rMax, 0.02);
+          double dz = z[bi] - zexp;
+          double pHit = zHit * normHit * Math.exp(-0.5*dz*dz*invSigma2);
+          double pRand = zRand * unif;
+          double prob = pHit + pRand;
+          logw[i] += Math.log(prob + 1e-12);
+        }
+      }
+
+      double mx = logw[0];
+      for (int i = 1; i &lt; N; i++) mx = Math.max(mx, logw[i]);
+
+      double sum = 0.0;
+      double[] w = new double[N];
+      for (int i = 0; i &lt; N; i++) { w[i] = Math.exp(logw[i]-mx); sum += w[i]; }
+      if (!(sum &gt; 0.0) || Double.isNaN(sum) || Double.isInfinite(sum)) {
+        for (int i = 0; i &lt; N; i++) P[i].w = 1.0 / N;
+        return;
+      }
+      for (int i = 0; i &lt; N; i++) P[i].w = w[i]/sum;
+    }
+
+    double neff() {
+      double s = 0.0;
+      for (int i = 0; i &lt; N; i++) s += P[i].w * P[i].w;
+      return 1.0/s;
+    }
+
+    void resampleIfNeeded(double neffRatio, double injectRandom) {
+      if (neff() &gt;= neffRatio * N) return;
+
+      double[] w = new double[N];
+      for (int i = 0; i &lt; N; i++) w[i] = P[i].w;
+      int[] idx = systematicResample(w, rng);
+      Particle[] P2 = new Particle[N];
+      for (int i = 0; i &lt; N; i++) {
+        Particle src = P[idx[i]];
+        Particle dst = new Particle();
+        dst.x = src.x; dst.y = src.y; dst.th = src.th; dst.w = 1.0/N;
+        P2[i] = dst;
+      }
+      P = P2;
+
+      int k = (int)Math.round(injectRandom * N);
+      if (k &lt;= 0) return;
+
+      ArrayList&lt;int[]&gt; free = new ArrayList&lt;&gt;();
+      for (int y = 0; y &lt; map.H; y++)
+        for (int x = 0; x &lt; map.W; x++)
+          if (map.at(x,y)==0) free.add(new int[]{x,y});
+
+      for (int i = 0; i &lt; k; i++) {
+        int[] c = free.get(rng.nextInt(free.size()));
+        P[i].x = (c[0] + 0.5) * map.res;
+        P[i].y = (c[1] + 0.5) * map.res;
+        P[i].th = -PI + 2.0*PI*rng.nextDouble();
+      }
+    }
+
+    double[] estimate() {
+      double mx = 0.0, my = 0.0, s = 0.0, c = 0.0;
+      for (int i = 0; i &lt; N; i++) {
+        Particle p = P[i];
+        mx += p.w * p.x;
+        my += p.w * p.y;
+        s  += p.w * Math.sin(p.th);
+        c  += p.w * Math.cos(p.th);
+      }
+      double th = Math.atan2(s, c);
+      return new double[]{mx, my, th};
+    }
+  }
+
+  static void simulateStep(double[] pose, double v, double w, double dt) {
+    pose[0] += v * Math.cos(pose[2]) * dt;
+    pose[1] += v * Math.sin(pose[2]) * dt;
+    pose[2] = wrapAngle(pose[2] + w * dt);
+  }
+
+  static double[] odomFromTrue(double[] p1, double[] p2) {
+    double dx = p2[0] - p1[0];
+    double dy = p2[1] - p1[1];
+    double dTrans = Math.sqrt(dx*dx + dy*dy);
+    double dir = Math.atan2(dy, dx);
+    double dRot1 = (dTrans &gt; 1e-9) ? wrapAngle(dir - p1[2]) : 0.0;
+    double dRot2 = wrapAngle(p2[2] - p1[2] - dRot1);
+    return new double[]{dRot1, dTrans, dRot2};
+  }
+
+  static double[] rangeScan(GridMap m, double[] pose, double[] beamAngles, double rMax, double noiseSigma, Random rng) {
+    double[] z = new double[beamAngles.length];
+    for (int i = 0; i &lt; beamAngles.length; i++) {
+      double r = rayCast(m, pose[0], pose[1], pose[2] + beamAngles[i], rMax, 0.02);
+      r += noiseSigma * rng.nextGaussian();
+      if (r &lt; 0) r = 0;
+      if (r &gt; rMax) r = rMax;
+      z[i] = r;
+    }
+    return z;
+  }
+
+  public static void main(String[] args) throws Exception {
+    GridMap map = GridMap.demo();
+    MCL mcl = new MCL(map, 1200);
+    mcl.initUniform();
+
+    double[] truePose = new double[]{2.0, 2.0, 0.0};
+    double dt = 0.25;
+    int T = 180;
+    double vCmd = 0.35, wCmd = 0.25;
+
+    Random rng = new Random(7);
+
+    try (PrintWriter fTrue = new PrintWriter(new FileWriter(&quot;true_traj.csv&quot;));
+         PrintWriter fEst  = new PrintWriter(new FileWriter(&quot;est_traj.csv&quot;))) {
+      fTrue.println(&quot;t,x,y,theta&quot;);
+      fEst.println(&quot;t,x,y,theta&quot;);
+
+      int[] g = new int[2];
+
+      for (int t = 0; t &lt; T; t++) {
+        double[] next = Arrays.copyOf(truePose, 3);
+        simulateStep(next, vCmd, wCmd, dt);
+
+        map.worldToGrid(next[0], next[1], g);
+        if (map.at(g[0], g[1]) != 0) {
+          next = Arrays.copyOf(truePose, 3);
+          simulateStep(next, 0.0, 0.8, dt);
+        }
+
+        double[] odom = odomFromTrue(truePose, next);
+        double[] z = rangeScan(map, next, mcl.beamAngles, mcl.rMax, 0.05, rng);
+
+        mcl.motionUpdate(odom[0], odom[1], odom[2]);
+        mcl.sensorUpdate(z);
+        mcl.resampleIfNeeded(0.55, 0.03);
+        double[] est = mcl.estimate();
+
+        truePose = next;
+
+        fTrue.printf(Locale.US, &quot;%d,%.6f,%.6f,%.6f%n&quot;, t, truePose[0], truePose[1], truePose[2]);
+        fEst.printf(Locale.US, &quot;%d,%.6f,%.6f,%.6f%n&quot;, t, est[0], est[1], est[2]);
+      }
+    }
+
+    System.out.println(&quot;Wrote true_traj.csv and est_traj.csv&quot;);
+  }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. MATLAB Implementation (Standalone)</h2>
+    <div class="down-content">
+      <p>
+        <strong>Libraries:</strong> Base MATLAB. If you have Robotics System
+        Toolbox, you can replace the grid and ray casting with
+        <code>occupancyMap</code>/<code>raycast</code>. This lab stays
+        toolbox-free.
+      </p>
+
+      <p><strong>File:</strong> Chapter8_Lesson5.m</p>
+      <pre><code class="language-matlab">
+% Chapter8_Lesson5.m
+% Autonomous Mobile Robots — Chapter 8 (Particle-Filter Localization)
+% Lesson 5 Lab: Implement MCL on a Map
+%
+% Standalone MATLAB implementation of MCL on a binary occupancy grid with
+% odometry motion model and multi-beam range sensor.
+%
+% Requirements: base MATLAB (no toolbox required). If you have Robotics System
+% Toolbox, you can replace the ray casting / map with built-in occupancyMap and raycast.
+
+clear; clc; close all;
+rng(1);
+
+% -----------------------
+% Map (occupancy grid)
+% -----------------------
+res = 0.05; % meters/cell
+W = 220; H = 160;
+occ = zeros(H, W, 'uint8');
+occ(1,:) = 1; occ(end,:) = 1; occ(:,1) = 1; occ(:,end) = 1;
+
+occ(31:55, 41:160) = 1;
+occ(86:110, 21:90) = 1;
+occ(86:140, 141:170) = 1;
+occ(16:40, 181:205) = 1;
+
+worldToGrid = @(wx,wy) [floor(wx/res)+1, floor(wy/res)+1]; % MATLAB 1-index
+isOcc = @(gx,gy) (gx&lt;1 || gx&gt;W || gy&lt;1 || gy&gt;H || occ(gy,gx)~=0);
+
+rayCast = @(x,y,th,rMax) localRayCast(x,y,th,rMax,0.02,worldToGrid,isOcc);
+
+% beams
+beamAngles = deg2rad(linspace(-90,90,13));
+rMax = 6.0;
+
+% -----------------------
+% Particle filter params
+% -----------------------
+N = 1200;
+sigmaHit = 0.20;
+zHit = 0.85; zRand = 0.15;
+a1 = 0.03; a2 = 0.01; a3 = 0.03; a4 = 0.01;
+
+% initialize particles uniformly on free cells
+[fy, fx] = find(occ == 0);
+idx = randi(numel(fx), N, 1);
+px = (fx(idx) - 0.5) * res;
+py = (fy(idx) - 0.5) * res;
+pth = (rand(N,1)*2*pi - pi);
+pw = ones(N,1)/N;
+
+% true pose
+truePose = [2.0; 2.0; 0.0];
+dt = 0.25; T = 180;
+vCmd = 0.35; wCmd = 0.25;
+
+trueHist = zeros(3,T);
+estHist  = zeros(3,T);
+
+for t = 1:T
+    next = truePose;
+    next = simulateStep(next, vCmd, wCmd, dt);
+
+    g = worldToGrid(next(1), next(2));
+    if isOcc(g(1), g(2))
+        next = simulateStep(truePose, 0.0, 0.8, dt);
+    end
+
+    odom = odomFromTrue(truePose, next);
+
+    z = rangeScan(next, beamAngles, rMax, 0.05, rayCast);
+
+    % Motion update (sample odometry model)
+    dRot1 = odom(1); dTrans = odom(2); dRot2 = odom(3);
+    sr1 = sqrt(a1*dRot1^2 + a2*dTrans^2);
+    st  = sqrt(a3*dTrans^2 + a4*(dRot1^2 + dRot2^2));
+    sr2 = sqrt(a1*dRot2^2 + a2*dTrans^2);
+
+    dr1 = dRot1 + sr1*randn(N,1);
+    dtr = dTrans + st*randn(N,1);
+    dr2 = dRot2 + sr2*randn(N,1);
+
+    xn = px + dtr .* cos(pth + dr1);
+    yn = py + dtr .* sin(pth + dr1);
+    thn = wrapAngle(pth + dr1 + dr2);
+
+    % reject particles that land in obstacles
+    for i = 1:N
+        g = worldToGrid(xn(i), yn(i));
+        if isOcc(g(1), g(2))
+            xn(i) = px(i); yn(i) = py(i);
+        end
+    end
+    px = xn; py = yn; pth = thn;
+
+    % Sensor update (log-likelihood)
+    logw = zeros(N,1);
+    normHit = 1/(sqrt(2*pi)*sigmaHit);
+    unif = 1/rMax;
+    invSig2 = 1/(sigmaHit^2);
+
+    for bi = 1:numel(beamAngles)
+        zexp = zeros(N,1);
+        for i = 1:N
+            zexp(i) = rayCast(px(i), py(i), pth(i) + beamAngles(bi), rMax);
+        end
+        dz = z(bi) - zexp;
+        pHit = zHit * normHit .* exp(-0.5*(dz.^2)*invSig2);
+        pRand = zRand * unif;
+        logw = logw + log(pHit + pRand + 1e-12);
+    end
+
+    logw = logw - max(logw);
+    w = exp(logw);
+    wsum = sum(w);
+    if ~isfinite(wsum) || wsum &lt;= 0
+        pw = ones(N,1)/N;
+    else
+        pw = w / wsum;
+    end
+
+    % resample if needed
+    Neff = 1 / sum(pw.^2);
+    if Neff &lt; 0.55*N
+        idx = systematicResample(pw);
+        px = px(idx); py = py(idx); pth = pth(idx);
+        pw = ones(N,1)/N;
+
+        % inject random particles
+        k = round(0.03*N);
+        ridx = randi(numel(fx), k, 1);
+        px(1:k) = (fx(ridx) - 0.5) * res;
+        py(1:k) = (fy(ridx) - 0.5) * res;
+        pth(1:k) = (rand(k,1)*2*pi - pi);
+    end
+
+    % estimate (circular mean)
+    ex = sum(pw .* px);
+    ey = sum(pw .* py);
+    es = sum(pw .* sin(pth));
+    ec = sum(pw .* cos(pth));
+    eth = atan2(es, ec);
+
+    truePose = next;
+    trueHist(:,t) = truePose;
+    estHist(:,t) = [ex; ey; eth];
+end
+
+% Plot map and trajectories
+figure; hold on; axis equal;
+imagesc([0 W*res], [0 H*res], flipud(occ)); colormap(gray);
+set(gca, 'YDir', 'normal');
+plot(trueHist(1,:), trueHist(2,:), 'LineWidth', 1.5);
+plot(estHist(1,:), estHist(2,:), 'LineWidth', 1.5);
+xlabel('x [m]'); ylabel('y [m]');
+title('Monte Carlo Localization on an Occupancy Grid Map');
+legend('map (occupied)', 'true', 'MCL estimate');
+
+% -----------------------
+% helper functions
+% -----------------------
+function a = wrapAngle(a)
+a = mod(a + pi, 2*pi) - pi;
+end
+
+function pose2 = simulateStep(pose, v, w, dt)
+pose2 = pose;
+pose2(1) = pose(1) + v*cos(pose(3))*dt;
+pose2(2) = pose(2) + v*sin(pose(3))*dt;
+pose2(3) = wrapAngle(pose(3) + w*dt);
+end
+
+function odom = odomFromTrue(p1, p2)
+dx = p2(1)-p1(1);
+dy = p2(2)-p1(2);
+dTrans = sqrt(dx^2 + dy^2);
+dir = atan2(dy, dx);
+if dTrans &gt; 1e-9
+    dRot1 = wrapAngle(dir - p1(3));
+else
+    dRot1 = 0;
+end
+dRot2 = wrapAngle(p2(3) - p1(3) - dRot1);
+odom = [dRot1; dTrans; dRot2];
+end
+
+function z = rangeScan(pose, beamAngles, rMax, noiseSigma, rayCast)
+z = zeros(numel(beamAngles),1);
+for i = 1:numel(beamAngles)
+    r = rayCast(pose(1), pose(2), pose(3) + beamAngles(i), rMax);
+    r = r + noiseSigma*randn();
+    r = min(max(r, 0), rMax);
+    z(i) = r;
+end
+end
+
+function idx = systematicResample(w)
+N = numel(w);
+u0 = rand()/N;
+cdf = cumsum(w);
+idx = zeros(N,1);
+j = 1;
+for i = 1:N
+    u = u0 + (i-1)/N;
+    while u &gt; cdf(j) &amp;&amp; j &lt; N
+        j = j + 1;
+    end
+    idx(i) = j;
+end
+end
+
+function r = localRayCast(x,y,th,rMax,step,worldToGrid,isOcc)
+r = 0.0;
+while r &lt; rMax
+    wx = x + r*cos(th);
+    wy = y + r*sin(th);
+    g = worldToGrid(wx, wy);
+    if isOcc(g(1), g(2))
+        return;
+    end
+    r = r + step;
+end
+r = rMax;
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Wolfram Mathematica Implementation (Notebook Expression)</h2>
+    <div class="down-content">
+      <p>
+        <strong>Libraries:</strong> core Wolfram Language. Mathematica can
+        interface with ROS, but this lab is standalone.
+      </p>
+
+      <p><strong>File:</strong> Chapter8_Lesson5.nb</p>
+      
+      <pre><code class="language-mathematica">
+(* Chapter8_Lesson5.nb
+Autonomous Mobile Robots — Chapter 8 (Particle-Filter Localization)
+Lesson 5 Lab: Implement MCL on a Map
+
+This is a plain-text Wolfram Notebook expression you can open in Mathematica.
+It implements a compact MCL demo using an occupancy grid, ray casting, and resampling.
+*)
+
+Notebook[{
+  Cell[&quot;Chapter 8 — Lesson 5: Lab: Implement MCL on a Map&quot;, &quot;Title&quot;],
+  Cell[&quot;This notebook demonstrates a minimal Monte Carlo Localization loop on an occupancy grid map. It is intentionally self-contained (no ROS).&quot;, &quot;Text&quot;],
+
+  Cell[BoxData @ ToBoxes @ Column[{
+    Style[&quot;1) Build a demo occupancy grid map&quot;, Bold],
+    &quot;We build a binary grid with walls and rectangular obstacles, then define ray casting.&quot;,
+    Spacer[10],
+
+    Style[&quot;2) Define particle set and motion model&quot;, Bold],
+    &quot;Particles carry pose {x,y,theta}. Motion update uses sampled odometry increments.&quot;,
+    Spacer[10],
+
+    Style[&quot;3) Define range sensor model&quot;, Bold],
+    &quot;Likelihood compares measured ranges to expected ranges from ray casting.&quot;,
+    Spacer[10],
+
+    Style[&quot;4) Normalize weights; resample if Neff is small&quot;, Bold]
+  }], &quot;Input&quot;],
+
+  Cell[BoxData @ ToBoxes @ Module[
+    {
+      res = 0.05, W = 220, H = 160, occ, isOcc, worldToGrid, rayCast,
+      N = 1200, particles, weights, beamAngles, rMax = 6.0,
+      wrap, systematicResample, neff, motionUpdate, sensorUpdate, estimate,
+      truePose = {2.0, 2.0, 0.0}, dt = 0.25, T = 180, vCmd = 0.35, wCmd = 0.25,
+      trueHist = {}, estHist = {}, simulateStep, odomFromTrue, rangeScan
+    },
+
+    wrap[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+    occ = ConstantArray[0, {H, W}];
+    occ[[1, All]] = 1; occ[[H, All]] = 1; occ[[All, 1]] = 1; occ[[All, W]] = 1;
+    occ[[31 ;; 55, 41 ;; 160]] = 1;
+    occ[[86 ;; 110, 21 ;; 90]] = 1;
+    occ[[86 ;; 140, 141 ;; 170]] = 1;
+    occ[[16 ;; 40, 181 ;; 205]] = 1;
+
+    worldToGrid[{x_, y_}] := {Floor[x/res] + 1, Floor[y/res] + 1}; (* 1-index *)
+    isOcc[{gx_, gy_}] := (gx &lt; 1 || gx &gt; W || gy &lt; 1 || gy &gt; H || occ[[gy, gx]] == 1);
+
+    rayCast[{x_, y_, th_}, rmax_, step_] := Module[{r = 0., wx, wy, g},
+      While[r &lt; rmax,
+        wx = x + r Cos[th]; wy = y + r Sin[th];
+        g = worldToGrid[{wx, wy}];
+        If[isOcc[g], Return[r]];
+        r += step;
+      ];
+      rmax
+    ];
+
+    beamAngles = N@Subdivide[-Pi/2, Pi/2, 12];
+
+    (* initialize particles uniformly over free cells *)
+    With[{free = Position[occ, 0]},
+      particles = Table[
+        Module[{c = free[[RandomInteger[{1, Length[free]}]]]},
+          { (c[[2]] - 1 + 0.5) res, (c[[1]] - 1 + 0.5) res, RandomReal[{-Pi, Pi}]}
+        ],
+        {N}
+      ];
+    ];
+    weights = ConstantArray[1./N, N];
+
+    systematicResample[w_] := Module[{u0, cdf, idx, j = 1},
+      u0 = RandomReal[]/Length[w];
+      cdf = Accumulate[w];
+      idx = Table[
+        With[{u = u0 + (i - 1)/Length[w]},
+          While[u &gt; cdf[[j]] &amp;&amp; j &lt; Length[w], j++];
+          j
+        ],
+        {i, Length[w]}
+      ];
+      idx
+    ];
+
+    neff[w_] := 1.0/Total[w^2];
+
+    simulateStep[{x_, y_, th_}, v_, w_, dt_] := {x + v Cos[th] dt, y + v Sin[th] dt, wrap[th + w dt]};
+
+    odomFromTrue[p1_, p2_] := Module[{dx, dy, dTrans, dir, dRot1, dRot2},
+      dx = p2[[1]] - p1[[1]]; dy = p2[[2]] - p1[[2]];
+      dTrans = Sqrt[dx^2 + dy^2];
+      dir = ArcTan[dx, dy]; (* ArcTan[x,y] returns atan2(y,x) in Mathematica; use ArcTan[dx,dy] *)
+      dRot1 = If[dTrans &gt; 10^-9, wrap[dir - p1[[3]]], 0.0];
+      dRot2 = wrap[p2[[3]] - p1[[3]] - dRot1];
+      {dRot1, dTrans, dRot2}
+    ];
+
+    rangeScan[p_, noiseSigma_] := Table[
+      Clip[rayCast[{p[[1]], p[[2]], p[[3]] + beamAngles[[i]]}, rMax, 0.02] + RandomVariate[NormalDistribution[0, noiseSigma]], {0, rMax}],
+      {i, Length[beamAngles]}
+    ];
+
+    motionUpdate[odom_] := Module[{dRot1, dTrans, dRot2, a1 = 0.03, a2 = 0.01, a3 = 0.03, a4 = 0.01,
+                                  sr1, st, sr2, dr1, dt, dr2, xn, yn, thn, g},
+      {dRot1, dTrans, dRot2} = odom;
+      sr1 = Sqrt[a1 dRot1^2 + a2 dTrans^2];
+      st  = Sqrt[a3 dTrans^2 + a4 (dRot1^2 + dRot2^2)];
+      sr2 = Sqrt[a1 dRot2^2 + a2 dTrans^2];
+
+      particles = Table[
+        Module[{p = particles[[i]]},
+          dr1 = dRot1 + RandomVariate[NormalDistribution[0, sr1]];
+          dt  = dTrans + RandomVariate[NormalDistribution[0, st]];
+          dr2 = dRot2 + RandomVariate[NormalDistribution[0, sr2]];
+          xn = p[[1]] + dt Cos[p[[3]] + dr1];
+          yn = p[[2]] + dt Sin[p[[3]] + dr1];
+          thn = wrap[p[[3]] + dr1 + dr2];
+          g = worldToGrid[{xn, yn}];
+          If[isOcc[g], p, {xn, yn, thn}]
+        ],
+        {i, N}
+      ];
+    ];
+
+    sensorUpdate[z_] := Module[{sigma = 0.20, zHit = 0.85, zRand = 0.15, normHit, unif, invSig2, logw, zexp, dz, pHit, pRand, p},
+      normHit = 1/(Sqrt[2 Pi] sigma);
+      unif = 1/rMax;
+      invSig2 = 1/(sigma^2);
+      logw = ConstantArray[0.0, N];
+
+      Do[
+        zexp = Table[rayCast[{particles[[i,1]], particles[[i,2]], particles[[i,3]] + beamAngles[[bi]]}, rMax, 0.02], {i, N}];
+        dz = z[[bi]] - zexp;
+        pHit = zHit normHit Exp[-0.5 dz^2 invSig2];
+        pRand = zRand unif;
+        p = pHit + pRand;
+        logw = logw + Log[p + 10^-12];
+        ,
+        {bi, Length[beamAngles]}
+      ];
+
+      logw = logw - Max[logw];
+      weights = Exp[logw];
+      weights = weights/Total[weights];
+    ];
+
+    estimate[] := Module[{mx, my, s, c, th},
+      mx = Total[weights * particles[[All,1]]];
+      my = Total[weights * particles[[All,2]]];
+      s  = Total[weights * Sin[particles[[All,3]]]];
+      c  = Total[weights * Cos[particles[[All,3]]]];
+      th = ArcTan[c, s]; (* atan2(s,c) -&gt; ArcTan[c,s] *)
+      {mx, my, th}
+    ];
+
+    Do[
+      (* propagate true state *)
+      Module[{next = simulateStep[truePose, vCmd, wCmd, dt], g},
+        g = worldToGrid[{next[[1]], next[[2]]}];
+        If[isOcc[g], next = simulateStep[truePose, 0.0, 0.8, dt]];
+        (* generate odom and scan *)
+        With[{odom = odomFromTrue[truePose, next], z = rangeScan[next, 0.05]},
+          motionUpdate[odom];
+          sensorUpdate[z];
+          If[neff[weights] &lt; 0.55 N,
+            Module[{idx = systematicResample[weights], k = Round[0.03 N], free = Position[occ, 0]},
+              particles = particles[[idx]];
+              weights = ConstantArray[1./N, N];
+              Do[
+                With[{c = free[[RandomInteger[{1, Length[free]}]]]},
+                  particles[[i]] = {(c[[2]] - 1 + 0.5) res, (c[[1]] - 1 + 0.5) res, RandomReal[{-Pi, Pi}]};
+                ],
+                {i, 1, k}
+              ];
+            ]
+          ];
+          AppendTo[trueHist, next];
+          AppendTo[estHist, estimate[]];
+        ];
+        truePose = next;
+      ];
+      ,
+      {t, 1, T}
+    ];
+
+    (* Visualization *)
+    With[{img = Reverse[occ]}, (* flip y for plotting *)
+      Show[
+        ArrayPlot[img, ColorRules -&gt; {0 -&gt; White, 1 -&gt; Black}, Frame -&gt; False, AspectRatio -&gt; Automatic,
+          PlotRange -&gt; All, DataReversed -&gt; False,
+          PlotLegends -&gt; None
+        ],
+        Graphics[{
+          {Blue, Thick, Line[res*({#[[1]]/res, #[[2]]/res} &amp; /@ trueHist)]},
+          {Red, Thick, Line[res*({#[[1]]/res, #[[2]]/res} &amp; /@ estHist)]}
+        }],
+        PlotRange -&gt; All,
+        ImageSize -&gt; Large
+      ]
+    ]
+  ], &quot;Input&quot;],
+
+  Cell[&quot;Result: the red curve (MCL estimate) should track the blue curve (true). Tune N, sigmaHit, and resampling threshold to observe failure modes and recovery.&quot;, &quot;Text&quot;]
+}]
+      </code></pre>
+      
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Weight Update Derivation):</strong>
+        Assume the proposal for particle propagation is the motion model
+        <strong>
+          \( q(\mathbf{x}_t \mid \mathbf{x}_{t-1}, \mathbf{u}_t) =
+          p(\mathbf{x}_t \mid \mathbf{u}_t, \mathbf{x}_{t-1}) \):</strong
+        >. Starting from importance sampling, show that the unnormalized weight
+        satisfies
+        <strong>
+          \( \tilde{w}_t^{(i)} \propto w_{t-1}^{(i)} p(\mathbf{z}_t \mid
+          \mathbf{x}_t^{(i)}, m) \):</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The target posterior is proportional to
+        <strong>
+          \( \pi(\mathbf{x}_t) \propto p(\mathbf{z}_t \mid \mathbf{x}_t,
+          m)\bar{\pi}(\mathbf{x}_t) \):</strong
+        >, where <strong> \( \bar{\pi}(\mathbf{x}_t) \):</strong> is the
+        predictive prior induced by the motion model. With proposal
+        <strong> \( q \):</strong>, the incremental importance weight ratio
+        yields:
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{w}_t^{(i)} \propto w_{t-1}^{(i)}
+        \frac{\pi(\mathbf{x}_t^{(i)})}{q(\mathbf{x}_t^{(i)})} = w_{t-1}^{(i)}
+        \frac{p(\mathbf{z}_t \mid \mathbf{x}_t^{(i)},
+        m)\bar{\pi}(\mathbf{x}_t^{(i)})}{p(\mathbf{x}_t^{(i)} \mid \mathbf{u}_t,
+        \mathbf{x}_{t-1}^{(i)})}. \]
+      </h4>
+      <p>
+        When the proposal equals the motion model and particles are drawn from
+        it, the ratio collapses to the measurement likelihood (the predictive
+        prior is represented implicitly by the propagated particles), giving
+        <strong>
+          \( \tilde{w}_t^{(i)} \propto w_{t-1}^{(i)} p(\mathbf{z}_t \mid
+          \mathbf{x}_t^{(i)}, m) \):</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Effective Sample Size Bounds):</strong>
+        Prove that <strong> \( 1 \le N_{\text{eff}} \le N \):</strong> where
+        <strong> \( N_{\text{eff}} = 1/\sum_i (w^{(i)})^2 \):</strong> and
+        weights sum to 1.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Since weights are nonnegative and sum to 1, we have
+        <strong> \( \sum_i (w^{(i)})^2 \ge 1/N \):</strong> by Cauchy–Schwarz:
+      </p>
+      <h4 class="mathJax">
+        \[ \left(\sum_{i=1}^{N} w^{(i)}\right)^2 \le \left(\sum_{i=1}^{N}
+        1^2\right)\left(\sum_{i=1}^{N} (w^{(i)})^2\right) \;\Rightarrow\; 1 \le
+        N \sum_{i=1}^{N} (w^{(i)})^2 \;\Rightarrow\; \sum_{i=1}^{N} (w^{(i)})^2
+        \ge \frac{1}{N}. \]
+      </h4>
+      <p>
+        Thus
+        <strong> \( N_{\text{eff}} = 1/\sum_i (w^{(i)})^2 \le N \):</strong>.
+        Also, since
+        <strong> \( \sum_i (w^{(i)})^2 \le \sum_i w^{(i)} = 1 \):</strong>, we
+        get <strong> \( N_{\text{eff}} \ge 1 \):</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Ray Casting Discretization Error):</strong>
+        Let the ray-casting step size be <strong> \( \Delta s \):</strong>. Show
+        that the returned range has a worst-case discretization error bounded by
+        <strong> \( \Delta s \):</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Ray casting increments the distance as
+        <strong> \( r = 0, \Delta s, 2\Delta s, \dots \):</strong> and stops at
+        the first occupied cell. The true collision distance
+        <strong> \( r^\ast \):</strong> lies between the last free sample and
+        the first occupied sample, hence:
+      </p>
+      <h4 class="mathJax">
+        \[ r^\ast \in [r_{\text{hit}} - \Delta s,\; r_{\text{hit}}], \quad
+        \Rightarrow \quad |r_{\text{hit}} - r^\ast| \le \Delta s. \]
+      </h4>
+
+      <p>
+        <strong>Problem 4 (Tuning Failure Mode):</strong>
+        Suppose <strong> \( \sigma_{\text{hit}} \):</strong> is chosen too
+        small. Predict what happens to (i) weight entropy, (ii)
+        <strong> \( N_{\text{eff}} \):</strong>, and (iii) pose estimate
+        stability.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A too-small <strong> \( \sigma_{\text{hit}} \):</strong> makes the
+        Gaussian likelihood extremely peaked. Small discrepancies between
+        expected and measured ranges create near-zero likelihood for most
+        particles, producing very low entropy (highly concentrated) weights,
+        pushing <strong> \( N_{\text{eff}} \):</strong> toward 1 and triggering
+        frequent resampling. The estimate may jump between modes and become
+        unstable unless random injection or a larger particle count is used.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Circular Mean for Heading):</strong>
+        Show that computing the heading as
+        <strong>
+          \( \hat{\theta} = \mathrm{atan2}(\sum_i w^{(i)}\sin\theta^{(i)},\;
+          \sum_i w^{(i)}\cos\theta^{(i)}) \):</strong
+        >
+        avoids discontinuity at <strong> \( \pi \) / \( -\pi \):</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Treat each heading as a unit vector on the circle. The weighted mean
+        vector
+        <strong>
+          \( \mathbf{v} = [\sum_i w^{(i)}\cos\theta^{(i)},\; \sum_i
+          w^{(i)}\sin\theta^{(i)}]^T \):</strong
+        >
+        is continuous even when angles wrap across <strong> \( \pi \):</strong>.
+        The direction of this vector, recovered by
+        <strong> \( \mathrm{atan2} \):</strong>, yields a wrap-consistent mean.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. Summary</h2>
+    <div class="down-content">
+      <p>
+        You implemented a complete MCL loop for localization in a known
+        occupancy grid: a sampled odometry motion model, a ray-cast range
+        likelihood model with numerically stable log-likelihood accumulation,
+        degeneracy detection via
+        <strong> \( N_{\text{eff}} \):</strong>, and systematic resampling with
+        optional random-particle injection for global recovery. These components
+        form the core of practical particle-filter localization pipelines used
+        in autonomous mobile robots.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 15: References (Journal-Style Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>15. References</h2>
+    <ol>
+      <li>
+        Thrun, S., Fox, D., Burgard, W., &amp; Dellaert, F. (2001). Robust Monte
+        Carlo localization for mobile robots.
+        <em>Artificial Intelligence</em>, 128(1–2), 99–141.
+      </li>
+      <li>
+        Arulampalam, M.S., Maskell, S., Gordon, N., &amp; Clapp, T. (2002). A
+        tutorial on particle filters for online nonlinear/non-Gaussian Bayesian
+        tracking.
+        <em>IEEE Transactions on Signal Processing</em>, 50(2), 174–188.
+      </li>
+      <li>
+        Doucet, A., Godsill, S., &amp; Andrieu, C. (2000). On sequential Monte
+        Carlo sampling methods for Bayesian filtering.
+        <em>Statistics and Computing</em>, 10(3), 197–208.
+      </li>
+      <li>
+        Gordon, N.J., Salmond, D.J., &amp; Smith, A.F.M. (1993). Novel approach
+        to nonlinear/non-Gaussian Bayesian state estimation.
+        <em>IEE Proceedings F (Radar and Signal Processing)</em>, 140(2),
+        107–113.
+      </li>
+      <li>
+        Li, T., Bolic, M., &amp; Djuric, P.M. (2015). Resampling methods for
+        particle filtering: Classification, implementation, and strategies.
+        <em>IEEE Signal Processing Magazine</em>, 32(3), 70–86.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter8/Lesson4.html">
+          Lesson 4: Degeneracy, Kidnapped Robot Problem
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter9/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Occupancy Grid Mapping
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="active-lesson" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

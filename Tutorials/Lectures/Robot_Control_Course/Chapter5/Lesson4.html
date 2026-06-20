@@ -1,0 +1,1644 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical) - Lesson 4: Contact Transitions and Impact Awareness | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 5: Constrained and Contact-Aware Control</h1>
+    <h3><strong>Lesson 4: Contact Transitions and Impact Awareness</strong></h3>
+    <p>
+      This lesson studies how robot controllers must handle
+      <em>contact mode transitions</em>: transitions between free motion,
+      unilateral contact, and impacts with the environment. We build rigid-body
+      impact models from first principles, embed them into a hybrid (continuous
+      + discrete) dynamical framework, and then design impact-aware controllers
+      and simulation algorithms. The focus is on theoretical formulations and
+      their multi-language implementation for simple manipulator examples.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Physical Picture of Contact Transitions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Physical Picture of Contact Transitions</h2>
+    <div class="down-content">
+      <p>
+        A robot interacting with its environment is naturally modeled as a
+        <em>hybrid system</em> with continuous-time dynamics inside each
+        <em>mode</em> and discrete jumps when contacts appear or disappear.
+        Typical modes for a manipulator with a single unilateral contact are:
+      </p>
+      <ul>
+        <li>
+          <strong>Free motion:</strong> no active contact forces; only gravity,
+          Coriolis, and actuation act on the robot.
+        </li>
+        <li>
+          <strong>Continuous contact:</strong> normal distance constraint is
+          active, with continuous contact forces enforcing non-penetration.
+        </li>
+        <li>
+          <strong>Impact event:</strong> an instantaneous velocity jump when the
+          end-effector collides with the environment.
+        </li>
+      </ul>
+      <p>
+        Let <strong>\( q \in \mathbb{R}^n \)</strong> be joint coordinates and
+        <strong>\( v = \dot{q} \)</strong> joint velocities. In all modes, the
+        robot obeys the standard manipulator dynamics
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(q)\dot{v} + \mathbf{h}(q,v) = \mathbf{S} &bsol;tau +
+        \mathbf{J}_c(q)^\top f_c , \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{M}(q) \)</strong> is the inertia matrix,
+        <strong>\( \mathbf{h}(q,v) \)</strong> collects Coriolis and gravity,
+        <strong>\( \mathbf{S} \)</strong> selects actuated joints,
+        <strong>\( &bsol;tau \)</strong> are joint torques, and
+        <strong>\( \mathbf{J}_c(q) \)</strong> is the Jacobian of the contact
+        point(s). The contact force <strong>\( f_c \)</strong> is mode
+        dependent: in free motion it is zero; in continuous contact it is
+        determined by enforcing kinematic constraints; during impact it is
+        replaced by a <em>contact impulse</em>.
+      </p>
+      <p>
+        We encapsulate the main modes and their transitions in the following
+        finite-state representation.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  F["Free motion"] -->|"approach surface (gap = 0 and normal vel &lt;= 0)"| I["Impact event"]
+  I -->|"velocity reset"| C["Continuous contact"]
+  C -->|"separation (normal force = 0 and normal vel &gt;= 0)"| F
+  C -->|"slip / stick changes"| C
+        </pre>
+      </div>
+
+      <p>
+        The controller must (i) respect these modes and transitions by enforcing
+        non-penetration and (ii) shape motion so that impacts are either
+        <em>benign</em> (low-energy) or avoided when necessary.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Rigid-Body Impact Modeling -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Rigid-Body Impact Modeling for Manipulators</h2>
+    <div class="down-content">
+      <p>
+        Consider a manipulator whose end-effector contacts a rigid surface with
+        a <em>normal direction</em> given by a contact Jacobian row
+        <strong>\( \mathbf{J}_n(q) \in \mathbb{R}^{1 \times n} \)</strong>. At
+        the instant of contact, the configuration <strong>\( q \)</strong> is
+        assumed continuous, but the velocity <strong>\( v \)</strong> may
+        undergo a discontinuous jump:
+      </p>
+      <h4 class="mathJax">\[ v^+ = v^- + \Delta v, \]</h4>
+      <p>
+        where <strong>\( v^- \)</strong> is the pre-impact velocity,
+        <strong>\( v^+ \)</strong> is the post-impact velocity, and
+        <strong>\( \Delta v \)</strong> is determined by the
+        <em>impulse-momentum balance</em>.
+      </p>
+
+      <h3>2.1 Impulse-Momentum Balance</h3>
+      <p>
+        Let <strong>\( \Lambda_n \)</strong> be the normal impulse (integral of
+        normal contact force over the infinitesimal impact time). For simplicity
+        we ignore tangential frictional impulses here. The joint-space impulse
+        is <strong>\( \mathbf{S}_J = \mathbf{J}_n(q)^\top \Lambda_n \)</strong>.
+        Over the short impact interval <strong>\( [t^-, t^+] \)</strong>, we
+        neglect actuation and smooth forces, so the only significant effect is
+        the impulse:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(q)\left( v^+ - v^- \right) = \mathbf{J}_n(q)^\top
+        \Lambda_n . \]
+      </h4>
+      <p>
+        We enforce that after impact, the end-effector normal velocity satisfies
+        a restitution law. Let the pre- and post-impact <em>normal</em>
+        velocities be
+        <strong>\( \dot{x}_n^- = \mathbf{J}_n(q)v^- \)</strong> and
+        <strong>\( \dot{x}_n^+ = \mathbf{J}_n(q)v^+ \)</strong>. A standard
+        (one-dimensional) Newton restitution model is
+      </p>
+      <h4 class="mathJax">\[ \dot{x}_n^+ = -e\, \dot{x}_n^- , \]</h4>
+      <p>
+        where <strong>\( 0 \le e \le 1 \)</strong> is the coefficient of
+        restitution (<strong>\( e = 0 \)</strong> perfectly inelastic,
+        <strong>\( e = 1 \)</strong> perfectly elastic).
+      </p>
+
+      <h3>2.2 Solving for Post-Impact Velocity</h3>
+      <p>
+        Substitute the impulse-momentum equation into the restitution law. From
+        <strong
+          >\( v^+ = v^- + \mathbf{M}(q)^{-1}\mathbf{J}_n(q)^\top \Lambda_n
+          \)</strong
+        >, we get
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{x}_n^+ = \mathbf{J}_n(q)v^+ = \mathbf{J}_n(q)v^- +
+        \mathbf{J}_n(q)\mathbf{M}(q)^{-1}\mathbf{J}_n(q)^\top \Lambda_n . \]
+      </h4>
+      <p>
+        Imposing <strong>\( \dot{x}_n^+ = -e\,\dot{x}_n^- \)</strong> yields
+      </p>
+      <h4 class="mathJax">
+        \[ -e\,\dot{x}_n^- = \dot{x}_n^- + \mathbf{J}_n(q)\mathbf{M}(q)^{-1}
+        \mathbf{J}_n(q)^\top \Lambda_n . \]
+      </h4>
+      <p>Solve for <strong>\( \Lambda_n \)</strong>:</p>
+      <h4 class="mathJax">
+        \[ \Lambda_n = -\frac{(1+e)\,\dot{x}_n^-}
+        {\mathbf{J}_n(q)\mathbf{M}(q)^{-1}\mathbf{J}_n(q)^\top}. \]
+      </h4>
+      <p>
+        Provided the pre-impact normal velocity satisfies
+        <strong>\( \dot{x}_n^- &lt; 0 \)</strong> (approaching the surface), the
+        numerator is positive and we obtain a positive normal impulse,
+        consistent with repulsive contact.
+      </p>
+      <p>Substituting back gives the post-impact velocity:</p>
+      <h4 class="mathJax">
+        \[ v^+ = v^- - \mathbf{M}(q)^{-1}\mathbf{J}_n(q)^\top
+        \frac{(1+e)\,\dot{x}_n^-}
+        {\mathbf{J}_n(q)\mathbf{M}(q)^{-1}\mathbf{J}_n(q)^\top}. \]
+      </h4>
+
+      <h3>2.3 Energy Loss at Impact (Sketch)</h3>
+      <p>
+        The kinetic energy before impact is
+        <strong>\( K^- = \tfrac{1}{2} {v^-}^\top \mathbf{M}(q)v^- \)</strong>,
+        and after impact
+        <strong>\( K^+ = \tfrac{1}{2} {v^+}^\top \mathbf{M}(q)v^+ \)</strong>.
+        One can show (by substituting the expression for
+        <strong>\( v^+ \)</strong> and simplifying) that
+      </p>
+      <h4 class="mathJax">
+        \[ K^+ - K^- = -\frac{1-e^2}{2} \frac{\left(\dot{x}_n^-\right)^2}
+        {\mathbf{J}_n(q)\mathbf{M}(q)^{-1}\mathbf{J}_n(q)^\top} \le 0, \]
+      </h4>
+      <p>
+        that is, kinetic energy never increases at impact when
+        <strong>\( 0 \le e \le 1 \)</strong>. This fact is important for later
+        Lyapunov-based stability analyses of hybrid robot controllers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Hybrid System Representation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Hybrid System Representation of Contact Modes</h2>
+    <div class="down-content">
+      <p>
+        We formalize contact transitions using a hybrid automaton. The state is
+        the pair <strong>\( x = (q,v) \)</strong> and the discrete mode
+        <strong>\( \sigma \in \{\text{free}, \text{contact}\} \)</strong>. For
+        each mode, we have ordinary differential equations (ODEs) describing
+        continuous evolution and <em>guards</em> specifying when jumps occur.
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{x} = f_\sigma(x,&bsol;tau) = \begin{bmatrix} v \\
+        \mathbf{M}(q)^{-1} \big(\mathbf{S} &bsol;tau - \mathbf{h}(q,v) +
+        \mathbf{J}_c(q)^\top f_c(x,\sigma)\big) \end{bmatrix}. \]
+      </h4>
+      <ul>
+        <li>
+          In <strong>free mode</strong>, <strong>\( f_c = 0 \)</strong> and the
+          state evolves without contact forces until the guard
+          <strong>\( g_\text{impact}(x) = \phi(q) = 0 \)</strong> and
+          <strong>\( \dot{\phi}(q,v) &lt; 0 \)</strong> is satisfied (here
+          <strong>\( \phi(q) \)</strong> is the signed distance to the surface).
+        </li>
+        <li>
+          At the guard, a jump is triggered:
+          <strong>\( x^+ = \Delta(x^-) \)</strong>, where
+          <strong>\( \Delta \)</strong> applies the impact law from the previous
+          section (velocity reset, configuration unchanged).
+        </li>
+        <li>
+          In <strong>contact mode</strong>, we enforce the holonomic constraint
+          <strong>\( \phi(q)=0 \)</strong> and
+          <strong>\( \dot{\phi}(q,v)=0 \)</strong>, which determines
+          <strong>\( f_c \)</strong>. When the normal force reaches zero and the
+          normal acceleration becomes positive, the contact can
+          <em>lift off</em>.
+        </li>
+      </ul>
+      <p>Mathematically, this leads to complementarity conditions such as</p>
+      <h4 class="mathJax">
+        \[ \phi(q) \ge 0,\quad \lambda_n \ge 0,\quad \phi(q)\,\lambda_n = 0, \]
+      </h4>
+      <p>
+        where <strong>\( \lambda_n \)</strong> is the normal component of the
+        contact force in continuous mode. Solving these relations together with
+        the dynamics provides consistent contact-aware motion.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Impact-Aware Control Strategies -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Impact-Aware Control Strategies</h2>
+    <div class="down-content">
+      <p>
+        Many joint- or task-space controllers are derived under the assumption
+        of smooth dynamics, but contact transitions violate this assumption. We
+        outline simple impact-aware modifications for a model-based controller
+        of the form
+      </p>
+      <h4 class="mathJax">
+        \[ &bsol;tau = \mathbf{M}(q)\nu + \mathbf{h}(q,v) - \mathbf{J}_c(q)^\top
+        f_c^\text{des}, \]
+      </h4>
+      <p>
+        where <strong>\( \nu \)</strong> is a desired joint acceleration
+        obtained from tracking errors and <strong>\( f_c^\text{des} \)</strong>
+        is a desired contact force (possibly zero in free motion).
+      </p>
+
+      <h3>4.1 Pre-Impact Velocity Shaping</h3>
+      <p>
+        Assume that we know the nominal time or configuration where the
+        end-effector will hit a surface. We can design a
+        <em>pre-contact</em> phase where the task-space normal velocity is
+        regulated to a desired impact value
+        <strong>\( \dot{x}_n^\text{des} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{x}_n = \mathbf{J}_n(q)v,\quad \ddot{x}_n =
+        \mathbf{J}_n(q)\dot{v} + \dot{\mathbf{J}}_n(q,v)v. \]
+      </h4>
+      <p>Using inverse dynamics and a simple feedback term,</p>
+      <h4 class="mathJax">
+        \[ \ddot{x}_n^\text{cmd} = -k_n\big(\dot{x}_n -
+        \dot{x}_n^\text{des}\big), \]
+      </h4>
+      <p>
+        and embedding this into a task-space control law, we can ensure that the
+        impact speed is small, thereby reducing impact energy. Practically, this
+        is combined with tangential tracking objectives in a weighted fashion.
+      </p>
+
+      <h3>4.2 Post-Impact Mode Switching and Damping Injection</h3>
+      <p>Immediately after impact, the controller should:</p>
+      <ol>
+        <li>
+          Switch from a free-motion control law to a
+          <em>constraint-consistent</em> control law that enforces
+          <strong>\( \phi(q)=0 \)</strong>.
+        </li>
+        <li>
+          Increase damping gains along the normal direction to dissipate
+          residual kinetic energy.
+        </li>
+      </ol>
+      <p>
+        In a joint-space controller, this can be achieved by defining a
+        <em>contact-aware gain matrix</em>
+        <strong>\( \mathbf{K}_d^\sigma \)</strong> that depends on the mode
+        <strong>\( \sigma \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ &bsol;tau = \mathbf{M}(q)\ddot{q}^\text{des} + \mathbf{h}(q,v) -
+        \mathbf{K}_p (q - q^\text{des}) - \mathbf{K}_d^\sigma (v -
+        v^\text{des}). \]
+      </h4>
+      <p>
+        For example, in free mode one may choose uniform diagonal damping,
+        whereas in contact mode one projects a larger damping onto the normal
+        subspace spanned by <strong>\( \mathbf{J}_n(q) \)</strong>, leaving
+        tangential directions less affected to maintain tracking performance.
+      </p>
+
+      <p>
+        A high-level algorithmic view of an impact-aware control loop is shown
+        below.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Read q, v at time t"] --> U["Compute control torque tau(q, v, sigma)"]
+  U --> INT["Integrate dynamics until next step or event"]
+  INT --> G{"Guard fired \n(impact or liftoff)?"}
+  G -->|no| S
+  G -->|yes| R["Apply reset map (impact law or mode change)"]
+  R --> M["Update mode sigma and contact model"]
+  M --> S
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Python Implementation – 1-DOF Impact Simulation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Python Implementation &mdash; 1-DOF Impact Simulation</h2>
+    <div class="down-content">
+      <p>
+        We implement a simple 1-DOF robot (mass on a vertical line) with a rigid
+        stop at <strong>\( q = 0 \)</strong>. The state is
+        <strong>\( x = (q,v) \)</strong>, with gravity
+        <strong>\( g &gt; 0 \)</strong> pulling downward (<strong
+          >\( q \)</strong
+        >
+        decreases). An impact occurs when <strong>\( q = 0 \)</strong> and
+        <strong>\( v &lt; 0 \)</strong>.
+      </p>
+      <p>This prototype demonstrates:</p>
+      <ul>
+        <li>Contact event detection.</li>
+        <li>Velocity reset using a coefficient of restitution.</li>
+        <li>Simple PD gravity-compensated control above the surface.</li>
+      </ul>
+
+      <pre><code class="language-python">
+import numpy as np
+
+class OneDOFImpactSystem:
+    def __init__(self, m=1.0, g=9.81, e=0.0):
+        self.m = m      # mass
+        self.g = g      # gravity
+        self.e = e      # restitution (0 inelastic, 1 elastic)
+
+    def dynamics(self, t, x, tau):
+        """
+        Continuous dynamics between impacts.
+        x = [q, v]. tau is control torque (force).
+        """
+        q, v = x
+        # mass * acceleration = tau - m*g
+        a = (tau - self.m * self.g) / self.m
+        return np.array([v, a])
+
+    def impact_event(self, t, x):
+        """
+        Guard function: impact when q = 0 and v &lt; 0.
+        We only encode the surface condition here; direction handled separately.
+        """
+        q, _ = x
+        return q  # zero when contact with the stop
+
+    def handle_impact(self, x):
+        """
+        Apply Newton impact law with coefficient of restitution e.
+        """
+        q, v = x
+        if q == 0.0 and v &lt; 0.0:
+            v_plus = -self.e * v  # normal velocity reversed and scaled
+            return np.array([q, v_plus])
+        else:
+            return x
+
+def pd_controller(q, v, q_des, v_des, kp=50.0, kd=10.0, g=9.81, m=1.0):
+    """
+    Simple PD with gravity compensation for a vertical 1-DOF system.
+    """
+    # gravity compensation
+    tau_g = m * g
+    # PD term
+    tau_pd = -kp * (q - q_des) - kd * (v - v_des)
+    return tau_g + tau_pd
+
+def simulate(system, x0, t0, tf, dt, q_des):
+    t = t0
+    x = np.array(x0, dtype=float)
+    ts = [t]
+    xs = [x.copy()]
+
+    while t &lt; tf:
+        q, v = x
+        # Mode: free or resting on the stop
+        if q &gt; 0.0 or v &gt; 0.0:
+            # free motion (above or separating from the stop)
+            tau = pd_controller(q, v, q_des, 0.0, g=system.g, m=system.m)
+        else:
+            # we are on the stop and not separating (q == 0 and v == 0)
+            # hold position with PD to avoid drift
+            tau = 0.0
+
+        # integrate one Euler step (for simplicity)
+        dx = system.dynamics(t, x, tau)
+        x_new = x + dt * dx
+
+        # detect surface crossing q = 0
+        if x[0] &gt; 0.0 and x_new[0] &lt;= 0.0:
+            # approximate impact at intermediate time
+            # move to surface
+            alpha = x[0] / (x[0] - x_new[0] + 1e-12)
+            x_impact = x + alpha * (x_new - x)
+
+            # apply impact law
+            x_after = system.handle_impact(x_impact)
+
+            # continue with remaining time in the step if needed
+            remaining = (1.0 - alpha) * dt
+            dx_after = system.dynamics(t, x_after, tau)
+            x_new = x_after + remaining * dx_after
+
+        t += dt
+        x = x_new
+        ts.append(t)
+        xs.append(x.copy())
+
+    return np.array(ts), np.stack(xs, axis=0)
+
+if __name__ == "__main__":
+    sys = OneDOFImpactSystem(m=1.0, g=9.81, e=0.2)
+    x0 = [0.5, -1.0]  # start above the stop, moving downward
+    t, x = simulate(sys, x0, t0=0.0, tf=3.0, dt=1e-3, q_des=0.2)
+    # Here you can plot q(t) and v(t) to inspect impact behaviour.
+      </code></pre>
+
+      <p>
+        In more complex manipulators one would use robotics libraries such as
+        <code>pinocchio</code>, <code>pybullet</code>, or ROS-based
+        <code>ros_control</code> to obtain <strong>\( \mathbf{M}(q) \)</strong>,
+        <strong>\( \mathbf{h}(q,v) \)</strong>, and contact Jacobians, then
+        embed similar impact handling in their simulation or control loop.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: C++ and Java Sketches for Impact-Aware Control -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. C++ and Java Sketches for Impact-Aware Control</h2>
+    <div class="down-content">
+      <h3>6.1 C++ Skeleton (Using a Generic Rigid-Body Library)</h3>
+      <p>
+        The following C++ snippet outlines how one might structure a control
+        loop with impact-aware mode switching. Libraries such as
+        <code>RBDL</code> or <code>Pinocchio</code> can be used to compute
+        <strong>\( \mathbf{M}(q) \)</strong> and
+        <strong>\( \mathbf{h}(q,v) \)</strong>.
+      </p>
+
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+
+enum class Mode { Free, Contact };
+
+struct State {
+    std::vector&lt;double&gt; q;
+    std::vector&lt;double&gt; v;
+};
+
+struct ContactInfo {
+    bool active;
+    double gap;        // signed distance
+    double normalVel;  // end-effector normal velocity
+};
+
+class ImpactController {
+public:
+    ImpactController(double e) : e_(e), mode_(Mode::Free) {}
+
+    void step(double t, double dt, State &amp;x) {
+        ContactInfo c = detectContact(x);
+        if (mode_ == Mode::Free &amp;&amp; c.gap &lt;= 0.0 &amp;&amp; c.normalVel &lt; 0.0) {
+            // impact event
+            applyImpact(x, c);
+            mode_ = Mode::Contact;
+        } else if (mode_ == Mode::Contact &amp;&amp; c.normalVel &gt;= 0.0 &amp;&amp; c.active == false) {
+            // liftoff
+            mode_ = Mode::Free;
+        }
+
+        std::vector&lt;double&gt; tau = computeControl(x, mode_);
+        integrateDynamics(t, dt, x, tau);
+    }
+
+private:
+    Mode mode_;
+    double e_; // restitution
+
+    ContactInfo detectContact(const State &amp;x) {
+        ContactInfo c{};
+        // user-defined kinematics to compute gap and normal velocity
+        // c.gap = phi(q); c.normalVel = dphi(q, v);
+        return c;
+    }
+
+    void applyImpact(State &amp;x, const ContactInfo &amp;c) {
+        // Use impact law: v_plus = v_minus - M^{-1} J^T * Lambda_n
+        // Here we only sketch the structure; actual implementation requires
+        // access to M(q) and J_n(q).
+        // M * (v_plus - v_minus) = J_n^T * Lambda_n
+        // dot_xn_minus = J_n * v_minus
+        // Lambda_n = -(1+e) * dot_xn_minus / (J_n * M^{-1} * J_n^T)
+    }
+
+    std::vector&lt;double&gt; computeControl(const State &amp;x, Mode mode) {
+        // PD or model-based control with mode-dependent damping gains
+        std::vector&lt;double&gt; tau(x.q.size(), 0.0);
+        // ...
+        return tau;
+    }
+
+    void integrateDynamics(double t, double dt, State &amp;x,
+                           const std::vector&lt;double&gt; &amp;tau) {
+        // Use your favourite integrator (Euler, Runge-Kutta, etc.)
+        // M(q) * dv/dt + h(q, v) = tau + J_c^T f_c
+    }
+};
+      </code></pre>
+
+      <h3>6.2 Java Skeleton (Hybrid Mode Handling)</h3>
+      <p>
+        In Java, we may encode the hybrid modes as an enum and define a
+        controller class that handles transitions. Linear algebra can be handled
+        via libraries like <code>EJML</code>, but here we keep the code scalar
+        for the 1-DOF case.
+      </p>
+
+      <pre><code class="language-java">
+public class OneDofImpactController {
+
+    public enum Mode { FREE, CONTACT }
+
+    private final double m;
+    private final double g;
+    private final double e;
+    private Mode mode;
+
+    public OneDofImpactController(double m, double g, double e) {
+        this.m = m;
+        this.g = g;
+        this.e = e;
+        this.mode = Mode.FREE;
+    }
+
+    public static class State {
+        public double q;
+        public double v;
+    }
+
+    public void step(double t, double dt, State x, double qDes) {
+        // detect events
+        if (mode == Mode.FREE &amp;&amp; x.q &lt;= 0.0 &amp;&amp; x.v &lt; 0.0) {
+            // impact
+            x.v = -e * x.v;
+            x.q = 0.0;
+            mode = Mode.CONTACT;
+        } else if (mode == Mode.CONTACT &amp;&amp; x.v &gt;= 0.0 &amp;&amp; x.q &gt;= 0.0) {
+            // liftoff
+            mode = Mode.FREE;
+        }
+
+        double tau;
+        if (mode == Mode.FREE) {
+            tau = pdControl(x.q, x.v, qDes, 0.0);
+        } else {
+            // contact mode: hold at q = 0 with high damping
+            tau = 0.0;
+        }
+
+        // integrate with explicit Euler
+        double a = (tau - m * g) / m;
+        x.q = x.q + dt * x.v;
+        x.v = x.v + dt * a;
+    }
+
+    private double pdControl(double q, double v, double qDes, double vDes) {
+        double kp = 50.0;
+        double kd = 10.0;
+        double tauG = m * g;
+        double tauPD = -kp * (q - qDes) - kd * (v - vDes);
+        return tauG + tauPD;
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: MATLAB/Simulink and Mathematica Implementations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. MATLAB/Simulink and Wolfram Mathematica Implementations</h2>
+    <div class="down-content">
+      <h3>7.1 MATLAB Script with Event Handling</h3>
+      <p>
+        MATLAB supports event functions to detect contact times during numerical
+        integration. Below is a 1-DOF example similar to the Python system.
+      </p>
+
+      <pre><code class="language-matlab">
+function contact_transition_demo
+    m = 1.0; g = 9.81; e = 0.2;
+    x0 = [0.5; -1.0];  % initial [q; v]
+    tspan = [0 3];
+
+    opts = odeset('Events', @(t, x) impactEvent(t, x));
+    [t, x] = ode45(@(t, x) dynamics(t, x, m, g), tspan, x0, opts);
+
+    % If an impact occurs, apply reset and continue (simple loop)
+    tAll = t; xAll = x;
+    while t(end) &lt; tspan(2)
+        xImpact = x(end, :).';
+        if xImpact(1) == 0 &amp;&amp; xImpact(2) &lt; 0
+            xImpact(2) = -e * xImpact(2); % velocity reset
+        end
+        tspan2 = [t(end) tspan(2)];
+        [t, x, te, xe, ie] = ode45(@(t, x) dynamics(t, x, m, g), ...
+                                   tspan2, xImpact, opts);
+        tAll = [tAll; t(2:end)];
+        xAll = [xAll; x(2:end, :)];
+        if isempty(te)
+            break;
+        end
+    end
+
+    figure;
+    subplot(2, 1, 1); plot(tAll, xAll(:, 1)); ylabel('q');
+    subplot(2, 1, 2); plot(tAll, xAll(:, 2)); ylabel('v'); xlabel('t');
+
+end
+
+function dx = dynamics(t, x, m, g)
+    q = x(1); v = x(2);
+    tau = pd_control(q, v, 0.2, 0.0, m, g);
+    a = (tau - m * g) / m;
+    dx = [v; a];
+end
+
+function [value, isterminal, direction] = impactEvent(t, x)
+    q = x(1); v = x(2);
+    value = q;          % detect q = 0
+    isterminal = 1;     % stop integration
+    direction = -1;     % only when crossing downward
+end
+
+function tau = pd_control(q, v, q_des, v_des, m, g)
+    kp = 50; kd = 10;
+    tau_g = m * g;
+    tau_pd = -kp * (q - q_des) - kd * (v - v_des);
+    tau = tau_g + tau_pd;
+end
+      </code></pre>
+
+      <p>
+        In Simulink, this logic can be implemented using an ODE solver block, a
+        <code>Hit Crossing</code> block to detect \( q = 0 \), and a triggered
+        subsystem that applies the velocity reset.
+      </p>
+
+      <h3>7.2 Wolfram Mathematica: Symbolic Impact Map</h3>
+      <p>
+        Mathematica allows closed-form derivation of the impact law and direct
+        numerical simulation using <code>NDSolve</code> with
+        <code>WhenEvent</code>.
+      </p>
+
+      <pre><code class="language-mathematica">
+(* Define symbols *)
+Clear[m, g, e, q, v, t];
+m = 1.0; g = 9.81; e = 0.3;
+
+(* Dynamics for free motion *)
+eqs = {
+  q'[t] == v[t],
+  v'[t] == -g
+};
+
+(* Impact event: q(t) == 0 and v(t) &lt; 0 *)
+impactRule = {v[t] :&gt; -e v[t]};
+
+sol = NDSolve[
+  {
+    eqs,
+    q[0] == 0.5,
+    v[0] == -1.0,
+    WhenEvent[q[t] == 0 &amp;&amp; v[t] &lt; 0,
+      {v[t] -&gt; -e v[t], q[t] -&gt; 0}
+    ]
+  },
+  {q, v},
+  {t, 0, 3}
+];
+
+Plot[{q[t] /. sol[[1]]}, {t, 0, 3},
+  PlotLegends -&gt; {"q(t)"}
+]
+      </code></pre>
+
+      <p>
+        For multidimensional manipulators, the same pattern extends to vector
+        states with impact rules that implement the matrix formula derived in
+        Section 2.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+
+    <p>
+      <strong>Problem 1 (Single-DOF Impact Map):</strong>
+      Consider a 1-DOF robot of mass <strong>\( m \)</strong> moving along a
+      line against a rigid stop at <strong>\( q = 0 \)</strong>. The pre-impact
+      velocity is <strong>\( v^- &lt; 0 \)</strong> and the coefficient of
+      restitution is <strong>\( e \in [0,1] \)</strong>. Derive the post-impact
+      velocity <strong>\( v^+ \)</strong> using impulse-momentum.
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      Let the normal impulse be <strong>\( \Lambda_n \)</strong>. The
+      impulse-momentum equation is
+    </p>
+    <h4 class="mathJax">\[ m\left( v^+ - v^- \right) = \Lambda_n. \]</h4>
+    <p>
+      The restitution law reads
+      <strong>\( v^+ = -e v^- \)</strong>. Substitute this into the
+      impulse-momentum equation:
+    </p>
+    <h4 class="mathJax">
+      \[ m\left( -e v^- - v^- \right) = \Lambda_n \quad\Rightarrow\quad
+      \Lambda_n = -m(1+e)v^-. \]
+    </h4>
+    <p>
+      Because <strong>\( v^- &lt; 0 \)</strong>, the impulse is positive
+      (repulsive). Solving for <strong>\( v^+ \)</strong> directly from the
+      restitution law yields <strong>\( v^+ = -e v^- \)</strong>, as expected.
+    </p>
+
+    <p>
+      <strong>Problem 2 (Energy Loss in Generalized Impact):</strong>
+      For the rigid-body manipulator impact model in Section 2, show that the
+      kinetic energy difference satisfies
+      <strong>
+        \( K^+ - K^- = -\tfrac{1}{2}(1-e^2) \dfrac{(\dot{x}_n^-)^2}
+        {\mathbf{J}_n\mathbf{M}^{-1}\mathbf{J}_n^\top} \).
+      </strong>
+    </p>
+    <p>
+      <strong>Solution (outline):</strong>
+      Using
+      <strong
+        >\( v^+ = v^- + \mathbf{M}^{-1}\mathbf{J}_n^\top\Lambda_n \)</strong
+      >
+      and
+      <strong>
+        \( \Lambda_n = -(1+e)\dot{x}_n^- /
+        (\mathbf{J}_n\mathbf{M}^{-1}\mathbf{J}_n^\top) \),
+      </strong>
+      compute
+    </p>
+    <h4 class="mathJax">
+      \[ K^+ = \tfrac{1}{2}{v^-}^\top\mathbf{M}v^- + {v^-}^\top
+      \mathbf{J}_n^\top \Lambda_n + \tfrac{1}{2}\Lambda_n^2
+      \mathbf{J}_n\mathbf{M}^{-1}\mathbf{J}_n^\top. \]
+    </h4>
+    <p>
+      Subtracting
+      <strong>\( K^- = \tfrac{1}{2}{v^-}^\top\mathbf{M}v^- \)</strong> and
+      substituting the expression for <strong>\( \Lambda_n \)</strong>, one
+      obtains after simplification
+    </p>
+    <h4 class="mathJax">
+      \[ K^+ - K^- = -\frac{1-e^2}{2} \frac{\left(\dot{x}_n^-\right)^2}
+      {\mathbf{J}_n\mathbf{M}^{-1}\mathbf{J}_n^\top} \le 0. \]
+    </h4>
+    <p>
+      Thus, energy is never increased at impact for
+      <strong>\( 0 \le e \le 1 \)</strong>.
+    </p>
+
+    <p>
+      <strong>Problem 3 (Hybrid Mode Guards):</strong>
+      Let <strong>\( \phi(q) \)</strong> be a signed distance function, with
+      <strong>\( \phi(q) &gt; 0 \)</strong> in free space and
+      <strong>\( \phi(q) = 0 \)</strong> on the contact surface. Give a
+      mathematically precise definition of the guard set
+      <strong>\( G_{\text{impact}} \)</strong> for the transition from free mode
+      to contact mode.
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      The impact occurs when the configuration first hits the surface and is
+      approaching it. The guard set is
+    </p>
+    <h4 class="mathJax">
+      \[ G_{\text{impact}} = \left\{ (q,v) \,:\, \phi(q) = 0,\; \dot{\phi}(q,v)
+      = \nabla_q \phi(q)^\top v &lt; 0 \right\}. \]
+    </h4>
+    <p>
+      In practice, numerical solvers detect a zero crossing of
+      <strong>\( \phi(q) \)</strong> with negative direction.
+    </p>
+
+    <p>
+      <strong>Problem 4 (Complementarity at Liftoff):</strong>
+      In contact mode, the normal force is
+      <strong>\( \lambda_n \ge 0 \)</strong> and the constraint is
+      <strong>\( \phi(q)=0 \)</strong>. Explain how the complementarity
+      condition <strong>\( \phi(q)\lambda_n = 0 \)</strong>
+      encodes both contact and liftoff within a single set of algebraic
+      conditions.
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      The product <strong>\( \phi(q)\lambda_n \)</strong> being zero implies
+      that at least one of the factors is zero:
+    </p>
+    <ul>
+      <li>
+        If <strong>\( \phi(q) = 0 \)</strong> and
+        <strong>\( \lambda_n \ge 0 \)</strong>, the configuration is on the
+        contact surface with a nonnegative normal force. This corresponds to
+        <em>active contact</em>.
+      </li>
+      <li>
+        If <strong>\( \lambda_n = 0 \)</strong> and
+        <strong>\( \phi(q) \ge 0 \)</strong>, the surface exerts no normal
+        force; the robot is either detached (<strong
+          >\( \phi(q) &gt; 0 \)</strong
+        >) or at the verge of liftoff. This corresponds to
+        <em>free or impending liftoff</em>.
+      </li>
+    </ul>
+    <p>
+      Thus, the complementarity condition compactly captures the mutually
+      exclusive possibilities of contact and separation.
+    </p>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we modeled contact transitions and impacts as hybrid
+        phenomena in robot control. Starting from impulse-momentum conservation,
+        we derived the rigid-body impact law with a coefficient of restitution,
+        and we showed that kinetic energy cannot increase during impact. We
+        embedded these ideas into a hybrid system formalism with guard sets and
+        reset maps, and we discussed impact-aware control strategies such as
+        pre-impact velocity shaping and post-impact damping modulation. Finally,
+        we illustrated implementation patterns across Python, C++, Java,
+        MATLAB/Simulink, and Wolfram Mathematica for simple 1-DOF systems,
+        laying the groundwork for contact-safe controllers in more complex
+        manipulators.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Mason, M. T. (1981). Compliance and force control for computer
+        controlled manipulators.
+        <em>IEEE Transactions on Systems, Man, and Cybernetics</em>, 11(6),
+        418&ndash;432.
+      </li>
+      <li>
+        Brogliato, B. (1999).
+        <em>Nonsmooth Mechanics: Models, Dynamics and Control</em>. Springer,
+        London.
+      </li>
+      <li>
+        Glocker, C. (2001).
+        <em>Set-Valued Force Laws: Dynamics of Non-Smooth Systems</em>.
+        Springer, Berlin.
+      </li>
+      <li>
+        Stewart, D. E., &amp; Trinkle, J. C. (1996). An implicit time-stepping
+        scheme for rigid body dynamics with inelastic collisions and Coulomb
+        friction.
+        <em>International Journal for Numerical Methods in Engineering</em>,
+        39(15), 2673&ndash;2691.
+      </li>
+      <li>
+        Westervelt, E. R., Grizzle, J. W., &amp; Koditschek, D. E. (2003).
+        Hybrid zero dynamics of planar biped walkers.
+        <em>IEEE Transactions on Automatic Control</em>, 48(1), 42&ndash;56.
+      </li>
+      <li>
+        Candotti, M., &amp; Brogliato, B. (2019). Stability analysis of
+        constrained Lagrangian systems with impacts via Lyapunov methods.
+        <em>IEEE Transactions on Automatic Control</em>, 64(10),
+        3984&ndash;3999.
+      </li>
+      <li>
+        Hurmuzlu, Y., &amp; Marghitu, D. B. (1994). Rigid body collisions of
+        planar kinematic chains with multiple contact points.
+        <em>International Journal of Robotics Research</em>, 13(1), 82&ndash;92.
+      </li>
+      <li>
+        Chatterjee, A., &amp; Ruina, A. (1998). A new algebraic rigid body
+        collision law based on impulse space considerations.
+        <em>Journal of Applied Mechanics</em>, 65(4), 939&ndash;951.
+      </li>
+      <li>
+        Trinkle, J. C., &amp; DeRozario, D. (1999). Simulation of continuous and
+        discontinuous contact in multibody systems.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation</em
+        >, 508&ndash;515.
+      </li>
+      <li>
+        Johnson, E. R., &amp; Koditschek, D. E. (2013). The legged runner's
+        Lagrangian: Formalizing the hybrid dynamics of legged locomotion.
+        <em>Regular and Chaotic Dynamics</em>, 18(1-2), 44&ndash;74.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Section -->
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter5/Lesson3.html">
+          Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter5/Lesson5.html">
+          Lesson 5: Lab: Contact-safe Control Demo
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="active-lesson" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

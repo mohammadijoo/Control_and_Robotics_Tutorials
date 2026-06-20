@@ -1,0 +1,2479 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 7: Kalman-Filter Localization for AMR - Lesson 3: Consistency and Linearization Pitfalls | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 7: Kalman-Filter Localization for AMR</h1>
+    <h3><strong>Lesson 3: Consistency and Linearization Pitfalls</strong></h3>
+    <p>
+      This lesson rigorously analyzes why EKF/UKF localization can become
+      <em>inconsistent</em> in mobile-robot settings, even when the algorithm
+      appears numerically stable. We derive the first-order linearization used
+      by the EKF, quantify the neglected higher-order terms, and formalize
+      statistical consistency tests (NEES/NIS) with proofs. We then connect
+      these results to practical AMR failure modes (turning, angle wrapping,
+      weak observability, and relinearization order effects), and implement
+      reproducible consistency checks in Python, C++, Java, MATLAB/Simulink, and
+      Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview: What “Consistency” Means in Localization</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 6, we introduced a belief as a probability distribution over
+        pose. For a Gaussian filter, the belief at time
+        <strong>\( k \)</strong> is summarized by a mean
+        <strong>\( \hat{\mathbf{x} }_k \)</strong> and covariance
+        <strong>\( \mathbf{P}_k \)</strong>. The filter is called
+        <strong>consistent</strong> if its reported uncertainty matches the true
+        estimation error statistics (under the assumed model class).
+      </p>
+
+      <p>
+        Define the true error <strong>\( \tilde{\mathbf{x} }_k \)</strong> as:
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{x} }_k \;\triangleq\; \mathbf{x}_k - \hat{\mathbf{x}
+        }_k . \]
+      </h4>
+
+      <p>
+        A common (Gaussian) consistency target is:
+        <strong>\( \mathbb{E}[\tilde{\mathbf{x} }_k] = \mathbf{0} \)</strong>
+        and
+        <strong
+          >\( \mathbb{E}[\tilde{\mathbf{x} }_k\tilde{\mathbf{x} }_k^\top] =
+          \mathbf{P}_k \)</strong
+        >. In the <em>linear</em> Kalman filter with correct noise models, these
+        equalities hold exactly. In the EKF, they generally do not, because the
+        EKF replaces nonlinear dynamics/measurements by local linear models.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Nonlinear system: x_{k+1}=f(x_k,u_k)+w_k; z_k=h(x_k)+v_k"] --> B["Filter keeps Gaussian belief (xhat_k, P_k)"]
+  B --> C["Linearize around xhat: F_k, H_k"]
+  C --> D["EKF predict/update uses first-order model"]
+  D --> E["Neglected higher-order terms accumulate"]
+  E --> F["Reported P_k becomes too small (overconfident)"]
+  F --> G["Consistency tests (NEES/NIS) exceed bounds"]
+        </pre>
+      </div>
+
+      <p>
+        In AMR localization, inconsistency is not a theoretical curiosity: it
+        directly causes aggressive data-fusion (over-trusting a biased
+        estimate), brittle gating, and sudden divergence after a modest
+        disturbance.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: EKF Linearization and the Source of Overconfidence -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      2. EKF Linearization: First-Order Approximation and the Missing Terms
+    </h2>
+    <div class="down-content">
+      <p>
+        Consider the standard discrete-time nonlinear state-space model used in
+        localization:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = f(\mathbf{x}_k,\mathbf{u}_k) + \mathbf{w}_k,\qquad
+        \mathbf{z}_k = h(\mathbf{x}_k) + \mathbf{v}_k, \]
+      </h4>
+
+      <p>
+        with Gaussian noises
+        <strong
+          >\( \mathbf{w}_k \sim \mathcal{N}(\mathbf{0},\mathbf{Q}_k) \)</strong
+        >,
+        <strong
+          >\( \mathbf{v}_k \sim \mathcal{N}(\mathbf{0},\mathbf{R}_k) \)</strong
+        >. The EKF linearizes about the current estimate
+        <strong>\( \hat{\mathbf{x} }_k \)</strong>.
+      </p>
+
+      <p>
+        <strong>2.1 Taylor expansion with remainder (state transition).</strong>
+      </p>
+      <p>
+        Let
+        <strong
+          >\( \delta\mathbf{x}_k \triangleq \mathbf{x}_k - \hat{\mathbf{x} }_k
+          \)</strong
+        >. By Taylor’s theorem:
+      </p>
+      <h4 class="mathJax">
+        \[ f(\mathbf{x}_k,\mathbf{u}_k) = f(\hat{\mathbf{x} }_k,\mathbf{u}_k) +
+        \mathbf{F}_k\,\delta\mathbf{x}_k + \mathbf{r}^f_k, \quad \mathbf{F}_k
+        \triangleq \left.\frac{\partial f}{\partial \mathbf{x}
+        }\right|_{\hat{\mathbf{x} }_k,\mathbf{u}_k}, \]
+      </h4>
+
+      <p>
+        where <strong>\( \mathbf{r}^f_k \)</strong> collects second and higher
+        order terms. One explicit form (multivariate) is:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{r}^f_k = \frac{1}{2} \begin{bmatrix} \delta\mathbf{x}_k^\top
+        \mathbf{H}^{(1)}_k \delta\mathbf{x}_k \\ \vdots \\
+        \delta\mathbf{x}_k^\top \mathbf{H}^{(n)}_k \delta\mathbf{x}_k
+        \end{bmatrix} + \mathcal{O}(\|\delta\mathbf{x}_k\|^3), \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{H}^{(i)}_k \)</strong> is the Hessian of the
+        <strong>\( i \)</strong>-th component of
+        <strong>\( f \)</strong> evaluated along a segment between
+        <strong>\( \hat{\mathbf{x} }_k \)</strong> and
+        <strong>\( \mathbf{x}_k \)</strong>.
+      </p>
+
+      <p>
+        The EKF prediction step implicitly assumes
+        <strong>\( \mathbf{r}^f_k \approx \mathbf{0} \)</strong>. This is
+        accurate only if uncertainty is small and nonlinearity is mild over the
+        support of the belief.
+      </p>
+
+      <p><strong>2.2 Consequence for the predicted covariance.</strong></p>
+      <p>
+        The EKF predicted covariance is:
+        <strong
+          >\( \mathbf{P}_{k+1|k}^{\text{EKF} } = \mathbf{F}_k
+          \mathbf{P}_{k|k}\mathbf{F}_k^\top + \mathbf{Q}_k \)</strong
+        >. But the <em>true</em> covariance of the prediction error includes the
+        remainder:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1|k}^{\text{true} } = \mathbb{E}\!\left[
+        \left(\mathbf{F}_k\delta\mathbf{x}_k + \mathbf{r}^f_k +
+        \mathbf{w}_k\right) \left(\mathbf{F}_k\delta\mathbf{x}_k +
+        \mathbf{r}^f_k + \mathbf{w}_k\right)^\top \right]. \]
+      </h4>
+
+      <p>
+        Expanding and using independence between
+        <strong>\( \delta\mathbf{x}_k \)</strong> and
+        <strong>\( \mathbf{w}_k \)</strong>
+        (standard in filtering assumptions):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1|k}^{\text{true} } = \mathbf{F}_k
+        \mathbf{P}_{k|k}\mathbf{F}_k^\top + \mathbf{Q}_k +
+        \underbrace{\mathbb{E}[\mathbf{r}^f_k (\mathbf{r}^f_k)^\top]}_{\succeq
+        \mathbf{0} } + \underbrace{\mathbf{F}_k \mathbb{E}[\delta\mathbf{x}_k
+        (\mathbf{r}^f_k)^\top] + \mathbb{E}[\mathbf{r}^f_k
+        (\delta\mathbf{x}_k)^\top]\mathbf{F}_k^\top}_{\text{cross terms} } . \]
+      </h4>
+
+      <p>
+        <strong>Key pitfall:</strong> the EKF drops all remainder-related terms,
+        so when nonlinearity is significant,
+        <strong>\( \mathbf{P}_{k+1|k}^{\text{EKF} } \)</strong> becomes
+        systematically <em>too small</em>, i.e., the filter becomes
+        overconfident.
+      </p>
+
+      <p><strong>2.3 Linearization of the measurement model.</strong></p>
+      <p>Similarly:</p>
+      <h4 class="mathJax">
+        \[ h(\mathbf{x}_k) = h(\hat{\mathbf{x} }_{k|k-1}) + \mathbf{H}_k
+        \delta\mathbf{x}_{k|k-1} + \mathbf{r}^h_k, \qquad \mathbf{H}_k
+        \triangleq \left.\frac{\partial h}{\partial \mathbf{x}
+        }\right|_{\hat{\mathbf{x} }_{k|k-1} } . \]
+      </h4>
+
+      <p>
+        The innovation used by EKF is
+        <strong
+          >\( \boldsymbol{\nu}_k = \mathbf{z}_k - h(\hat{\mathbf{x} }_{k|k-1})
+          \)</strong
+        >. The covariance <strong>\( \mathbf{S}_k \)</strong> is computed as:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{S}_k^{\text{EKF} } = \mathbf{H}_k
+        \mathbf{P}_{k|k-1}\mathbf{H}_k^\top + \mathbf{R}_k, \]
+      </h4>
+      <p>
+        but the true innovation covariance includes additional remainder-induced
+        terms, which again biases the filter toward overconfidence, especially
+        in strongly nonlinear measurements (e.g., bearing and range near
+        singular geometries).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Statistical Consistency Tests (NEES/NIS) with Proofs -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Consistency Diagnostics: NEES and NIS (with Proofs)</h2>
+    <div class="down-content">
+      <p>
+        EKF/UKF consistency is typically evaluated via chi-square hypothesis
+        tests using Monte Carlo simulations (or ground-truth logs). Two standard
+        statistics are:
+        <strong>NEES</strong> (state error) and <strong>NIS</strong> (innovation
+        error).
+      </p>
+
+      <p><strong>3.1 NEES definition.</strong></p>
+      <p>
+        For state dimension <strong>\( n \)</strong>, define the normalized
+        estimation error squared:
+      </p>
+      <h4 class="mathJax">
+        \[ \epsilon_k \;\triangleq\; \tilde{\mathbf{x} }_k^\top
+        \mathbf{P}_k^{-1}\tilde{\mathbf{x} }_k . \]
+      </h4>
+
+      <p>
+        <strong>Theorem (NEES distribution under Gaussian consistency).</strong>
+      </p>
+      <p>
+        If
+        <strong
+          >\( \tilde{\mathbf{x} }_k \sim \mathcal{N}(\mathbf{0},\mathbf{P}_k)
+          \)</strong
+        >
+        and <strong>\( \mathbf{P}_k \succ \mathbf{0} \)</strong>, then
+        <strong>\( \epsilon_k \sim \chi^2_n \)</strong>.
+      </p>
+
+      <p>
+        <strong>Proof.</strong> Let
+        <strong>\( \mathbf{P}_k = \mathbf{L}\mathbf{L}^\top \)</strong> be a
+        Cholesky factorization (exists since
+        <strong>\( \mathbf{P}_k \succ \mathbf{0} \)</strong>). Define
+        <strong>\( \mathbf{y} = \mathbf{L}^{-1}\tilde{\mathbf{x} }_k \)</strong
+        >. Then:
+        <strong
+          >\( \mathbf{y} \sim \mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong
+        >
+        and:
+      </p>
+      <h4 class="mathJax">
+        \[ \epsilon_k = \tilde{\mathbf{x} }_k^\top
+        (\mathbf{L}\mathbf{L}^\top)^{-1}\tilde{\mathbf{x} }_k =
+        \tilde{\mathbf{x} }_k^\top
+        \mathbf{L}^{-\top}\mathbf{L}^{-1}\tilde{\mathbf{x} }_k =
+        \|\mathbf{L}^{-1}\tilde{\mathbf{x} }_k\|^2 = \|\mathbf{y}\|^2 =
+        \sum_{i=1}^{n} y_i^2. \]
+      </h4>
+      <p>
+        Since the <strong>\( y_i \)</strong> are i.i.d. standard normal, the sum
+        of squares is chi-square with <strong>\( n \)</strong> degrees of
+        freedom. <strong>□</strong>
+      </p>
+
+      <p><strong>3.2 NIS definition.</strong></p>
+      <p>
+        For measurement dimension <strong>\( m \)</strong>, define the
+        normalized innovation squared:
+      </p>
+      <h4 class="mathJax">
+        \[ \eta_k \;\triangleq\; \boldsymbol{\nu}_k^\top
+        \mathbf{S}_k^{-1}\boldsymbol{\nu}_k, \qquad \boldsymbol{\nu}_k =
+        \mathbf{z}_k - h(\hat{\mathbf{x} }_{k|k-1}), \qquad \mathbf{S}_k =
+        \mathbf{H}_k \mathbf{P}_{k|k-1}\mathbf{H}_k^\top + \mathbf{R}_k . \]
+      </h4>
+
+      <p>
+        Under correct modeling, <strong>\( \eta_k \sim \chi^2_m \)</strong>. In
+        practice, NIS is especially useful in localization because ground-truth
+        state may be unavailable, but innovation statistics are always
+        available.
+      </p>
+
+      <p><strong>3.3 Bounds for averaged NEES/NIS (Monte Carlo).</strong></p>
+      <p>
+        Over <strong>\( N \)</strong> independent samples, define
+        <strong
+          >\( \bar{\epsilon} = \frac{1}{N}\sum_{i=1}^N \epsilon^{(i)} \)</strong
+        >. If each <strong>\( \epsilon^{(i)} \sim \chi^2_n \)</strong>, then:
+        <strong>\( N\bar{\epsilon} \sim \chi^2_{Nn} \)</strong>. Hence a
+        two-sided <strong>\( (1-\alpha) \)</strong> acceptance interval is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \frac{1}{N}\chi^2_{Nn,\;\alpha/2} \;\le\; \bar{\epsilon} \;\le\;
+        \frac{1}{N}\chi^2_{Nn,\;1-\alpha/2}, \]
+      </h4>
+
+      <p>
+        and similarly for <strong>\( \bar{\eta} \)</strong> with
+        <strong>\( m \)</strong>. If the empirical average persistently violates
+        the upper bound, the filter is typically
+        <strong>overconfident</strong> (inconsistent).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: AMR-Specific Linearization Pitfalls -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Linearization Pitfalls that Commonly Break AMR Localization</h2>
+    <div class="down-content">
+      <p><strong>4.1 Large heading uncertainty + turning motion.</strong></p>
+      <p>
+        In a unicycle/differential-drive model, position increments include
+        <strong>\( \cos(\theta) \)</strong> and
+        <strong>\( \sin(\theta) \)</strong>. When
+        <strong>\( \theta \)</strong> uncertainty is large, first-order
+        linearization about <strong>\( \hat{\theta} \)</strong> poorly
+        approximates the distribution of <strong>\( \cos(\theta) \)</strong>,
+        leading to underestimated position covariance.
+      </p>
+
+      <p><strong>4.2 Angle wrapping in innovations.</strong></p>
+      <p>
+        Bearing measurements produce innovations that must be wrapped to
+        <strong>\( (-\pi,\pi] \)</strong>. Failing to do so makes the innovation
+        appear artificially large, causing an incorrect update step and
+        potentially an unstable Jacobian regime.
+      </p>
+
+      <p>
+        <strong
+          >4.3 Order dependence from relinearization (multi-measurement
+          updates).</strong
+        >
+      </p>
+      <p>
+        For multiple measurements
+        <strong>\( \mathbf{z}_k^{(1)}, \mathbf{z}_k^{(2)}, \dots \)</strong>,
+        EKF updates are not strictly commutative because the Jacobian
+        <strong>\( \mathbf{H}_k \)</strong> depends on the current linearization
+        point. Sequentially updating and relinearizing after each measurement
+        can yield different results than batching, especially in high curvature
+        measurement functions (range/bearing near landmarks).
+      </p>
+
+      <p>
+        <strong>4.4 Weak observability and “information injection”.</strong>
+      </p>
+      <p>
+        If the geometry makes certain directions weakly observed (e.g.,
+        near-collinear landmark configurations), linearization may artificially
+        produce a numerically informative Jacobian, shrinking covariance in
+        directions where the true nonlinear system carries little information.
+        This is a core mechanism behind EKF inconsistency discussed in
+        observability-based analyses.
+      </p>
+
+      <p>
+        <strong
+          >4.5 Discretization mismatch (continuous-time noise treated as
+          discrete).</strong
+        >
+      </p>
+      <p>
+        In AMR stacks, IMU/odometry models are often continuous-time while
+        filters run discretely. If the process noise covariance
+        <strong>\( \mathbf{Q}_k \)</strong> is not discretized consistently with
+        the motion model and sampling interval, the filter can become
+        overconfident even if linearization is accurate. (Noise tuning itself is
+        handled in Lesson 4.)
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Mitigation Strategies (Within EKF/UKF Framework) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Mitigation Strategies for Consistency</h2>
+    <div class="down-content">
+      <p>
+        <strong
+          >5.1 Iterated EKF (IEKF): relinearize in the measurement
+          update.</strong
+        >
+      </p>
+      <p>
+        Instead of one linearization at
+        <strong>\( \hat{\mathbf{x} }_{k|k-1} \)</strong>, the IEKF performs a
+        small Gauss–Newton loop on the measurement residual, relinearizing
+        around the current iterate
+        <strong>\( \hat{\mathbf{x} }_{k|k}^{(i)} \)</strong>. This reduces
+        sensitivity to poor linearization points.
+      </p>
+
+      <p><strong>5.2 UKF as a non-derivative alternative.</strong></p>
+      <p>
+        The UKF (Lesson 2) approximates mean/covariance propagation via sigma
+        points, capturing second-order effects more accurately in many AMR
+        nonlinearities. While UKF is not guaranteed consistent under model
+        mismatch, it can reduce linearization-induced overconfidence.
+      </p>
+
+      <p>
+        <strong
+          >5.3 Conservative covariance handling (when appropriate).</strong
+        >
+      </p>
+      <p>
+        If diagnostics show persistent overconfidence, practical options include
+        covariance inflation
+        <strong>\( \mathbf{P} \leftarrow \gamma \mathbf{P} \)</strong> with
+        <strong>\( \gamma &gt; 1 \)</strong>, or increasing process noise
+        slightly (formal tuning is Lesson 4). These are engineering mitigations,
+        not substitutes for correct modeling.
+      </p>
+
+      <p><strong>5.4 Innovation monitoring and gating using NIS.</strong></p>
+      <p>
+        Use NIS bounds to detect mismatch or outliers: if
+        <strong>\( \eta_k \)</strong> frequently exceeds the upper bound, the
+        filter is either inconsistent (too small
+        <strong>\( \mathbf{S}_k \)</strong>) or the measurement noise/outlier
+        model is wrong.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Multi-Language Implementations (Consistency Checks) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      6. Implementations: EKF/UKF Consistency Checks in Multiple Languages
+    </h2>
+    <div class="down-content">
+      <p>
+        The following files (also provided as a downloadable ZIP) implement a
+        reproducible Monte Carlo testbed for range–bearing localization with
+        NEES/NIS reporting. The Python version includes both EKF and UKF
+        comparisons. The C++/Java/MATLAB/Mathematica versions emphasize EKF and
+        the statistical tests.
+      </p>
+
+      <h3>6.1 Python (EKF vs UKF + ANEES/ANIS)</h3>
+      <p><strong>File: Chapter7_Lesson3.py</strong></p>
+      <pre><code class="language-python">#!/usr/bin/env python3
+"""
+Chapter7_Lesson3.py
+Consistency and Linearization Pitfalls — EKF vs UKF on a simple AMR localization example.
+
+Dependencies:
+  - numpy
+  - scipy (for chi-square bounds)
+
+This script:
+  1) Simulates a unicycle-like planar robot (x, y, theta) with process noise.
+  2) Uses range-bearing measurements to known landmarks.
+  3) Runs EKF and UKF.
+  4) Reports ANEES and ANIS consistency statistics with 95% bounds.
+
+Author: (course material)
+"""
+import math
+import numpy as np
+
+try:
+    from scipy.stats import chi2
+except Exception as e:
+    chi2 = None
+
+
+def wrap_angle(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def f_motion(x: np.ndarray, u: np.ndarray, dt: float) -&gt; np.ndarray:
+    """Discrete-time motion model (no noise inside; noise added externally)."""
+    px, py, th = x
+    v, om = u
+    nx = px + v * dt * math.cos(th)
+    ny = py + v * dt * math.sin(th)
+    nth = wrap_angle(th + om * dt)
+    return np.array([nx, ny, nth], dtype=float)
+
+
+def jacobian_F(x: np.ndarray, u: np.ndarray, dt: float) -&gt; np.ndarray:
+    """Jacobian of f w.r.t state x at (x,u)."""
+    _, _, th = x
+    v, _ = u
+    F = np.eye(3)
+    F[0, 2] = -v * dt * math.sin(th)
+    F[1, 2] =  v * dt * math.cos(th)
+    return F
+
+
+def h_meas(x: np.ndarray, landmark: np.ndarray) -&gt; np.ndarray:
+    """Range-bearing measurement to a landmark."""
+    px, py, th = x
+    dx = landmark[0] - px
+    dy = landmark[1] - py
+    r = math.hypot(dx, dy)
+    b = wrap_angle(math.atan2(dy, dx) - th)
+    return np.array([r, b], dtype=float)
+
+
+def jacobian_H(x: np.ndarray, landmark: np.ndarray) -&gt; np.ndarray:
+    """Jacobian of h w.r.t state x."""
+    px, py, th = x
+    dx = landmark[0] - px
+    dy = landmark[1] - py
+    r2 = dx*dx + dy*dy
+    r = math.sqrt(r2) if r2 &gt; 1e-12 else 1e-6
+    H = np.zeros((2, 3))
+    H[0, 0] = -dx / r
+    H[0, 1] = -dy / r
+    H[0, 2] = 0.0
+    H[1, 0] =  dy / r2
+    H[1, 1] = -dx / r2
+    H[1, 2] = -1.0
+    return H
+
+
+def ekf_step(x: np.ndarray, P: np.ndarray, u: np.ndarray, z: np.ndarray,
+             dt: float, Q: np.ndarray, R: np.ndarray, landmark: np.ndarray):
+    """One EKF predict + update."""
+    # Predict
+    F = jacobian_F(x, u, dt)
+    x_pred = f_motion(x, u, dt)
+    P_pred = F @ P @ F.T + Q
+
+    # Update
+    H = jacobian_H(x_pred, landmark)
+    z_pred = h_meas(x_pred, landmark)
+    nu = z - z_pred
+    nu[1] = wrap_angle(nu[1])  # bearing innovation
+    S = H @ P_pred @ H.T + R
+    K = P_pred @ H.T @ np.linalg.inv(S)
+
+    x_upd = x_pred + K @ nu
+    x_upd[2] = wrap_angle(x_upd[2])
+    I = np.eye(3)
+    P_upd = (I - K @ H) @ P_pred @ (I - K @ H).T + K @ R @ K.T  # Joseph form
+
+    return x_upd, P_upd, nu, S
+
+
+def sigma_points(x: np.ndarray, P: np.ndarray, alpha=1e-3, beta=2.0, kappa=0.0):
+    """Scaled unscented sigma points."""
+    n = x.size
+    lam = alpha*alpha*(n + kappa) - n
+    S = np.linalg.cholesky((n + lam) * P)
+
+    X = np.zeros((2*n + 1, n))
+    X[0] = x
+    for i in range(n):
+        X[1 + i]     = x + S[:, i]
+        X[1 + n + i] = x - S[:, i]
+
+    Wm = np.full(2*n + 1, 1.0 / (2.0*(n + lam)))
+    Wc = np.full(2*n + 1, 1.0 / (2.0*(n + lam)))
+    Wm[0] = lam / (n + lam)
+    Wc[0] = lam / (n + lam) + (1.0 - alpha*alpha + beta)
+
+    return X, Wm, Wc
+
+
+def mean_angle(weights: np.ndarray, angles: np.ndarray) -&gt; float:
+    s = np.sum(weights * np.sin(angles))
+    c = np.sum(weights * np.cos(angles))
+    return math.atan2(s, c)
+
+
+def ukf_step(x: np.ndarray, P: np.ndarray, u: np.ndarray, z: np.ndarray,
+             dt: float, Q: np.ndarray, R: np.ndarray, landmark: np.ndarray):
+    """One UKF predict + update (state dimension 3, measurement dimension 2)."""
+    n = x.size
+    m = z.size
+
+    # Predict
+    X, Wm, Wc = sigma_points(x, P)
+    X_pred = np.zeros_like(X)
+    for i in range(X.shape[0]):
+        X_pred[i] = f_motion(X[i], u, dt)
+
+    x_pred = np.zeros(n)
+    x_pred[0] = np.sum(Wm * X_pred[:, 0])
+    x_pred[1] = np.sum(Wm * X_pred[:, 1])
+    x_pred[2] = mean_angle(Wm, X_pred[:, 2])
+
+    P_pred = np.zeros((n, n))
+    for i in range(X_pred.shape[0]):
+        dx = X_pred[i] - x_pred
+        dx[2] = wrap_angle(dx[2])
+        P_pred += Wc[i] * np.outer(dx, dx)
+    P_pred += Q
+
+    # Update
+    Zsig = np.zeros((X_pred.shape[0], m))
+    for i in range(X_pred.shape[0]):
+        Zsig[i] = h_meas(X_pred[i], landmark)
+
+    z_pred = np.zeros(m)
+    z_pred[0] = np.sum(Wm * Zsig[:, 0])
+    z_pred[1] = mean_angle(Wm, Zsig[:, 1])
+
+    S = np.zeros((m, m))
+    Cxz = np.zeros((n, m))
+    for i in range(Zsig.shape[0]):
+        dz = Zsig[i] - z_pred
+        dz[1] = wrap_angle(dz[1])
+        dx = X_pred[i] - x_pred
+        dx[2] = wrap_angle(dx[2])
+        S += Wc[i] * np.outer(dz, dz)
+        Cxz += Wc[i] * np.outer(dx, dz)
+    S += R
+
+    nu = z - z_pred
+    nu[1] = wrap_angle(nu[1])
+    K = Cxz @ np.linalg.inv(S)
+
+    x_upd = x_pred + K @ nu
+    x_upd[2] = wrap_angle(x_upd[2])
+    P_upd = P_pred - K @ S @ K.T
+
+    return x_upd, P_upd, nu, S
+
+
+def chi2_bounds_for_average(dof: int, N: int, alpha: float = 0.05):
+    """Bounds for average of chi-square/dof statistic: (N * avg) ~ chi2(N*dof)."""
+    if chi2 is None:
+        return None
+    lo = chi2.ppf(alpha/2.0, N*dof) / N
+    hi = chi2.ppf(1.0 - alpha/2.0, N*dof) / N
+    return lo, hi
+
+
+def run_mc(filter_step, dt: float, steps: int, trials: int, seed: int = 0):
+    rng = np.random.default_rng(seed)
+
+    # Landmarks (known map)
+    landmarks = np.array([[5.0,  0.0],
+                          [0.0,  5.0],
+                          [5.0,  5.0]], dtype=float)
+
+    # Noise settings (intentionally a bit "mismatched" to amplify linearization effects)
+    Q = np.diag([0.08**2, 0.08**2, (3.0*math.pi/180.0)**2])  # process noise covariance
+    R = np.diag([0.15**2, (2.0*math.pi/180.0)**2])          # measurement noise covariance
+
+    nees_list = []
+    nis_list = []
+
+    for tr in range(trials):
+        # True initial state (unknown to filter)
+        x_true = np.array([0.0, 0.0, 0.0], dtype=float)
+
+        # Filter initial belief (purposely slightly biased)
+        x_hat = np.array([0.5, -0.4, 10.0*math.pi/180.0], dtype=float)
+        P = np.diag([0.8**2, 0.8**2, (15.0*math.pi/180.0)**2])
+
+        for k in range(steps):
+            # Control: forward + turning (induces nonlinearity)
+            v = 1.0 + 0.2*math.sin(0.05*k)
+            om = 0.35 + 0.25*math.sin(0.03*k)
+
+            u = np.array([v, om], dtype=float)
+
+            # Simulate true process with noise
+            w = rng.multivariate_normal(np.zeros(3), Q)
+            x_true = f_motion(x_true, u, dt) + w
+            x_true[2] = wrap_angle(x_true[2])
+
+            # Choose a landmark based on time (switching adds mild nonlinearity)
+            lm = landmarks[k % landmarks.shape[0]]
+
+            # Measurement
+            z = h_meas(x_true, lm)
+            v_meas = rng.multivariate_normal(np.zeros(2), R)
+            z = z + v_meas
+            z[1] = wrap_angle(z[1])
+
+            # Filter step
+            x_hat, P, nu, S = filter_step(x_hat, P, u, z, dt, Q, R, lm)
+
+            # Consistency stats
+            e = x_true - x_hat
+            e[2] = wrap_angle(e[2])
+
+            nees = float(e.T @ np.linalg.inv(P) @ e)
+            nis  = float(nu.T @ np.linalg.inv(S) @ nu)
+            nees_list.append(nees)
+            nis_list.append(nis)
+
+    nees_arr = np.array(nees_list)
+    nis_arr = np.array(nis_list)
+    return nees_arr.mean(), nis_arr.mean(), 3, 2, trials*steps
+
+
+def main():
+    # Two dt values: small dt often improves linearization; large dt worsens it
+    configs = [
+        ("dt=0.05 (mild nonlinearity)", 0.05),
+        ("dt=0.20 (stronger nonlinearity)", 0.20),
+    ]
+    steps = 200
+    trials = 40
+    alpha = 0.05
+
+    for label, dt in configs:
+        print("\n=== ", label, " ===")
+        ekf_anees, ekf_anis, n, m, N = run_mc(ekf_step, dt, steps, trials, seed=1)
+        ukf_anees, ukf_anis, _, _, _ = run_mc(ukf_step, dt, steps, trials, seed=1)
+
+        print(f"EKF  ANEES={ekf_anees:.3f}   ANIS={ekf_anis:.3f}")
+        print(f"UKF  ANEES={ukf_anees:.3f}   ANIS={ukf_anis:.3f}")
+
+        if chi2 is not None:
+            nees_lo, nees_hi = chi2_bounds_for_average(n, N, alpha)
+            nis_lo, nis_hi = chi2_bounds_for_average(m, N, alpha)
+            print(f"95% bounds for ANEES (dof={n}): [{nees_lo:.3f}, {nees_hi:.3f}]")
+            print(f"95% bounds for ANIS  (dof={m}): [{nis_lo:.3f}, {nis_hi:.3f}]")
+        else:
+            print("SciPy not available: chi-square bounds not computed.")
+
+        print("Interpretation: values systematically above bounds indicate overconfidence (inconsistency).")
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+      <h3>6.2 C++ (Eigen + EKF + ANEES/ANIS)</h3>
+      <p><strong>File: Chapter7_Lesson3.cpp</strong></p>
+      <pre><code class="language-cpp">// Chapter7_Lesson3.cpp
+// Consistency and Linearization Pitfalls — EKF + NEES/NIS on a 2D AMR localization example.
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter7_Lesson3.cpp -I /usr/include/eigen3 -o lesson7_3
+//
+// Optional bounds (requires Boost):
+//   (most Linux distros already provide boost headers)
+//
+// This program prints ANEES/ANIS and 95% bounds (if Boost is available).
+
+#include &lt;cmath&gt;
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;vector&gt;
+
+#include &lt;Eigen/Dense&gt;
+
+#ifdef __has_include
+#  if __has_include(&lt;boost/math/distributions/chi_squared.hpp&gt;)
+#    include &lt;boost/math/distributions/chi_squared.hpp&gt;
+#    define HAS_BOOST_CHI2 1
+#  endif
+#endif
+
+static double wrapAngle(double a) {
+    a = std::fmod(a + M_PI, 2.0 * M_PI);
+    if (a &lt; 0) a += 2.0 * M_PI;
+    return a - M_PI;
+}
+
+static Eigen::Vector3d fMotion(const Eigen::Vector3d&amp; x, const Eigen::Vector2d&amp; u, double dt) {
+    const double px = x(0), py = x(1), th = x(2);
+    const double v = u(0), om = u(1);
+    Eigen::Vector3d xn;
+    xn(0) = px + v * dt * std::cos(th);
+    xn(1) = py + v * dt * std::sin(th);
+    xn(2) = wrapAngle(th + om * dt);
+    return xn;
+}
+
+static Eigen::Matrix3d jacF(const Eigen::Vector3d&amp; x, const Eigen::Vector2d&amp; u, double dt) {
+    const double th = x(2);
+    const double v  = u(0);
+    Eigen::Matrix3d F = Eigen::Matrix3d::Identity();
+    F(0,2) = -v * dt * std::sin(th);
+    F(1,2) =  v * dt * std::cos(th);
+    return F;
+}
+
+static Eigen::Vector2d hMeas(const Eigen::Vector3d&amp; x, const Eigen::Vector2d&amp; lm) {
+    const double px = x(0), py = x(1), th = x(2);
+    const double dx = lm(0) - px;
+    const double dy = lm(1) - py;
+    const double r  = std::hypot(dx, dy);
+    const double b  = wrapAngle(std::atan2(dy, dx) - th);
+    return Eigen::Vector2d(r, b);
+}
+
+static Eigen::Matrix&lt;double,2,3&gt; jacH(const Eigen::Vector3d&amp; x, const Eigen::Vector2d&amp; lm) {
+    const double px = x(0), py = x(1);
+    const double dx = lm(0) - px;
+    const double dy = lm(1) - py;
+    const double r2 = dx*dx + dy*dy;
+    const double r  = std::sqrt(std::max(r2, 1e-12));
+
+    Eigen::Matrix&lt;double,2,3&gt; H;
+    H.setZero();
+    H(0,0) = -dx / r;
+    H(0,1) = -dy / r;
+    H(1,0) =  dy / r2;
+    H(1,1) = -dx / r2;
+    H(1,2) = -1.0;
+    return H;
+}
+
+struct Stats {
+    double ane_es = 0.0;
+    double an_is  = 0.0;
+    int    dof_x  = 3;
+    int    dof_z  = 2;
+    int    N      = 0;
+};
+
+static Stats runMC(double dt, int steps, int trials, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::normal_distribution&lt;double&gt; stdn(0.0, 1.0);
+
+    Eigen::Matrix3d Q = Eigen::Matrix3d::Zero();
+    Q(0,0) = 0.08*0.08;
+    Q(1,1) = 0.08*0.08;
+    Q(2,2) = std::pow(3.0*M_PI/180.0, 2);
+
+    Eigen::Matrix2d R = Eigen::Matrix2d::Zero();
+    R(0,0) = 0.15*0.15;
+    R(1,1) = std::pow(2.0*M_PI/180.0, 2);
+
+    auto sampleGaussian = [&amp;](const Eigen::MatrixXd&amp; Cov) {
+        Eigen::LLT&lt;Eigen::MatrixXd&gt; llt(Cov);
+        Eigen::MatrixXd L = llt.matrixL();
+        Eigen::VectorXd z(Cov.rows());
+        for (int i=0;i&lt;z.size();++i) z(i) = stdn(rng);
+        return L * z;
+    };
+
+    std::vector&lt;Eigen::Vector2d&gt; lms = {
+        Eigen::Vector2d(5.0, 0.0),
+        Eigen::Vector2d(0.0, 5.0),
+        Eigen::Vector2d(5.0, 5.0)
+    };
+
+    double nees_sum = 0.0;
+    double nis_sum  = 0.0;
+    int    count    = 0;
+
+    for (int tr=0; tr&lt;trials; ++tr) {
+        Eigen::Vector3d x_true(0.0, 0.0, 0.0);
+        Eigen::Vector3d x_hat (0.5, -0.4, 10.0*M_PI/180.0);
+        Eigen::Matrix3d P = Eigen::Matrix3d::Zero();
+        P(0,0) = 0.8*0.8;
+        P(1,1) = 0.8*0.8;
+        P(2,2) = std::pow(15.0*M_PI/180.0, 2);
+
+        for (int k=0; k&lt;steps; ++k) {
+            const double v  = 1.0 + 0.2*std::sin(0.05*k);
+            const double om = 0.35 + 0.25*std::sin(0.03*k);
+            Eigen::Vector2d u(v, om);
+
+            // True propagation with noise
+            Eigen::Vector3d w = sampleGaussian(Q);
+            x_true = fMotion(x_true, u, dt) + w;
+            x_true(2) = wrapAngle(x_true(2));
+
+            // Landmark selection
+            const Eigen::Vector2d&amp; lm = lms[k % (int)lms.size()];
+
+            // Measurement with noise
+            Eigen::Vector2d z = hMeas(x_true, lm) + sampleGaussian(R);
+            z(1) = wrapAngle(z(1));
+
+            // EKF predict
+            Eigen::Matrix3d F = jacF(x_hat, u, dt);
+            Eigen::Vector3d x_pred = fMotion(x_hat, u, dt);
+            Eigen::Matrix3d P_pred = F * P * F.transpose() + Q;
+
+            // EKF update
+            Eigen::Matrix&lt;double,2,3&gt; H = jacH(x_pred, lm);
+            Eigen::Vector2d z_pred = hMeas(x_pred, lm);
+            Eigen::Vector2d nu = z - z_pred;
+            nu(1) = wrapAngle(nu(1));
+
+            Eigen::Matrix2d S = H * P_pred * H.transpose() + R;
+            Eigen::Matrix&lt;double,3,2&gt; K = P_pred * H.transpose() * S.inverse();
+
+            x_hat = x_pred + K * nu;
+            x_hat(2) = wrapAngle(x_hat(2));
+
+            Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
+            // Joseph form
+            P = (I - K*H) * P_pred * (I - K*H).transpose() + K*R*K.transpose();
+
+            // Stats
+            Eigen::Vector3d e = x_true - x_hat;
+            e(2) = wrapAngle(e(2));
+
+            const double nees = (e.transpose() * P.inverse() * e)(0);
+            const double nis  = (nu.transpose() * S.inverse() * nu)(0);
+
+            nees_sum += nees;
+            nis_sum  += nis;
+            count++;
+        }
+    }
+
+    Stats st;
+    st.ane_es = nees_sum / (double)count;
+    st.an_is  = nis_sum  / (double)count;
+    st.N      = count;
+    return st;
+}
+
+#ifdef HAS_BOOST_CHI2
+static std::pair&lt;double,double&gt; chi2BoundsAverage(int dof, int N, double alpha=0.05) {
+    using boost::math::chi_squared_distribution;
+    chi_squared_distribution&lt;double&gt; dist((double)(N*dof));
+    const double lo = boost::math::quantile(dist, alpha/2.0) / (double)N;
+    const double hi = boost::math::quantile(dist, 1.0 - alpha/2.0) / (double)N;
+    return {lo, hi};
+}
+#endif
+
+int main() {
+    const int steps  = 200;
+    const int trials = 40;
+
+    for (auto dt : {0.05, 0.20}) {
+        std::cout &lt;&lt; "\n=== dt=" &lt;&lt; dt &lt;&lt; " ===\n";
+        Stats st = runMC(dt, steps, trials, 1);
+
+        std::cout &lt;&lt; "EKF ANEES=" &lt;&lt; st.ane_es &lt;&lt; "  (expected ~ " &lt;&lt; st.dof_x &lt;&lt; ")\n";
+        std::cout &lt;&lt; "EKF ANIS =" &lt;&lt; st.an_is  &lt;&lt; "  (expected ~ " &lt;&lt; st.dof_z &lt;&lt; ")\n";
+
+#ifdef HAS_BOOST_CHI2
+        auto neesB = chi2BoundsAverage(st.dof_x, st.N, 0.05);
+        auto nisB  = chi2BoundsAverage(st.dof_z, st.N, 0.05);
+        std::cout &lt;&lt; "95% bounds for ANEES: [" &lt;&lt; neesB.first &lt;&lt; ", " &lt;&lt; neesB.second &lt;&lt; "]\n";
+        std::cout &lt;&lt; "95% bounds for ANIS : [" &lt;&lt; nisB.first  &lt;&lt; ", " &lt;&lt; nisB.second  &lt;&lt; "]\n";
+#else
+        std::cout &lt;&lt; "(Boost chi-square not detected; bounds not printed.)\n";
+#endif
+        std::cout &lt;&lt; "Interpretation: ANEES or ANIS systematically above bounds indicates overconfidence.\n";
+    }
+    return 0;
+}
+</code></pre>
+
+      <h3>6.3 Java (EJML + Commons-Math chi-square bounds)</h3>
+      <p><strong>File: Chapter7_Lesson3.java</strong></p>
+      <pre><code class="language-java">// Chapter7_Lesson3.java
+// Consistency and Linearization Pitfalls — EKF + NEES/NIS (Java version).
+//
+// Dependencies (Maven examples):
+//   &lt;dependency&gt;
+//     &lt;groupId&gt;org.ejml&lt;/groupId&gt;
+//     &lt;artifactId&gt;ejml-simple&lt;/artifactId&gt;
+//     &lt;version&gt;0.43.1&lt;/version&gt;
+//   &lt;/dependency&gt;
+//   &lt;dependency&gt;
+//     &lt;groupId&gt;org.apache.commons&lt;/groupId&gt;
+//     &lt;artifactId&gt;commons-math3&lt;/artifactId&gt;
+//     &lt;version&gt;3.6.1&lt;/version&gt;
+//   &lt;/dependency&gt;
+//
+// Run idea:
+//   javac -cp "ejml-simple.jar:commons-math3.jar:." Chapter7_Lesson3.java
+//   java  -cp "ejml-simple.jar:commons-math3.jar:." Chapter7_Lesson3
+
+import java.util.Random;
+import org.ejml.simple.SimpleMatrix;
+import org.apache.commons.math3.distribution.ChiSquaredDistribution;
+
+public class Chapter7_Lesson3 {
+
+    static double wrapAngle(double a) {
+        a = (a + Math.PI) % (2.0 * Math.PI);
+        if (a &lt; 0) a += 2.0 * Math.PI;
+        return a - Math.PI;
+    }
+
+    static double[] fMotion(double[] x, double[] u, double dt) {
+        double px = x[0], py = x[1], th = x[2];
+        double v = u[0], om = u[1];
+        return new double[] {
+            px + v * dt * Math.cos(th),
+            py + v * dt * Math.sin(th),
+            wrapAngle(th + om * dt)
+        };
+    }
+
+    static SimpleMatrix jacF(double[] x, double[] u, double dt) {
+        double th = x[2];
+        double v  = u[0];
+        SimpleMatrix F = SimpleMatrix.identity(3);
+        F.set(0, 2, -v * dt * Math.sin(th));
+        F.set(1, 2,  v * dt * Math.cos(th));
+        return F;
+    }
+
+    static double[] hMeas(double[] x, double[] lm) {
+        double px = x[0], py = x[1], th = x[2];
+        double dx = lm[0] - px;
+        double dy = lm[1] - py;
+        double r  = Math.hypot(dx, dy);
+        double b  = wrapAngle(Math.atan2(dy, dx) - th);
+        return new double[] {r, b};
+    }
+
+    static SimpleMatrix jacH(double[] x, double[] lm) {
+        double px = x[0], py = x[1];
+        double dx = lm[0] - px;
+        double dy = lm[1] - py;
+        double r2 = dx*dx + dy*dy;
+        double r  = Math.sqrt(Math.max(r2, 1e-12));
+
+        SimpleMatrix H = new SimpleMatrix(2,3);
+        H.set(0,0, -dx / r);
+        H.set(0,1, -dy / r);
+        H.set(1,0,  dy / r2);
+        H.set(1,1, -dx / r2);
+        H.set(1,2, -1.0);
+        return H;
+    }
+
+    static double[] sampleGaussian(SimpleMatrix Cov, Random rng) {
+        // Cholesky (SimpleMatrix has chol()).
+        SimpleMatrix L = Cov.chol().getT(); // lower-triangular
+        double[] z = new double[Cov.numRows()];
+        for (int i=0; i&lt;z.length; i++) z[i] = rng.nextGaussian();
+        SimpleMatrix zs = new SimpleMatrix(z.length, 1, true, z);
+        SimpleMatrix s = L.mult(zs);
+        double[] out = new double[z.length];
+        for (int i=0;i&lt;z.length;i++) out[i] = s.get(i,0);
+        return out;
+    }
+
+    static class Stats {
+        double anees;
+        double anis;
+        int N;
+    }
+
+    static Stats runMC(double dt, int steps, int trials, long seed) {
+        Random rng = new Random(seed);
+
+        SimpleMatrix Q = new SimpleMatrix(3,3);
+        Q.set(0,0, 0.08*0.08);
+        Q.set(1,1, 0.08*0.08);
+        Q.set(2,2, Math.pow(3.0*Math.PI/180.0, 2));
+
+        SimpleMatrix R = new SimpleMatrix(2,2);
+        R.set(0,0, 0.15*0.15);
+        R.set(1,1, Math.pow(2.0*Math.PI/180.0, 2));
+
+        double[][] landmarks = new double[][] {
+            {5.0, 0.0},
+            {0.0, 5.0},
+            {5.0, 5.0}
+        };
+
+        double neesSum = 0.0;
+        double nisSum  = 0.0;
+        int count = 0;
+
+        for (int tr=0; tr&lt;trials; tr++) {
+            double[] xTrue = new double[] {0.0, 0.0, 0.0};
+
+            double[] xHat  = new double[] {0.5, -0.4, 10.0*Math.PI/180.0};
+            SimpleMatrix P = new SimpleMatrix(3,3);
+            P.set(0,0, 0.8*0.8);
+            P.set(1,1, 0.8*0.8);
+            P.set(2,2, Math.pow(15.0*Math.PI/180.0, 2));
+
+            for (int k=0; k&lt;steps; k++) {
+                double v  = 1.0 + 0.2*Math.sin(0.05*k);
+                double om = 0.35 + 0.25*Math.sin(0.03*k);
+                double[] u = new double[] {v, om};
+
+                // true propagation
+                double[] w = sampleGaussian(Q, rng);
+                double[] xNext = fMotion(xTrue, u, dt);
+                xTrue = new double[] {xNext[0] + w[0], xNext[1] + w[1], wrapAngle(xNext[2] + w[2])};
+
+                double[] lm = landmarks[k % landmarks.length];
+
+                // measurement
+                double[] z = hMeas(xTrue, lm);
+                double[] vMeas = sampleGaussian(R, rng);
+                z = new double[] {z[0] + vMeas[0], wrapAngle(z[1] + vMeas[1])};
+
+                // EKF predict
+                SimpleMatrix F = jacF(xHat, u, dt);
+                double[] xPredArr = fMotion(xHat, u, dt);
+                SimpleMatrix xPred = new SimpleMatrix(3,1,true, xPredArr);
+                SimpleMatrix PPred = F.mult(P).mult(F.transpose()).plus(Q);
+
+                // EKF update
+                SimpleMatrix H = jacH(xPredArr, lm);
+                double[] zPredArr = hMeas(xPredArr, lm);
+                SimpleMatrix zPred = new SimpleMatrix(2,1,true, zPredArr);
+
+                SimpleMatrix zMat = new SimpleMatrix(2,1,true, z);
+                SimpleMatrix nu = zMat.minus(zPred);
+                nu.set(1,0, wrapAngle(nu.get(1,0)));
+
+                SimpleMatrix S = H.mult(PPred).mult(H.transpose()).plus(R);
+                SimpleMatrix K = PPred.mult(H.transpose()).mult(S.invert());
+
+                SimpleMatrix xUpd = xPred.plus(K.mult(nu));
+                xUpd.set(2,0, wrapAngle(xUpd.get(2,0)));
+
+                SimpleMatrix I = SimpleMatrix.identity(3);
+                P = (I.minus(K.mult(H))).mult(PPred).mult((I.minus(K.mult(H))).transpose()).plus(K.mult(R).mult(K.transpose()));
+
+                // store
+                xHat = new double[] {xUpd.get(0,0), xUpd.get(1,0), xUpd.get(2,0)};
+
+                // NEES/NIS
+                double[] e = new double[] {xTrue[0]-xHat[0], xTrue[1]-xHat[1], wrapAngle(xTrue[2]-xHat[2])};
+                SimpleMatrix eMat = new SimpleMatrix(3,1,true,e);
+
+                double nees = eMat.transpose().mult(P.invert()).mult(eMat).get(0,0);
+                double nis  = nu.transpose().mult(S.invert()).mult(nu).get(0,0);
+
+                neesSum += nees;
+                nisSum  += nis;
+                count++;
+            }
+        }
+
+        Stats st = new Stats();
+        st.anees = neesSum / count;
+        st.anis  = nisSum  / count;
+        st.N = count;
+        return st;
+    }
+
+    static double[] chi2BoundsAverage(int dof, int N, double alpha) {
+        ChiSquaredDistribution dist = new ChiSquaredDistribution(N * dof);
+        double lo = dist.inverseCumulativeProbability(alpha/2.0) / N;
+        double hi = dist.inverseCumulativeProbability(1.0 - alpha/2.0) / N;
+        return new double[] {lo, hi};
+    }
+
+    public static void main(String[] args) {
+        int steps = 200;
+        int trials = 30;
+        double alpha = 0.05;
+
+        double[] dts = new double[] {0.05, 0.20};
+        for (double dt : dts) {
+            System.out.println("\n=== dt=" + dt + " ===");
+            Stats st = runMC(dt, steps, trials, 1);
+
+            System.out.printf("EKF ANEES=%.3f (expected ~ 3)%n", st.anees);
+            System.out.printf("EKF ANIS =%.3f (expected ~ 2)%n", st.anis);
+
+            double[] bNees = chi2BoundsAverage(3, st.N, alpha);
+            double[] bNis  = chi2BoundsAverage(2, st.N, alpha);
+            System.out.printf("95%% bounds for ANEES: [%.3f, %.3f]%n", bNees[0], bNees[1]);
+            System.out.printf("95%% bounds for ANIS : [%.3f, %.3f]%n", bNis[0], bNis[1]);
+
+            System.out.println("Interpretation: statistics above the upper bound indicate overconfidence (inconsistency).");
+        }
+    }
+}
+</code></pre>
+
+      <h3>6.4 MATLAB/Simulink (script + MATLAB Function friendly EKF step)</h3>
+      <p><strong>File: Chapter7_Lesson3.m</strong></p>
+      <pre><code class="language-matlab">% Chapter7_Lesson3.m
+% Consistency and Linearization Pitfalls — EKF + NEES/NIS (MATLAB/Simulink-friendly).
+%
+% This script:
+%   1) Simulates a planar robot x=[px; py; theta] with unicycle kinematics.
+%   2) Uses range-bearing measurements to known landmarks.
+%   3) Runs EKF and reports ANEES and ANIS with chi-square 95% bounds.
+%
+% Simulink note:
+%   - The functions f_motion(), h_meas(), jacF(), jacH(), and ekf_step()
+%     can be pasted into MATLAB Function blocks (one for predict, one for update),
+%     and driven by Simulink signals (u, z, dt).
+%
+% Required toolboxes: none (Statistics Toolbox optional for chi2inv).
+clear; clc;
+
+rng(1);
+
+% --- configuration ---
+steps  = 200;
+trials = 40;
+alpha  = 0.05;
+
+landmarks = [5 0; 0 5; 5 5];
+
+Q = diag([0.08^2, 0.08^2, (3*pi/180)^2]);
+R = diag([0.15^2, (2*pi/180)^2]);
+
+dts = [0.05, 0.20];
+
+for dt = dts
+    nees_sum = 0; nis_sum = 0; count = 0;
+
+    for tr = 1:trials
+        x_true = [0; 0; 0];
+
+        x_hat  = [0.5; -0.4; 10*pi/180];
+        P      = diag([0.8^2, 0.8^2, (15*pi/180)^2]);
+
+        for k = 1:steps
+            v  = 1.0 + 0.2*sin(0.05*(k-1));
+            om = 0.35 + 0.25*sin(0.03*(k-1));
+            u  = [v; om];
+
+            % true propagation with noise
+            w = chol(Q,'lower') * randn(3,1);
+            x_true = f_motion(x_true, u, dt) + w;
+            x_true(3) = wrap_angle(x_true(3));
+
+            lm = landmarks(mod(k-1,size(landmarks,1))+1, :)';
+
+            % measurement
+            z = h_meas(x_true, lm) + chol(R,'lower') * randn(2,1);
+            z(2) = wrap_angle(z(2));
+
+            % EKF step
+            [x_hat, P, nu, S] = ekf_step(x_hat, P, u, z, dt, Q, R, lm);
+
+            % NEES/NIS
+            e = x_true - x_hat;
+            e(3) = wrap_angle(e(3));
+
+            nees = e'*(P\e);
+            nis  = nu'*(S\nu);
+
+            nees_sum = nees_sum + nees;
+            nis_sum  = nis_sum  + nis;
+            count = count + 1;
+        end
+    end
+
+    ANEES = nees_sum / count;
+    ANIS  = nis_sum  / count;
+
+    fprintf('\n=== dt=%.3f ===\n', dt);
+    fprintf('EKF ANEES=%.3f (expected ~ 3)\n', ANEES);
+    fprintf('EKF ANIS =%.3f (expected ~ 2)\n', ANIS);
+
+    if exist('chi2inv','file') == 2
+        lo_nees = chi2inv(alpha/2, count*3)/count;
+        hi_nees = chi2inv(1-alpha/2, count*3)/count;
+        lo_nis  = chi2inv(alpha/2, count*2)/count;
+        hi_nis  = chi2inv(1-alpha/2, count*2)/count;
+
+        fprintf('95%% bounds for ANEES: [%.3f, %.3f]\n', lo_nees, hi_nees);
+        fprintf('95%% bounds for ANIS : [%.3f, %.3f]\n', lo_nis, hi_nis);
+    else
+        fprintf('chi2inv not available; install Statistics and Machine Learning Toolbox for bounds.\n');
+    end
+
+    fprintf('Interpretation: values above upper bounds indicate overconfidence (inconsistency).\n');
+end
+
+% ---------------- local functions ----------------
+
+function a = wrap_angle(a)
+    a = mod(a + pi, 2*pi);
+    if a &lt; 0, a = a + 2*pi; end
+    a = a - pi;
+end
+
+function xn = f_motion(x, u, dt)
+    px = x(1); py = x(2); th = x(3);
+    v = u(1); om = u(2);
+    xn = [px + v*dt*cos(th);
+          py + v*dt*sin(th);
+          wrap_angle(th + om*dt)];
+end
+
+function F = jacF(x, u, dt)
+    th = x(3); v = u(1);
+    F = eye(3);
+    F(1,3) = -v*dt*sin(th);
+    F(2,3) =  v*dt*cos(th);
+end
+
+function z = h_meas(x, lm)
+    px = x(1); py = x(2); th = x(3);
+    dx = lm(1) - px;
+    dy = lm(2) - py;
+    r  = hypot(dx, dy);
+    b  = wrap_angle(atan2(dy, dx) - th);
+    z = [r; b];
+end
+
+function H = jacH(x, lm)
+    px = x(1); py = x(2);
+    dx = lm(1) - px;
+    dy = lm(2) - py;
+    r2 = dx^2 + dy^2;
+    r  = sqrt(max(r2, 1e-12));
+    H = zeros(2,3);
+    H(1,1) = -dx/r;
+    H(1,2) = -dy/r;
+    H(2,1) =  dy/r2;
+    H(2,2) = -dx/r2;
+    H(2,3) = -1;
+end
+
+function [x_upd, P_upd, nu, S] = ekf_step(x, P, u, z, dt, Q, R, lm)
+    % Predict
+    F = jacF(x, u, dt);
+    x_pred = f_motion(x, u, dt);
+    P_pred = F*P*F' + Q;
+
+    % Update
+    H = jacH(x_pred, lm);
+    z_pred = h_meas(x_pred, lm);
+    nu = z - z_pred;
+    nu(2) = wrap_angle(nu(2));
+
+    S = H*P_pred*H' + R;
+    K = P_pred*H'/S;
+
+    x_upd = x_pred + K*nu;
+    x_upd(3) = wrap_angle(x_upd(3));
+
+    I = eye(3);
+    P_upd = (I - K*H)*P_pred*(I - K*H)' + K*R*K'; % Joseph form
+end
+</code></pre>
+
+      <h3>6.5 Wolfram Mathematica (Notebook source)</h3>
+      <p><strong>File: Chapter7_Lesson3.nb</strong></p>
+      <pre><code class="language-mathematica">(* Chapter7_Lesson3.nb *)
+(* Consistency and Linearization Pitfalls — EKF + NEES/NIS (Wolfram Language / Notebook).
+   This notebook-style source is a plain-text Notebook expression so it can be version-controlled. *)
+
+Notebook[{
+  Cell["Chapter 7 — Lesson 3: Consistency and Linearization Pitfalls", "Title"],
+  Cell["EKF localization in 2D with range-bearing measurements; compute ANEES/ANIS.", "Text"],
+
+  Cell[BoxData@ToBoxes[
+    Module[{wrap, fMotion, jacF, hMeas, jacH, ekfStep, Q, R, landmarks,
+            steps = 120, trials = 25, dt = 0.2, seed = 1, rng,
+            neesSum = 0., nisSum = 0., count = 0},
+
+      wrap[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+      fMotion[x_, u_, dt_] := Module[{px = x[[1]], py = x[[2]], th = x[[3]], v = u[[1]], om = u[[2]]},
+        {px + v dt Cos[th], py + v dt Sin[th], wrap[th + om dt]}
+      ];
+
+      jacF[x_, u_, dt_] := Module[{th = x[[3]], v = u[[1]]},
+        { {1, 0, -v dt Sin[th]},
+         {0, 1,  v dt Cos[th]},
+         {0, 0, 1} }
+      ];
+
+      hMeas[x_, lm_] := Module[{px = x[[1]], py = x[[2]], th = x[[3]], dx, dy, r, b},
+        dx = lm[[1]] - px; dy = lm[[2]] - py;
+        r = Sqrt[dx^2 + dy^2];
+        b = wrap[ArcTan[dx, dy] - th]; (* ArcTan[x,y] gives atan2(y,x) *)
+        {r, b}
+      ];
+
+      jacH[x_, lm_] := Module[{px = x[[1]], py = x[[2]], dx, dy, r2, r},
+        dx = lm[[1]] - px; dy = lm[[2]] - py;
+        r2 = dx^2 + dy^2; r = Sqrt[Max[r2, 10^-12]];
+        {
+          {-dx/r, -dy/r, 0},
+          { dy/r2, -dx/r2, -1}
+        }
+      ];
+
+      ekfStep[x_, P_, u_, z_, dt_, Q_, R_, lm_] := Module[
+        {F, xPred, PPred, H, zPred, nu, S, K, xUpd, PUpd, I = IdentityMatrix[3]},
+        F = jacF[x, u, dt];
+        xPred = fMotion[x, u, dt];
+        PPred = F.P.Transpose[F] + Q;
+
+        H = jacH[xPred, lm];
+        zPred = hMeas[xPred, lm];
+        nu = z - zPred; nu[[2]] = wrap[nu[[2]]];
+
+        S = H.PPred.Transpose[H] + R;
+        K = PPred.Transpose[H].Inverse[S];
+
+        xUpd = xPred + K.nu; xUpd[[3]] = wrap[xUpd[[3]]];
+        PUpd = (I - K.H).PPred.Transpose[I - K.H] + K.R.Transpose[K];
+
+        {xUpd, PUpd, nu, S}
+      ];
+
+      Q = DiagonalMatrix[{0.08^2, 0.08^2, (3 Degree)^2}];
+      R = DiagonalMatrix[{0.15^2, (2 Degree)^2}];
+      landmarks = { {5., 0.}, {0., 5.}, {5., 5.} };
+
+      rng = SeedRandom[seed];
+
+      Do[
+        Module[{xTrue = {0., 0., 0.},
+                xHat  = {0.5, -0.4, 10 Degree},
+                P = DiagonalMatrix[{0.8^2, 0.8^2, (15 Degree)^2}],
+                lm, v, om, u, w, z, vMeas, stepOut, e, nees, nis},
+
+          Do[
+            v  = 1.0 + 0.2 Sin[0.05 (k - 1)];
+            om = 0.35 + 0.25 Sin[0.03 (k - 1)];
+            u = {v, om};
+
+            w = RandomVariate[MultinormalDistribution[{0, 0, 0}, Q]];
+            xTrue = fMotion[xTrue, u, dt] + w; xTrue[[3]] = wrap[xTrue[[3]]];
+
+            lm = landmarks[[Mod[k - 1, Length[landmarks]] + 1]];
+
+            vMeas = RandomVariate[MultinormalDistribution[{0, 0}, R]];
+            z = hMeas[xTrue, lm] + vMeas; z[[2]] = wrap[z[[2]]];
+
+            stepOut = ekfStep[xHat, P, u, z, dt, Q, R, lm];
+            xHat = stepOut[[1]]; P = stepOut[[2]];
+
+            e = xTrue - xHat; e[[3]] = wrap[e[[3]]];
+            nees = e . LinearSolve[P, e];
+            nis  = stepOut[[3]] . LinearSolve[stepOut[[4]], stepOut[[3]]];
+
+            neesSum += nees; nisSum += nis; count += 1;
+          , {k, 1, steps}]
+        ]
+      , {tr, 1, trials}];
+
+      &lt;|"ANEES" -&gt; N[neesSum/count], "ANIS" -&gt; N[nisSum/count], "ExpectedNEES" -&gt; 3, "ExpectedNIS" -&gt; 2|&gt;
+    ]
+  ], "Input"],
+
+  Cell["Interpretation: ANEES significantly above 3 indicates overconfidence (inconsistency).", "Text"]
+},
+WindowSize -&gt; {900, 700},
+StyleDefinitions -&gt; "Default.nb"
+]
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong
+          >Problem 1 (Remainder term and covariance underestimation).</strong
+        ><br />
+        Consider a scalar nonlinear map <strong>\( y = g(x) \)</strong> with
+        <strong>\( x \sim \mathcal{N}(\mu,\sigma^2) \)</strong>. The EKF-style
+        approximation linearizes at <strong>\( \mu \)</strong>:
+        <strong>\( g(x) \approx g(\mu) + g'(\mu)(x-\mu) \)</strong>. Show that
+        the true output variance satisfies:
+        <strong>\( \mathrm{Var}(y) = g'(\mu)^2\sigma^2 + \Delta \)</strong>,
+        where <strong>\( \Delta \)</strong> depends on higher derivatives, and
+        argue why ignoring <strong>\( \Delta \)</strong>
+        tends to underestimate uncertainty when curvature is significant.
+      </p>
+
+      <p>
+        <strong>Solution.</strong> By Taylor expansion with remainder:
+        <strong
+          >\( g(x) = g(\mu) + g'(\mu)(x-\mu) + \frac{1}{2}g''(\xi)(x-\mu)^2
+          \)</strong
+        >
+        for some <strong>\( \xi \)</strong> between <strong>\( x \)</strong> and
+        <strong>\( \mu \)</strong>. Define
+        <strong>\( r(x) = \frac{1}{2}g''(\xi)(x-\mu)^2 \)</strong>. Then:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathrm{Var}(y) = \mathrm{Var}\!\big(g'(\mu)(x-\mu) + r(x)\big) =
+        g'(\mu)^2\sigma^2 + \mathrm{Var}(r(x)) +
+        2\,\mathrm{Cov}(g'(\mu)(x-\mu),r(x)). \]
+      </h4>
+      <p>
+        The EKF keeps only the first term
+        <strong>\( g'(\mu)^2\sigma^2 \)</strong>. When
+        <strong>\( g'' \)</strong> is large over the uncertainty region (high
+        curvature), the neglected terms are not small and the EKF variance is
+        typically optimistic.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 2 (NEES chi-square proof).</strong><br />
+        Prove that if
+        <strong
+          >\( \tilde{\mathbf{x} } \sim \mathcal{N}(\mathbf{0},\mathbf{P})
+          \)</strong
+        >
+        with <strong>\( \mathbf{P} \succ \mathbf{0} \)</strong>, then
+        <strong
+          >\( \tilde{\mathbf{x} }^\top \mathbf{P}^{-1}\tilde{\mathbf{x} } \sim
+          \chi^2_n \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Solution.</strong> Use whitening: choose
+        <strong>\( \mathbf{P} = \mathbf{L}\mathbf{L}^\top \)</strong>, define
+        <strong>\( \mathbf{y} = \mathbf{L}^{-1}\tilde{\mathbf{x} } \)</strong>.
+        Then
+        <strong
+          >\( \mathbf{y} \sim \mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong
+        >
+        and:
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{x} }^\top \mathbf{P}^{-1}\tilde{\mathbf{x} } =
+        \tilde{\mathbf{x} }^\top
+        \mathbf{L}^{-\top}\mathbf{L}^{-1}\tilde{\mathbf{x} } =
+        \|\mathbf{L}^{-1}\tilde{\mathbf{x} }\|^2 = \sum_{i=1}^{n} y_i^2 \sim
+        \chi^2_n. \]
+      </h4>
+      <p><strong>□</strong></p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 3 (Order dependence of EKF sequential updates).</strong
+        ><br />
+        Consider a scalar state <strong>\( x \)</strong> with two scalar
+        measurements <strong>\( z^{(1)} = h_1(x) + v_1 \)</strong> and
+        <strong>\( z^{(2)} = h_2(x) + v_2 \)</strong>. Explain why sequential
+        EKF updates (relinearizing after the first update) can yield a different
+        result than swapping the order, when <strong>\( h_1, h_2 \)</strong> are
+        nonlinear.
+      </p>
+
+      <p>
+        <strong>Solution.</strong> In the EKF, the measurement Jacobian is
+        evaluated at the current linearization point. If we apply measurement 1
+        first, we linearize at <strong>\( \hat{x}^{(0)} \)</strong>, obtain an
+        updated estimate <strong>\( \hat{x}^{(1)} \)</strong>, and then
+        linearize measurement 2 at <strong>\( \hat{x}^{(1)} \)</strong>.
+        Swapping the order changes the intermediate estimate, hence changes the
+        Jacobians and gains. Since the EKF update is only first-order correct,
+        these differences do not cancel, so the final result can differ.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 4 (Bearing innovation wrapping).</strong><br />
+        Let a bearing measurement be
+        <strong>\( z_\beta = \beta(x) + v \)</strong>, with predicted bearing
+        <strong>\( \hat{\beta} \)</strong>. Show that the innovation must be
+        computed with wrapping:
+        <strong>\( \nu_\beta = \mathrm{wrap}(z_\beta - \hat{\beta}) \)</strong>.
+        Give a numerical example where failing to wrap produces an incorrect
+        update direction.
+      </p>
+
+      <p>
+        <strong>Solution.</strong> Bearings are angles on a circle;
+        <strong>\( \beta \)</strong> and
+        <strong>\( \beta + 2\pi \)</strong> represent the same direction.
+        Example: <strong>\( z_\beta = -179^\circ \)</strong> and
+        <strong>\( \hat{\beta} = +179^\circ \)</strong>. The naïve difference is
+        <strong>\( -358^\circ \)</strong>, but the correct wrapped innovation is
+        <strong>\( +2^\circ \)</strong>. Without wrapping, the EKF will apply a
+        massive correction in the wrong direction, often destroying consistency.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 5 (End-to-end consistency-check procedure).</strong
+        ><br />
+        Propose a practical workflow for checking whether an EKF localization
+        configuration is consistent using ANEES and ANIS, including decision
+        thresholds based on chi-square bounds.
+      </p>
+
+      <p><strong>Solution.</strong> A standard workflow is:</p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Collect data: Monte Carlo truth OR logged ground-truth + filter outputs"] --> E1["Compute state errors \ne_k = x_k - xhat_k (wrap angles)"]
+  S --> E2["Compute innovations nu_k \nand S_k from filter"]
+  E1 --> N1["Compute NEES_k = \ne_k^T P_k^{-1} e_k"]
+  E2 --> N2["Compute NIS_k = \nnu_k^T S_k^{-1} nu_k"]
+  N1 --> A1["Average across samples: \nANEES"]
+  N2 --> A2["Average across samples: \nANIS"]
+  A1 --> C1["Chi-square bounds \nfor dof=n (two-sided)"]
+  A2 --> C2["Chi-square bounds \nfor dof=m (two-sided)"]
+  C1 --> D["Decision: if ANEES above upper bound \n=> overconfident"]
+  C2 --> D
+        </pre>
+      </div>
+
+      <p>
+        Concretely, with <strong>\( N \)</strong> samples, state dimension
+        <strong>\( n \)</strong>, and significance
+        <strong>\( \alpha \)</strong>, accept if:
+        <strong
+          >\( \frac{1}{N}\chi^2_{Nn,\alpha/2} \le \text{ANEES} \le
+          \frac{1}{N}\chi^2_{Nn,1-\alpha/2} \)</strong
+        >, and similarly for ANIS with <strong>\( m \)</strong>. Persistent
+        violations suggest inconsistency or noise mismatch.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formalized EKF inconsistency as a consequence of neglected
+        higher-order terms in nonlinear propagation and measurement updates. We
+        proved that NEES/NIS follow chi-square laws under Gaussian consistency,
+        enabling objective statistical checks. For AMR localization, the most
+        common practical pitfalls are large heading uncertainty under turning
+        motion, bearing wrapping errors, relinearization order dependence, and
+        weak observability geometries. The provided multi-language
+        implementations demonstrate how to measure inconsistency and compare EKF
+        vs UKF behavior using ANEES/ANIS bounds.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Julier, S.J., Uhlmann, J.K., &amp; Durrant-Whyte, H.F. (2000). A new
+        method for the nonlinear transformation of means and covariances in
+        filters and estimators.
+        <em>IEEE Transactions on Automatic Control</em>, 45(3), 477–482.
+      </li>
+      <li>
+        Huang, G.P., Mourikis, A.I., &amp; Roumeliotis, S.I. (2010).
+        Observability-based rules for designing consistent EKF SLAM estimators.
+        <em>International Journal of Robotics Research</em>, 29(5), 502–528.
+      </li>
+      <li>
+        Huang, G.P., Mourikis, A.I., &amp; Roumeliotis, S.I. (2010).
+        Observability-based consistent EKF estimators for multi-robot
+        cooperative localization.
+        <em>Autonomous Robots</em>, 30, 99–122.
+      </li>
+      <li>
+        Maybeck, P.S. (1979). Stochastic Models, Estimation, and Control, Vol.
+        1.
+        <em>Academic Press</em>.
+      </li>
+      <li>
+        Bishop, G., &amp; Welch, G. (2001). An Introduction to the Kalman
+        Filter.
+        <em>UNC-Chapel Hill Technical Report</em>.
+      </li>
+      <li>
+        Chen, Z., et al. (2023). Kalman Filter Auto-tuning through enforcing
+        chi-squared normalized error distributions with Bayesian optimization.
+        <em>arXiv preprint</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter7/Lesson2.html">
+          Lesson 2: UKF Localization and When It Helps
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter7/Lesson4.html">
+          Lesson 4: Tuning Process/Measurement Noise for AMR
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="active-lesson" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

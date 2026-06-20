@@ -1,0 +1,2196 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus) - Lesson 5: Lab: Run a VIO/Visual SLAM Stack | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</h1>
+    <h3><strong>Lesson 5: Lab: Run a VIO/Visual SLAM Stack</strong></h3>
+    <p>
+      This lab operationalizes the pipelines from Lessons 1–4 by taking a real VIO / Visual SLAM stack from dataset ingestion
+      through calibration, execution, and quantitative evaluation. Beyond “how to run it,” we emphasize principled debugging:
+      residual anatomy, observability (scale/yaw/gravity), synchronization, and the math behind trajectory alignment and ATE/RPE metrics.
+      Students finish with reproducible configuration discipline and language-agnostic evaluation tooling.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Success Criteria -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Success Criteria</h2>
+    <div class="down-content">
+      <p>
+        In this lab you will run either:
+        <strong>\( (i) \)</strong> a <em>visual SLAM</em> stack (mono/stereo/RGB-D), or
+        <strong>\( (ii) \)</strong> a <em>visual–inertial odometry/SLAM</em> stack (VIO/VINS),
+        on a standard dataset (e.g., EuRoC MAV / TUM-VI style logs), and evaluate the output trajectory.
+      </p>
+
+      <p>
+        Your deliverables:
+      </p>
+      <ul>
+        <li>
+          <strong>Reproducible run configuration:</strong> dataset path, sensor rates, camera intrinsics/extrinsics, IMU noise, and timing assumptions.
+        </li>
+        <li>
+          <strong>Trajectory outputs:</strong> estimated pose stream in a common format (e.g., TUM: <strong>\( t, \mathbf{p}, \mathbf{q} \)</strong>).
+        </li>
+        <li>
+          <strong>Quantitative metrics:</strong> ATE RMSE and RPE (translation + rotation), with interpretation of failure modes.
+        </li>
+      </ul>
+
+      <p>
+        A run is considered “successful” if:
+        <strong>\( (1) \)</strong> tracking does not diverge (no catastrophic drift),
+        <strong>\( (2) \)</strong> loop closures (if enabled) reduce global drift,
+        and <strong>\( (3) \)</strong> the final ATE RMSE is consistent with dataset difficulty and sensor modality.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Protocol Workflow (Dataset -> Calib -> Run -> Evaluate) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Protocol Workflow</h2>
+    <div class="down-content">
+      <p>
+        The key to “lab-grade” SLAM/VIO is not running commands; it is controlling assumptions:
+        camera model, frame conventions, sensor time bases, IMU noise, and gravity direction. A single mismatch here typically
+        dominates error more than algorithm choice.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Select dataset + sequence"] --> B["Verify sensor streams: cam fps, imu rate, timestamps"]
+  B --> C["Calibrate camera intrinsics + distortion model"]
+  C --> D["Set cam-imu extrinsics (T_ci) + gravity axis convention"]
+  D --> E["Set IMU noise + bias random walk (from spec or Allan)"]
+  E --> F["Run stack (visual SLAM or VIO) with fixed config"]
+  F --> G["Export trajectory to common format (TUM)"]
+  G --> H["Evaluate ATE/RPE + inspect residuals + failure patterns"]
+  H --> I["Tune: time offset, feature threshold, IMU noise, outlier gating"]
+  I --> F
+        </pre>
+      </div>
+
+      <p>
+        <strong>Minimum lab artifacts to record:</strong>
+        dataset sequence name, commit/version of the stack, full configuration file(s),
+        and the exact trajectory export used for evaluation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Sensor Models You Must Lock Down -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Sensor Models You Must Lock Down</h2>
+    <div class="down-content">
+      <p>
+        Most stacks assume a pinhole camera (possibly with distortion). In normalized coordinates,
+        with camera-frame point <strong>\( \mathbf{P}_c=(X,Y,Z)^\top \)</strong>, the ideal projection is
+        <strong>\( \pi(\mathbf{P}_c) = (X/Z,\; Y/Z)^\top \)</strong>.
+        Pixel projection (no distortion) is:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \begin{bmatrix} u \\ v \end{bmatrix}
+          =
+          \begin{bmatrix}
+            f_x \dfrac{X}{Z} + c_x \\
+            f_y \dfrac{Y}{Z} + c_y
+          \end{bmatrix},
+          \quad Z &gt; 0
+        \]
+      </h4>
+
+      <p>
+        The key geometric residual used in feature-based stacks is the reprojection residual for a tracked feature:
+        <strong>\( \mathbf{r} = \mathbf{z} - \hat{\mathbf{z} } \)</strong>.
+        With robust loss <strong>\( \rho(\cdot) \)</strong>, the typical cost is:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \min_{\mathcal{X} }
+          \sum_{k}\sum_{j \in \mathcal{F}_k}
+          \rho\!\left(
+            \left\|
+              \mathbf{z}_{k}^{(j)} - \pi\!\big(\mathbf{T}_{cw}(k)\,\mathbf{P}_w^{(j)}\big)
+            \right\|^2_{\mathbf{\Sigma}_{z}^{-1} }
+          \right)
+        \]
+      </h4>
+
+      <p>
+        For VIO, the IMU adds a continuous-time inertial model. A common discrete-time error-state view uses:
+        position <strong>\( \mathbf{p} \)</strong>, velocity <strong>\( \mathbf{v} \)</strong>,
+        orientation <strong>\( \mathbf{R}\in SO(3) \)</strong>, biases <strong>\( \mathbf{b}_a,\mathbf{b}_g \)</strong>.
+        With measured accel/gyro <strong>\( \mathbf{a}_m,\boldsymbol{\omega}_m \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \dot{\mathbf{p} } = \mathbf{v},\quad
+          \dot{\mathbf{v} } = \mathbf{R}\big(\mathbf{a}_m - \mathbf{b}_a - \mathbf{n}_a\big) + \mathbf{g},\quad
+          \dot{\mathbf{R} } = \mathbf{R}\big[\boldsymbol{\omega}_m - \mathbf{b}_g - \mathbf{n}_g\big]_\times
+        \]
+      </h4>
+
+      <p>
+        Here <strong>\( [\cdot]_\times \)</strong> is the skew operator, and IMU noise drives drift unless corrected by vision constraints.
+        In practice, most VIO stacks use <em>preintegration</em> between keyframes (Lesson 3) to form inertial factors.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Running a Visual SLAM Stack (Conceptual Runbook) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Running a Visual SLAM Stack (Conceptual Runbook)</h2>
+    <div class="down-content">
+      <p>
+        A feature-based visual SLAM stack (e.g., ORB-family) typically has:
+        tracking (front-end), local mapping (BA in a sliding window), and loop closing (place recognition + pose graph correction).
+        Your lab runbook should be written in terms of <em>inputs/outputs and assumptions</em>:
+      </p>
+
+      <ul>
+        <li>
+          <strong>Inputs:</strong> images (mono/stereo), intrinsics + distortion, optionally depth/RGB-D, and time stamps.
+        </li>
+        <li>
+          <strong>Key settings:</strong> feature thresholding, pyramid levels, keyframe insertion policy, and outlier gates.
+        </li>
+        <li>
+          <strong>Outputs:</strong> camera poses <strong>\( \mathbf{T}_{wc}(t) \)</strong> and a sparse map (if SLAM, not pure VO).
+        </li>
+      </ul>
+
+      <p>
+        <strong>Monocular note (scale):</strong> without inertial or metric depth, the solution is only determined up to a similarity transform.
+        That is, if <strong>\( \{\mathbf{p}_k\} \)</strong> is a valid trajectory, so is
+        <strong>\( \{ s\mathbf{R}\mathbf{p}_k + \mathbf{t} \} \)</strong>.
+        Therefore evaluation must allow scale alignment.
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \text{Mono ambiguity:}\quad
+          \mathbf{p}_k \;\;\text{and}\;\; s\mathbf{R}\mathbf{p}_k + \mathbf{t}
+          \;\; \\ \text{produce identical normalized projections under noiseless pinhole geometry.}
+        \]
+      </h4>
+
+      <p>
+        Practical lab checks when tracking fails:
+      </p>
+      <ul>
+        <li><strong>Lighting/motion blur (Lesson 4):</strong> reduce exposure time, increase feature pyramid robustness, or switch to direct methods.</li>
+        <li><strong>Wrong intrinsics/distortion:</strong> reprojection residuals inflate; feature matches become inconsistent.</li>
+        <li><strong>Timestamp ordering:</strong> even small time jitter can destroy motion prediction.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Running a VIO Stack (Conceptual Runbook + Factor View) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Running a VIO Stack (Conceptual Runbook)</h2>
+    <div class="down-content">
+      <p>
+        A VIO stack adds the IMU stream, so configuration expands to:
+        <strong>\( (i) \)</strong> camera intrinsics/distortion,
+        <strong>\( (ii) \)</strong> camera–IMU extrinsics,
+        <strong>\( (iii) \)</strong> IMU noise + bias random walk,
+        <strong>\( (iv) \)</strong> time offset model or synchronization policy.
+      </p>
+
+      <p>
+        The optimization (or filtering) view is typically:
+        states at keyframes (pose, velocity, biases) linked by IMU preintegration constraints and visual reprojection constraints.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  Xk["State k: (R_k, p_k, v_k, b_gk, b_ak)"] --> IMU["IMU factor: preintegrated meas"]
+  IMU --> Xk1["State k+1: (R_k1, p_k1, v_k1, b_gk1, b_ak1)"]
+  Xk --> VIS["Vision factors: reprojection residuals"]
+  Xk1 --> VIS
+  VIS --> MAP["Landmarks or inverse-depth features"]
+  Xk1 --> MARG["Marginalize old states → prior factor"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Time offset sensitivity (lab reality):</strong> If camera timestamps are shifted by <strong>\( \delta t \)</strong>,
+        then the predicted pose used for reprojection is evaluated at the wrong time, producing a systematic residual.
+        First-order, the residual perturbation scales like:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \delta \mathbf{r} \approx
+          \frac{\partial \mathbf{r} }{\partial \boldsymbol{\xi} }
+          \frac{\partial \boldsymbol{\xi} }{\partial t}\,\delta t,
+          \quad \text{so}\quad
+          \|\delta \mathbf{r}\| \propto \|\boldsymbol{\omega}\|\,|\delta t|
+        \]
+      </h4>
+
+      <p>
+        This explains why aggressive angular motion makes poor sync immediately visible in residuals and drift.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Evaluation Mathematics — ATE, RPE, and Similarity Alignment -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Evaluation Mathematics — ATE, RPE, and Similarity Alignment</h2>
+    <div class="down-content">
+      <p>
+        Let ground-truth positions be <strong>\( \{\mathbf{p}_k^{gt}\}_{k=1}^N \)</strong> and estimated positions be
+        <strong>\( \{\mathbf{p}_k\}_{k=1}^N \)</strong>, after time association. We align the estimate to ground truth by a similarity transform
+        <strong>\( (s,\mathbf{R},\mathbf{t}) \)</strong>:
+        <strong>\( \mathbf{p}_k^{al} = s\mathbf{R}\mathbf{p}_k + \mathbf{t} \)</strong>.
+      </p>
+
+      <p>
+        The aligned Absolute Trajectory Error (ATE) is:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \text{ATE}_k = \left\| \mathbf{p}_k^{al} - \mathbf{p}_k^{gt} \right\|_2,
+          \quad
+          \text{ATE}_{\text{RMSE} } = \sqrt{\frac{1}{N}\sum_{k=1}^N \text{ATE}_k^2}
+        \]
+      </h4>
+
+      <p>
+        Relative Pose Error (RPE) over consecutive associated pairs measures local drift. For translation-only (positions),
+        define <strong>\( \Delta \mathbf{p}_k = \mathbf{p}_{k+1}-\mathbf{p}_k \)</strong> and use aligned estimates:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \text{RPE}^{trans}_k = \left\| (\mathbf{p}_{k+1}^{al}-\mathbf{p}_{k}^{al}) - (\mathbf{p}_{k+1}^{gt}-\mathbf{p}_{k}^{gt}) \right\|_2
+        \]
+      </h4>
+
+      <p>
+        <strong>Why SVD alignment works (derivation sketch):</strong>
+        Consider minimizing
+        <strong>\( \sum_k \|\mathbf{p}_k^{gt} - (s\mathbf{R}\mathbf{p}_k + \mathbf{t})\|^2 \)</strong>.
+        Differentiating w.r.t. <strong>\( \mathbf{t} \)</strong> yields
+        <strong>\( \mathbf{t}^\star = \bar{\mathbf{p} }^{gt} - s\mathbf{R}\bar{\mathbf{p} } \)</strong>,
+        reducing the problem to centered point sets
+        <strong>\( \mathbf{x}_k = \mathbf{p}_k - \bar{\mathbf{p} }, \mathbf{y}_k = \mathbf{p}_k^{gt} - \bar{\mathbf{p} }^{gt} \)</strong>.
+        The remaining rotation maximization becomes:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \min_{\mathbf{R}\in SO(3)} \sum_k \| \mathbf{y}_k - s\mathbf{R}\mathbf{x}_k \|^2
+          \;\;\Longleftrightarrow\;\;
+          \max_{\mathbf{R}\in SO(3)} \operatorname{tr}\!\left(\mathbf{R}\mathbf{\Sigma}\right),
+          \quad
+          \mathbf{\Sigma}=\frac{1}{N}\sum_k \mathbf{y}_k\mathbf{x}_k^\top
+        \]
+      </h4>
+
+      <p>
+        With SVD <strong>\( \mathbf{\Sigma}=\mathbf{U}\mathbf{D}\mathbf{V}^\top \)</strong>, the optimizer is
+        <strong>\( \mathbf{R}^\star=\mathbf{U}\mathbf{S}\mathbf{V}^\top \)</strong> where
+        <strong>\( \mathbf{S}=\operatorname{diag}(1,1,\det(\mathbf{U}\mathbf{V}^\top)) \)</strong>.
+        If scale is allowed, <strong>\( s^\star \)</strong> is obtained from the trace ratio (see code files).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation (Evaluation + Plotting) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation — ATE/RPE Evaluation Toolkit</h2>
+    <div class="down-content">
+      <p>
+        This script reads TUM-format trajectories, associates by timestamp, computes Umeyama similarity alignment (optional scale),
+        then reports ATE (RMSE/median/max) and RPE (translation + rotation, approximate).
+      </p>
+
+      <p><strong>File:</strong> Chapter13_Lesson5.py</p>
+      <pre><code class="language-python">
+#!/usr/bin/env python3
+"""
+Chapter13_Lesson5.py
+Trajectory evaluation utilities for VIO/Visual SLAM labs.
+
+Input trajectory format (TUM):
+t tx ty tz qx qy qz qw
+
+Typical usage:
+  python Chapter13_Lesson5.py --gt groundtruth.txt --est estimated.txt --allow-scale --plot
+
+Notes:
+- "allow-scale" is useful for monocular VO/SLAM where scale is unknown.
+- Association matches by nearest timestamp within --max-dt.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import numpy as np
+
+
+@dataclass
+class Trajectory:
+    t: np.ndarray          # (N,)
+    p: np.ndarray          # (N,3)
+    q: np.ndarray          # (N,4) [x,y,z,w] unit quaternions
+
+
+def _read_tum(path: str) -> Trajectory:
+    ts, ps, qs = [], [], []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if (not s) or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) &lt; 8:
+                continue
+            t = float(parts[0])
+            tx, ty, tz = map(float, parts[1:4])
+            qx, qy, qz, qw = map(float, parts[4:8])
+            ts.append(t)
+            ps.append([tx, ty, tz])
+            qs.append([qx, qy, qz, qw])
+    t = np.asarray(ts, dtype=float)
+    p = np.asarray(ps, dtype=float)
+    q = np.asarray(qs, dtype=float)
+    n = np.linalg.norm(q, axis=1, keepdims=True) + 1e-12
+    q = q / n
+    return Trajectory(t=t, p=p, q=q)
+
+
+def _associate_by_time(t_a: np.ndarray, t_b: np.ndarray, max_dt: float) -&gt; List[Tuple[int, int]]:
+    pairs: List[Tuple[int, int]] = []
+    j = 0
+    used_b = set()
+    for i, ta in enumerate(t_a):
+        while j + 1 &lt; len(t_b) and t_b[j] &lt; ta:
+            j += 1
+        cand = []
+        for jj in (j, j - 1):
+            if 0 &lt;= jj &lt; len(t_b) and jj not in used_b:
+                cand.append(jj)
+        if not cand:
+            continue
+        jj_best = min(cand, key=lambda jj: abs(t_b[jj] - ta))
+        if abs(t_b[jj_best] - ta) &lt;= max_dt:
+            pairs.append((i, jj_best))
+            used_b.add(jj_best)
+    return pairs
+
+
+def _umeyama_alignment(A: np.ndarray, B: np.ndarray, with_scale: bool):
+    if A.shape != B.shape or A.shape[1] != 3:
+        raise ValueError("A and B must be (N,3) and same shape.")
+    n = A.shape[0]
+    if n &lt; 3:
+        raise ValueError("Need at least 3 point correspondences.")
+
+    mu_A = A.mean(axis=0)
+    mu_B = B.mean(axis=0)
+    X = A - mu_A
+    Y = B - mu_B
+
+    Sigma = (Y.T @ X) / n
+    U, D, Vt = np.linalg.svd(Sigma)
+    S = np.eye(3)
+    if np.linalg.det(U) * np.linalg.det(Vt) &lt; 0:
+        S[2, 2] = -1.0
+
+    R = U @ S @ Vt
+    if with_scale:
+        var_A = (X * X).sum() / n
+        s = float(np.trace(np.diag(D) @ S) / (var_A + 1e-12))
+    else:
+        s = 1.0
+
+    t = mu_B - s * (R @ mu_A)
+    return s, R, t
+
+
+def _quat_mul(q1: np.ndarray, q2: np.ndarray) -&gt; np.ndarray:
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+    return np.array([
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2
+    ], dtype=float)
+
+
+def _quat_conj(q: np.ndarray) -&gt; np.ndarray:
+    return np.array([-q[0], -q[1], -q[2], q[3]], dtype=float)
+
+
+def _quat_to_rot(q: np.ndarray) -&gt; np.ndarray:
+    x, y, z, w = q
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    return np.array([
+        [1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
+        [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
+        [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]
+    ], dtype=float)
+
+
+def _so3_log(R: np.ndarray) -&gt; np.ndarray:
+    tr = np.trace(R)
+    cos_theta = (tr - 1.0) / 2.0
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    theta = math.acos(cos_theta)
+    if theta &lt; 1e-12:
+        return np.zeros(3)
+    w = (1.0 / (2.0 * math.sin(theta))) * np.array([
+        R[2, 1] - R[1, 2],
+        R[0, 2] - R[2, 0],
+        R[1, 0] - R[0, 1]
+    ], dtype=float)
+    return theta * w
+
+
+def _ate(gt: Trajectory, est: Trajectory, max_dt: float, allow_scale: bool):
+    pairs = _associate_by_time(est.t, gt.t, max_dt=max_dt)
+    if len(pairs) &lt; 3:
+        raise RuntimeError(f"Too few associated poses: {len(pairs)}")
+
+    A = np.array([est.p[i] for i, _ in pairs], dtype=float)
+    B = np.array([gt.p[j] for _, j in pairs], dtype=float)
+
+    s, R, t = _umeyama_alignment(A, B, with_scale=allow_scale)
+    A_aligned = (s * (R @ A.T)).T + t.reshape(1, 3)
+
+    e = A_aligned - B
+    se = np.sum(e * e, axis=1)
+    rmse = float(np.sqrt(np.mean(se)))
+    med = float(np.median(np.sqrt(se)))
+    mx = float(np.max(np.sqrt(se)))
+
+    return {
+        "n_pairs": int(len(pairs)),
+        "scale": float(s),
+        "R": R,
+        "t": t,
+        "rmse": rmse,
+        "median": med,
+        "max": mx,
+        "aligned_est_positions": A_aligned,
+        "gt_positions": B,
+        "assoc_pairs": pairs,
+    }
+
+
+def _rpe(gt: Trajectory, est: Trajectory, pairs, R_align, t_align, s_align):
+    if len(pairs) &lt; 2:
+        raise RuntimeError("Need at least 2 associated poses for RPE.")
+
+    A = np.array([est.p[i] for i, _ in pairs], dtype=float)
+    B = np.array([gt.p[j] for _, j in pairs], dtype=float)
+    A_aligned = (s_align * (R_align @ A.T)).T + t_align.reshape(1, 3)
+
+    dt = []
+    dr = []
+    for k in range(len(pairs) - 1):
+        dA = A_aligned[k + 1] - A_aligned[k]
+        dB = B[k + 1] - B[k]
+        dt.append(np.linalg.norm(dA - dB))
+
+        qi, qj = est.q[pairs[k][0]], est.q[pairs[k + 1][0]]
+        qgi, qgj = gt.q[pairs[k][1]], gt.q[pairs[k + 1][1]]
+
+        dq_est = _quat_mul(_quat_conj(qi), qj)
+        dq_gt = _quat_mul(_quat_conj(qgi), qgj)
+
+        R_est = _quat_to_rot(dq_est)
+        R_gt = _quat_to_rot(dq_gt)
+        R_est_al = R_align @ R_est @ R_align.T
+        dR = R_est_al.T @ R_gt
+        w = _so3_log(dR)
+        dr.append(np.linalg.norm(w))
+
+    dt = np.asarray(dt, dtype=float)
+    dr = np.asarray(dr, dtype=float)
+    return {
+        "trans_rmse": float(np.sqrt(np.mean(dt*dt))),
+        "rot_rmse_rad": float(np.sqrt(np.mean(dr*dr))),
+        "trans_mean": float(np.mean(dt)),
+        "rot_mean_rad": float(np.mean(dr)),
+        "n_edges": int(len(dt)),
+    }
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gt", required=True)
+    ap.add_argument("--est", required=True)
+    ap.add_argument("--max-dt", type=float, default=0.02)
+    ap.add_argument("--allow-scale", action="store_true")
+    ap.add_argument("--plot", action="store_true")
+    args = ap.parse_args()
+
+    gt = _read_tum(args.gt)
+    est = _read_tum(args.est)
+
+    ate = _ate(gt, est, max_dt=args.max_dt, allow_scale=args.allow_scale)
+    rpe = _rpe(gt, est, ate["assoc_pairs"], ate["R"], ate["t"], ate["scale"])
+
+    print("=== ATE (aligned) ===")
+    print("pairs:", ate["n_pairs"])
+    print("scale:", ate["scale"])
+    print("rmse [m]:", ate["rmse"])
+    print("median [m]:", ate["median"])
+    print("max [m]:", ate["max"])
+    print("=== RPE (consecutive) ===")
+    print("edges:", rpe["n_edges"])
+    print("trans_rmse [m]:", rpe["trans_rmse"])
+    print("rot_rmse [rad]:", rpe["rot_rmse_rad"])
+
+    if args.plot:
+        import matplotlib.pyplot as plt
+        A = ate["aligned_est_positions"]
+        B = ate["gt_positions"]
+        plt.figure()
+        plt.plot(B[:, 0], B[:, 1], label="gt")
+        plt.plot(A[:, 0], A[:, 1], label="est_aligned")
+        plt.xlabel("x [m]"); plt.ylabel("y [m]")
+        plt.axis("equal")
+        plt.legend()
+        plt.title("Trajectory (top-down)")
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <p>
+        Optional diagnostic for time offset estimation via cross-correlation:
+      </p>
+      <p><strong>File:</strong> Chapter13_Lesson5_Ex1.py</p>
+      <pre><code class="language-python">
+#!/usr/bin/env python3
+"""
+Chapter13_Lesson5_Ex1.py
+Estimate an approximate camera-IMU time offset from two time series by cross-correlation.
+
+Input CSV format (two files):
+t,value  (header optional)
+"""
+from __future__ import annotations
+
+import argparse
+import numpy as np
+
+
+def _read_csv_tv(path: str) -&gt; tuple[np.ndarray, np.ndarray]:
+    t, v = [], []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s:
+                continue
+            if s.lower().startswith("t"):
+                continue
+            parts = s.split(",")
+            if len(parts) &lt; 2:
+                continue
+            t.append(float(parts[0]))
+            v.append(float(parts[1]))
+    return np.asarray(t, float), np.asarray(v, float)
+
+
+def _resample_uniform(t: np.ndarray, v: np.ndarray, dt: float) -&gt; tuple[np.ndarray, np.ndarray]:
+    t0, t1 = t.min(), t.max()
+    tu = np.arange(t0, t1, dt)
+    vu = np.interp(tu, t, v)
+    return tu, vu
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--imu", required=True)
+    ap.add_argument("--vis", required=True)
+    ap.add_argument("--dt", type=float, default=0.002)
+    ap.add_argument("--max-shift", type=float, default=0.2)
+    args = ap.parse_args()
+
+    t_i, v_i = _read_csv_tv(args.imu)
+    t_v, v_v = _read_csv_tv(args.vis)
+
+    ti, vi = _resample_uniform(t_i, v_i, args.dt)
+    tv, vv = _resample_uniform(t_v, v_v, args.dt)
+
+    t0 = max(ti.min(), tv.min())
+    t1 = min(ti.max(), tv.max())
+    mi = (ti &gt;= t0) &amp; (ti &lt;= t1)
+    mv = (tv &gt;= t0) &amp; (tv &lt;= t1)
+    vi = vi[mi]
+    vv = vv[mv]
+
+    n = min(len(vi), len(vv))
+    vi, vv = vi[:n], vv[:n]
+
+    vi = (vi - vi.mean()) / (vi.std() + 1e-12)
+    vv = (vv - vv.mean()) / (vv.std() + 1e-12)
+
+    max_lag = int(round(args.max_shift / args.dt))
+    lags = np.arange(-max_lag, max_lag + 1)
+    corr = np.zeros_like(lags, dtype=float)
+
+    for k, lag in enumerate(lags):
+        if lag &gt;= 0:
+            a = vi[lag:]
+            b = vv[:len(a)]
+        else:
+            a = vi[:lag]
+            b = vv[-lag:]
+        corr[k] = float(np.dot(a, b) / max(len(a), 1))
+
+    best = int(np.argmax(corr))
+    best_lag = lags[best]
+    dt_est = -best_lag * args.dt
+    print("Estimated time offset (VIS relative to IMU) [s]:", dt_est)
+    print("Peak correlation:", corr[best])
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation (Eigen) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation — Minimal ATE + Umeyama Alignment</h2>
+    <div class="down-content">
+      <p>
+        This is a standalone C++ evaluator (Eigen-based) to validate results without Python dependencies.
+      </p>
+
+      <p><strong>File:</strong> Chapter13_Lesson5.cpp</p>
+      <pre><code class="language-cpp">
+// Chapter13_Lesson5.cpp
+// Minimal ATE evaluation (TUM format) + Umeyama alignment.
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter13_Lesson5.cpp -I /usr/include/eigen3 -o ate_eval
+//
+// Run:
+//   ./ate_eval groundtruth.txt estimated.txt 0.02 1
+#include &lt;Eigen/Dense&gt;
+#include &lt;fstream&gt;
+#include &lt;iostream&gt;
+#include &lt;sstream&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+#include &lt;unordered_set&gt;
+#include &lt;cmath&gt;
+
+struct Traj {
+  std::vector&lt;double&gt; t;
+  std::vector&lt;Eigen::Vector3d&gt; p;
+};
+
+static Traj read_tum(const std::string&amp; path) {
+  Traj tr;
+  std::ifstream f(path);
+  if (!f) throw std::runtime_error("Cannot open " + path);
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::istringstream iss(line);
+    double tt, tx, ty, tz, qx, qy, qz, qw;
+    if (!(iss &gt;&gt; tt &gt;&gt; tx &gt;&gt; ty &gt;&gt; tz &gt;&gt; qx &gt;&gt; qy &gt;&gt; qz &gt;&gt; qw)) continue;
+    tr.t.push_back(tt);
+    tr.p.emplace_back(tx, ty, tz);
+  }
+  return tr;
+}
+
+static std::vector&lt;std::pair&lt;int,int&gt;&gt; associate_by_time(
+  const std::vector&lt;double&gt;&amp; ta,
+  const std::vector&lt;double&gt;&amp; tb,
+  double max_dt)
+{
+  std::vector&lt;std::pair&lt;int,int&gt;&gt; pairs;
+  int j = 0;
+  std::unordered_set&lt;int&gt; used;
+  for (int i = 0; i &lt; (int)ta.size(); ++i) {
+    double t = ta[i];
+    while (j + 1 &lt; (int)tb.size() &amp;&amp; tb[j] &lt; t) j++;
+    std::vector&lt;int&gt; cand;
+    for (int jj : {j, j-1}) {
+      if (0 &lt;= jj &amp;&amp; jj &lt; (int)tb.size() &amp;&amp; used.find(jj) == used.end()) cand.push_back(jj);
+    }
+    if (cand.empty()) continue;
+    int best = cand[0];
+    for (int jj : cand) if (std::abs(tb[jj] - t) &lt; std::abs(tb[best] - t)) best = jj;
+    if (std::abs(tb[best] - t) &lt;= max_dt) {
+      pairs.emplace_back(i, best);
+      used.insert(best);
+    }
+  }
+  return pairs;
+}
+
+static void umeyama(
+  const Eigen::MatrixXd&amp; A, // 3xN
+  const Eigen::MatrixXd&amp; B, // 3xN
+  bool with_scale,
+  double&amp; s,
+  Eigen::Matrix3d&amp; R,
+  Eigen::Vector3d&amp; t)
+{
+  const int N = (int)A.cols();
+  if (N &lt; 3) throw std::runtime_error("Need &gt;=3 points");
+  Eigen::Vector3d muA = A.rowwise().mean();
+  Eigen::Vector3d muB = B.rowwise().mean();
+  Eigen::MatrixXd X = A.colwise() - muA;
+  Eigen::MatrixXd Y = B.colwise() - muB;
+
+  Eigen::Matrix3d Sigma = (Y * X.transpose()) / (double)N;
+
+  Eigen::JacobiSVD&lt;Eigen::Matrix3d&gt; svd(Sigma, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  Eigen::Matrix3d U = svd.matrixU();
+  Eigen::Matrix3d V = svd.matrixV();
+  Eigen::Vector3d D = svd.singularValues();
+
+  Eigen::Matrix3d S = Eigen::Matrix3d::Identity();
+  if ((U.determinant() * V.determinant()) &lt; 0.0) S(2,2) = -1.0;
+
+  R = U * S * V.transpose();
+
+  if (with_scale) {
+    double varA = (X.array() * X.array()).sum() / (double)N;
+    s = (D.transpose() * S.diagonal()) / (varA + 1e-12);
+  } else {
+    s = 1.0;
+  }
+
+  t = muB - s * (R * muA);
+}
+
+int main(int argc, char** argv) {
+  if (argc &lt; 5) {
+    std::cerr &lt;&lt; "Usage: " &lt;&lt; argv[0] &lt;&lt; " gt.txt est.txt max_dt allow_scale(0/1)\n";
+    return 2;
+  }
+  const std::string gt_path = argv[1];
+  const std::string est_path = argv[2];
+  const double max_dt = std::stod(argv[3]);
+  const bool allow_scale = (std::stoi(argv[4]) != 0);
+
+  Traj gt = read_tum(gt_path);
+  Traj est = read_tum(est_path);
+
+  auto pairs = associate_by_time(est.t, gt.t, max_dt);
+  if ((int)pairs.size() &lt; 3) {
+    std::cerr &lt;&lt; "Too few associated poses: " &lt;&lt; pairs.size() &lt;&lt; "\n";
+    return 3;
+  }
+
+  const int N = (int)pairs.size();
+  Eigen::MatrixXd A(3, N), B(3, N);
+  for (int k = 0; k &lt; N; ++k) {
+    A.col(k) = est.p[pairs[k].first];
+    B.col(k) = gt.p[pairs[k].second];
+  }
+
+  double s;
+  Eigen::Matrix3d R;
+  Eigen::Vector3d t;
+  umeyama(A, B, allow_scale, s, R, t);
+
+  Eigen::MatrixXd A_al = (s * (R * A)).colwise() + t;
+  Eigen::MatrixXd E = A_al - B;
+  Eigen::VectorXd se = E.colwise().squaredNorm();
+
+  double rmse = std::sqrt(se.mean());
+  double mx = std::sqrt(se.maxCoeff());
+
+  std::vector&lt;double&gt; e;
+  e.reserve(N);
+  for (int k = 0; k &lt; N; ++k) e.push_back(std::sqrt(se(k)));
+  std::nth_element(e.begin(), e.begin() + e.size()/2, e.end());
+  double med = e[e.size()/2];
+
+  std::cout &lt;&lt; "pairs " &lt;&lt; N &lt;&lt; "\n";
+  std::cout &lt;&lt; "scale " &lt;&lt; s &lt;&lt; "\n";
+  std::cout &lt;&lt; "rmse_m " &lt;&lt; rmse &lt;&lt; "\n";
+  std::cout &lt;&lt; "median_m " &lt;&lt; med &lt;&lt; "\n";
+  std::cout &lt;&lt; "max_m " &lt;&lt; mx &lt;&lt; "\n";
+  return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation (EJML) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation — ATE + Umeyama Alignment (EJML)</h2>
+    <div class="down-content">
+      <p>
+        Java can be used for evaluation pipelines in robotics backends (e.g., server-side batch evaluation). This implementation uses EJML SVD.
+      </p>
+
+      <p><strong>File:</strong> Chapter13_Lesson5.java</p>
+      <pre><code class="language-java">
+// Chapter13_Lesson5.java
+// ATE evaluation in Java using EJML for SVD (Umeyama alignment).
+//
+// Dependency (Gradle):
+//   implementation "org.ejml:ejml-simple:0.43"
+import org.ejml.simple.SimpleMatrix;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+
+public class Chapter13_Lesson5 {
+
+    static class Traj {
+        final double[] t;
+        final double[][] p; // Nx3
+        Traj(double[] t, double[][] p) { this.t = t; this.p = p; }
+    }
+
+    static Traj readTum(String path) throws Exception {
+        List&lt;Double&gt; ts = new ArrayList&lt;&gt;();
+        List&lt;double[]&gt; ps = new ArrayList&lt;&gt;();
+        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                String[] parts = line.split("\\s+");
+                if (parts.length &lt; 8) continue;
+                double tt = Double.parseDouble(parts[0]);
+                double tx = Double.parseDouble(parts[1]);
+                double ty = Double.parseDouble(parts[2]);
+                double tz = Double.parseDouble(parts[3]);
+                ts.add(tt);
+                ps.add(new double[]{tx, ty, tz});
+            }
+        }
+        double[] t = new double[ts.size()];
+        double[][] p = new double[ts.size()][3];
+        for (int i = 0; i &lt; ts.size(); i++) {
+            t[i] = ts.get(i);
+            p[i] = ps.get(i);
+        }
+        return new Traj(t, p);
+    }
+
+    static List&lt;int[]&gt; associateByTime(double[] ta, double[] tb, double maxDt) {
+        List&lt;int[]&gt; pairs = new ArrayList&lt;&gt;();
+        int j = 0;
+        HashSet&lt;Integer&gt; used = new HashSet&lt;&gt;();
+        for (int i = 0; i &lt; ta.length; i++) {
+            double t = ta[i];
+            while (j + 1 &lt; tb.length &amp;&amp; tb[j] &lt; t) j++;
+            int[] cand = new int[]{j, j - 1};
+            int best = -1;
+            double bestErr = Double.POSITIVE_INFINITY;
+            for (int jj : cand) {
+                if (0 &lt;= jj &amp;&amp; jj &lt; tb.length &amp;&amp; !used.contains(jj)) {
+                    double err = Math.abs(tb[jj] - t);
+                    if (err &lt; bestErr) { bestErr = err; best = jj; }
+                }
+            }
+            if (best &gt;= 0 &amp;&amp; bestErr &lt;= maxDt) {
+                pairs.add(new int[]{i, best});
+                used.add(best);
+            }
+        }
+        return pairs;
+    }
+
+    static class Align {
+        final double s;
+        final SimpleMatrix R; // 3x3
+        final SimpleMatrix t; // 3x1
+        Align(double s, SimpleMatrix R, SimpleMatrix t) { this.s = s; this.R = R; this.t = t; }
+    }
+
+    static Align umeyama(SimpleMatrix A, SimpleMatrix B, boolean withScale) {
+        int N = A.numCols();
+        if (N &lt; 3) throw new IllegalArgumentException("Need &gt;=3 points");
+
+        SimpleMatrix muA = A.mean(1);
+        SimpleMatrix muB = B.mean(1);
+
+        SimpleMatrix X = A.minus(muA.mult(SimpleMatrix.ones(1, N)));
+        SimpleMatrix Y = B.minus(muB.mult(SimpleMatrix.ones(1, N)));
+
+        SimpleMatrix Sigma = Y.mult(X.transpose()).divide(N);
+
+        var svd = Sigma.svd();
+        SimpleMatrix U = svd.getU();
+        SimpleMatrix V = svd.getV();
+        SimpleMatrix W = svd.getW();
+
+        SimpleMatrix S = SimpleMatrix.identity(3);
+        if (U.determinant() * V.determinant() &lt; 0.0) {
+            S.set(2, 2, -1.0);
+        }
+
+        SimpleMatrix R = U.mult(S).mult(V.transpose());
+
+        double s;
+        if (withScale) {
+            double varA = X.elementMult(X).elementSum() / N;
+            double tr = 0.0;
+            for (int i = 0; i &lt; 3; i++) tr += W.get(i, i) * S.get(i, i);
+            s = tr / (varA + 1e-12);
+        } else {
+            s = 1.0;
+        }
+
+        SimpleMatrix t = muB.minus(R.mult(muA).scale(s));
+        return new Align(s, R, t);
+    }
+
+    public static void main(String[] args) throws Exception {
+        Locale.setDefault(Locale.US);
+        if (args.length &lt; 4) {
+            System.err.println("Usage: Chapter13_Lesson5 gt.txt est.txt max_dt allowScale(true/false)");
+            System.exit(2);
+        }
+        String gtPath = args[0];
+        String estPath = args[1];
+        double maxDt = Double.parseDouble(args[2]);
+        boolean allowScale = Boolean.parseBoolean(args[3]);
+
+        Traj gt = readTum(gtPath);
+        Traj est = readTum(estPath);
+
+        List&lt;int[]&gt; pairs = associateByTime(est.t, gt.t, maxDt);
+        if (pairs.size() &lt; 3) {
+            System.err.println("Too few associated poses: " + pairs.size());
+            System.exit(3);
+        }
+
+        int N = pairs.size();
+        SimpleMatrix A = new SimpleMatrix(3, N);
+        SimpleMatrix B = new SimpleMatrix(3, N);
+        for (int k = 0; k &lt; N; k++) {
+            int i = pairs.get(k)[0];
+            int j = pairs.get(k)[1];
+            A.set(0, k, est.p[i][0]); A.set(1, k, est.p[i][1]); A.set(2, k, est.p[i][2]);
+            B.set(0, k, gt.p[j][0]);  B.set(1, k, gt.p[j][1]);  B.set(2, k, gt.p[j][2]);
+        }
+
+        Align al = umeyama(A, B, allowScale);
+        SimpleMatrix A_al = al.R.mult(A).scale(al.s).plus(al.t.mult(SimpleMatrix.ones(1, N)));
+
+        double sum = 0.0, max = 0.0;
+        double[] errs = new double[N];
+        for (int k = 0; k &lt; N; k++) {
+            double dx = A_al.get(0,k) - B.get(0,k);
+            double dy = A_al.get(1,k) - B.get(1,k);
+            double dz = A_al.get(2,k) - B.get(2,k);
+            double e = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            errs[k] = e;
+            sum += e*e;
+            if (e &gt; max) max = e;
+        }
+        double rmse = Math.sqrt(sum / N);
+
+        java.util.Arrays.sort(errs);
+        double median = errs[N/2];
+
+        System.out.println("pairs " + N);
+        System.out.println("scale " + al.s);
+        System.out.println("rmse_m " + rmse);
+        System.out.println("median_m " + median);
+        System.out.println("max_m " + max);
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation (ATE + Allan deviation) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Implementation — ATE + IMU Allan Deviation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is frequently used in AMR for sensor characterization and parameter extraction.
+        The following file provides:
+        <strong>\( (1) \)</strong> ATE evaluation (TUM format) and
+        <strong>\( (2) \)</strong> Allan deviation computation to estimate IMU noise regimes for VIO tuning.
+        For Simulink usage, the ATE portion can be wrapped in a MATLAB Function block for automated scoring pipelines.
+      </p>
+
+      <p><strong>File:</strong> Chapter13_Lesson5.m</p>
+      <pre><code class="language-matlab">
+% Chapter13_Lesson5.m
+% MATLAB utilities for VIO/Visual SLAM lab:
+%  1) ATE evaluation (TUM format) with optional similarity scale.
+%  2) Allan variance-based IMU noise parameter estimation (gyro/accel).
+function demo_Chapter13_Lesson5()
+  disp("Run functions: ate_eval_tum, allan_imu");
+end
+
+function out = ate_eval_tum(gtPath, estPath, maxDt, allowScale)
+  gt = read_tum(gtPath);
+  est = read_tum(estPath);
+
+  pairs = associate_by_time(est.t, gt.t, maxDt);
+  if size(pairs,1) &lt; 3
+    error("Too few associated poses.");
+  end
+
+  A = est.p(pairs(:,1), :);
+  B = gt.p(pairs(:,2), :);
+
+  [s,R,t] = umeyama(A, B, allowScale);
+  A_al = (s*(R*A') + t)';
+  e = A_al - B;
+  se = sum(e.^2,2);
+  out.n_pairs = size(pairs,1);
+  out.scale = s;
+  out.R = R;
+  out.t = t;
+  out.rmse = sqrt(mean(se));
+  out.median = median(sqrt(se));
+  out.max = max(sqrt(se));
+end
+
+function tr = read_tum(path)
+  fid = fopen(path,'r');
+  if fid &lt; 0, error("Cannot open file"); end
+  t = [];
+  p = [];
+  while true
+    line = fgetl(fid);
+    if ~ischar(line), break; end
+    line = strtrim(line);
+    if isempty(line) || startsWith(line,"#"), continue; end
+    parts = split(line);
+    if numel(parts) &lt; 8, continue; end
+    tt = str2double(parts{1});
+    tx = str2double(parts{2});
+    ty = str2double(parts{3});
+    tz = str2double(parts{4});
+    t(end+1,1) = tt; %#ok&lt;AGROW&gt;
+    p(end+1,:) = [tx ty tz]; %#ok&lt;AGROW&gt;
+  end
+  fclose(fid);
+  tr.t = t;
+  tr.p = p;
+end
+
+function pairs = associate_by_time(ta, tb, maxDt)
+  pairs = [];
+  j = 1;
+  used = false(numel(tb),1);
+  for i = 1:numel(ta)
+    t = ta(i);
+    while (j+1) &lt;= numel(tb) &amp;&amp; tb(j) &lt; t
+      j = j+1;
+    end
+    cand = [j, j-1];
+    best = -1;
+    bestErr = inf;
+    for c = cand
+      if c &gt;= 1 &amp;&amp; c &lt;= numel(tb) &amp;&amp; ~used(c)
+        err = abs(tb(c)-t);
+        if err &lt; bestErr
+          bestErr = err;
+          best = c;
+        end
+      end
+    end
+    if best &gt; 0 &amp;&amp; bestErr &lt;= maxDt
+      pairs(end+1,:) = [i, best]; %#ok&lt;AGROW&gt;
+      used(best) = true;
+    end
+  end
+end
+
+function [s,R,t] = umeyama(A, B, withScale)
+  n = size(A,1);
+  muA = mean(A,1);
+  muB = mean(B,1);
+  X = A - muA;
+  Y = B - muB;
+  Sigma = (Y'*X)/n;
+
+  [U,D,V] = svd(Sigma);
+  S = eye(3);
+  if det(U)*det(V) &lt; 0
+    S(3,3) = -1;
+  end
+  R = U*S*V';
+  if withScale
+    varA = sum(sum(X.^2))/n;
+    s = trace(D*S)/(varA + 1e-12);
+  else
+    s = 1.0;
+  end
+  t = muB' - s*R*muA';
+end
+
+function av = allan_imu(t, acc, gyro)
+  dt = median(diff(t));
+  if ~isfinite(dt) || dt &lt;= 0, error("Invalid dt"); end
+
+  maxM = floor(numel(t)/10);
+  Ms = unique(round(logspace(0, log10(maxM), 50)));
+  taus = Ms * dt;
+
+  av.taus = taus;
+  av.acc = cell(1,3);
+  av.gyro = cell(1,3);
+
+  for ax = 1:3
+    av.acc{ax} = allan_dev_1d(acc(:,ax), Ms);
+    av.gyro{ax} = allan_dev_1d(gyro(:,ax), Ms);
+  end
+end
+
+function sigma = allan_dev_1d(x, Ms)
+  x = x(:);
+  N = numel(x);
+  sigma = nan(numel(Ms),1);
+  for k = 1:numel(Ms)
+    m = Ms(k);
+    K = floor(N/(2*m));
+    if K &lt; 2, continue; end
+    y = zeros(2*K,1);
+    for i = 1:(2*K)
+      idx = (i-1)*m + (1:m);
+      y(i) = mean(x(idx));
+    end
+    d = diff(y);
+    sigma(k) = sqrt(0.5*mean(d.^2));
+  end
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica (Symbolic Jacobian for Debugging) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica — Symbolic Jacobian (Projection vs se(3) Perturbation)</h2>
+    <div class="down-content">
+      <p>
+        Symbolic Jacobians are useful when debugging custom residuals or verifying sign conventions.
+        This Wolfram Language content computes a first-order Jacobian of pinhole reprojection
+        under a small <strong>\( \mathfrak{se}(3) \)</strong> perturbation.
+      </p>
+
+      <p><strong>File:</strong> Chapter13_Lesson5.nb</p>
+      <pre><code class="language-mathematica">
+(* Chapter13_Lesson5.nb
+   Wolfram Language content (saved as .nb for convenience): symbolic Jacobian
+   of the pinhole reprojection residual with respect to a small se(3) perturbation.
+*)
+
+ClearAll["Global`*"];
+
+fx = Symbol["fx"]; fy = Symbol["fy"]; cx = Symbol["cx"]; cy = Symbol["cy"];
+Pc = {X, Y, Z};
+
+proj[pc_] := {fx*pc[[1]]/pc[[3]] + cx, fy*pc[[2]]/pc[[3]] + cy};
+
+rho = {rx, ry, rz};
+phi = {px, py, pz};
+skew[w_] := { {0, -w[[3]], w[[2]]}, {w[[3]], 0, -w[[1]]}, {-w[[2]], w[[1]], 0} };
+
+Pc2 = (IdentityMatrix[3] + skew[phi]).Pc + rho;
+
+r = proj[Pc2] - proj[Pc];
+J = D[r, { {rx, ry, rz, px, py, pz} }] // Simplify;
+
+Print["Jacobian dr/d(delta) (2x6):"];
+MatrixForm[J]
+
+test = J /. {fx -&gt; 400, fy -&gt; 420, cx -&gt; 320, cy -&gt; 240, X -&gt; 1.2, Y -&gt; -0.4, Z -&gt; 3.5};
+Print["Numeric Jacobian example:"];
+MatrixForm[N[test]]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Similarity Alignment &amp; Scale):</strong>
+        Let <strong>\( \{\mathbf{x}_k\}_{k=1}^N \)</strong> and <strong>\( \{\mathbf{y}_k\}_{k=1}^N \)</strong> be corresponding
+        3D point sets (estimated and ground truth). Show that the optimal translation is
+        <strong>\( \mathbf{t}^\star = \bar{\mathbf{y} } - s\mathbf{R}\bar{\mathbf{x} } \)</strong> for any fixed
+        <strong>\( (s,\mathbf{R}) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Minimize
+        <strong>\( J(\mathbf{t})=\sum_{k=1}^N\|\mathbf{y}_k-(s\mathbf{R}\mathbf{x}_k+\mathbf{t})\|^2 \)</strong>.
+        Differentiate and set to zero:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \frac{\partial J}{\partial \mathbf{t} } =
+          -2\sum_{k=1}^N \big(\mathbf{y}_k - s\mathbf{R}\mathbf{x}_k - \mathbf{t}\big) = \mathbf{0}
+          \;\;\Longrightarrow\;\;
+          N\mathbf{t} = \sum_{k=1}^N \mathbf{y}_k - s\mathbf{R}\sum_{k=1}^N \mathbf{x}_k
+        \]
+      </h4>
+      <p>
+        Divide by <strong>\( N \)</strong> to get
+        <strong>\( \mathbf{t}^\star = \bar{\mathbf{y} } - s\mathbf{R}\bar{\mathbf{x} } \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Rotation by Trace Maximization):</strong>
+        With centered points <strong>\( \mathbf{x}_k, \mathbf{y}_k \)</strong>, prove that minimizing
+        <strong>\( \sum_k \|\mathbf{y}_k - \mathbf{R}\mathbf{x}_k\|^2 \)</strong> over <strong>\( \mathbf{R}\in SO(3) \)</strong>
+        is equivalent to maximizing <strong>\( \operatorname{tr}(\mathbf{R}\mathbf{\Sigma}) \)</strong>
+        where <strong>\( \mathbf{\Sigma}=\frac{1}{N}\sum_k \mathbf{y}_k\mathbf{x}_k^\top \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Expand:
+        <strong>\( \|\mathbf{y}_k - \mathbf{R}\mathbf{x}_k\|^2 = \|\mathbf{y}_k\|^2 + \|\mathbf{x}_k\|^2 - 2\mathbf{y}_k^\top \mathbf{R}\mathbf{x}_k \)</strong>.
+        Summing over <strong>\( k \)</strong>, the first two terms are constant in <strong>\( \mathbf{R} \)</strong>, so minimizing is equivalent to maximizing
+        <strong>\( \sum_k \mathbf{y}_k^\top \mathbf{R}\mathbf{x}_k \)</strong>.
+        Using trace cyclicity:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \sum_{k=1}^N \mathbf{y}_k^\top \mathbf{R}\mathbf{x}_k
+          = \sum_{k=1}^N \operatorname{tr}\!\left(\mathbf{y}_k^\top \mathbf{R}\mathbf{x}_k\right)
+          = \sum_{k=1}^N \operatorname{tr}\!\left(\mathbf{R}\mathbf{x}_k\mathbf{y}_k^\top\right)
+          = N\,\operatorname{tr}\!\left(\mathbf{R}\mathbf{\Sigma}^\top\right)
+        \]
+      </h4>
+      <p>
+        Maximizing <strong>\( \operatorname{tr}(\mathbf{R}\mathbf{\Sigma}^\top) \)</strong> is equivalent to maximizing
+        <strong>\( \operatorname{tr}(\mathbf{R}\mathbf{\Sigma}) \)</strong> after redefining <strong>\( \mathbf{\Sigma} \)</strong> accordingly.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Time Offset as Systematic Residual):</strong>
+        Suppose the true camera pose is <strong>\( \mathbf{T}(t) \)</strong> but the pipeline uses <strong>\( \mathbf{T}(t+\delta t) \)</strong>.
+        Using a first-order Taylor approximation, show that the induced state perturbation is
+        <strong>\( \delta \boldsymbol{\xi} \approx \dot{\boldsymbol{\xi} }\,\delta t \)</strong>, and therefore the residual scales with
+        <strong>\( |\delta t| \)</strong> and angular rate.
+      </p>
+      <p>
+        <strong>Solution:</strong> Let a minimal pose perturbation be parameterized by <strong>\( \boldsymbol{\xi}(t) \)</strong>. Then
+        <strong>\( \boldsymbol{\xi}(t+\delta t) \approx \boldsymbol{\xi}(t) + \dot{\boldsymbol{\xi} }(t)\delta t \)</strong>.
+        A residual <strong>\( \mathbf{r}(\boldsymbol{\xi}) \)</strong> thus changes as
+        <strong>\( \delta \mathbf{r} \approx \frac{\partial \mathbf{r} }{\partial \boldsymbol{\xi} } \dot{\boldsymbol{\xi} }\delta t \)</strong>.
+        Since <strong>\( \dot{\boldsymbol{\xi} } \)</strong> contains angular velocity components, fast turns amplify time-offset error.
+      </p>
+
+      <p>
+        <strong>Problem 4 (ATE Interpretation for Monocular):</strong>
+        Explain why evaluating monocular VO without similarity alignment can produce arbitrarily large ATE even if the reconstruction is “geometrically correct.”
+      </p>
+      <p>
+        <strong>Solution:</strong> Monocular reconstruction is only defined up to similarity:
+        <strong>\( \mathbf{p}_k \mapsto s\mathbf{R}\mathbf{p}_k + \mathbf{t} \)</strong>.
+        If the estimated scale differs from ground-truth scale, then
+        <strong>\( \|\mathbf{p}_k - \mathbf{p}_k^{gt}\| \)</strong> grows with distance traveled, yielding large ATE.
+        Similarity alignment removes this gauge freedom, isolating shape and drift errors.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Robust Loss &amp; Outliers):</strong>
+        Let a robust kernel be Huber:
+        <strong>\( \rho(s) = \begin{cases} s &amp; s \le \delta^2 \\ 2\delta\sqrt{s} - \delta^2 &amp; s &gt; \delta^2 \end{cases} \)</strong>.
+        Show that large residuals receive smaller incremental influence than pure least squares.
+      </p>
+      <p>
+        <strong>Solution:</strong> For least squares, the penalty grows linearly in <strong>\( s \)</strong> with derivative <strong>\( \rho'(s)=1 \)</strong>.
+        For Huber, when <strong>\( s &gt; \delta^2 \)</strong>:
+        <strong>\( \rho'(s) = \frac{\delta}{\sqrt{s} } \)</strong>, which decreases as residual magnitude increases, reducing outlier leverage.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        You now have a full lab protocol for running a VIO/Visual SLAM stack with disciplined configuration control:
+        sensor models and timing, execution with fixed assumptions, and evaluation using similarity-aligned ATE and local RPE.
+        The accompanying Python/C++/Java/MATLAB/Mathematica tooling enables cross-validation and rapid diagnosis of the dominant failure modes:
+        scale gauge (monocular), time offset, wrong intrinsics/extrinsics, and insufficient outlier handling.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Mur-Artal, R., &amp; Tardós, J.D. (2017). ORB-SLAM2: An Open-Source SLAM System for Monocular, Stereo, and RGB-D Cameras.
+        <em>IEEE Transactions on Robotics</em>, 33(5), 1255–1262.
+      </li>
+      <li>
+        Campos, C., Elvira, R., Rodríguez, J.J.G., Montiel, J.M.M., &amp; Tardós, J.D. (2021). ORB-SLAM3: An Accurate Open-Source Library for Visual, Visual–Inertial, and Multimap SLAM.
+        <em>IEEE Transactions on Robotics</em>, 37(6), 1874–1890.
+      </li>
+      <li>
+        Forster, C., Carlone, L., Dellaert, F., &amp; Scaramuzza, D. (2017). On-Manifold Preintegration for Real-Time Visual–Inertial Odometry.
+        <em>IEEE Transactions on Robotics</em>, 33(1), 1–21.
+      </li>
+      <li>
+        Qin, T., Li, P., &amp; Shen, S. (2018). VINS-Mono: A Robust and Versatile Monocular Visual–Inertial State Estimator.
+        <em>IEEE Transactions on Robotics</em>, 34(4), 1004–1020.
+      </li>
+      <li>
+        Leutenegger, S., Lynen, S., Bosse, M., Siegwart, R., &amp; Furgale, P. (2015). Keyframe-Based Visual–Inertial Odometry using Nonlinear Optimization.
+        <em>International Journal of Robotics Research</em>, 34(3), 314–334.
+      </li>
+      <li>
+        Bloesch, M., Omari, S., Hutter, M., &amp; Siegwart, R. (2015). Robust Visual Inertial Odometry Using a Direct EKF-Based Approach.
+        <em>IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)</em>, 298–304.
+      </li>
+      <li>
+        Umeyama, S. (1991). Least-Squares Estimation of Transformation Parameters Between Two Point Patterns.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>, 13(4), 376–380.
+      </li>
+      <li>
+        Barfoot, T.D. (2017). <em>State Estimation for Robotics</em>. Cambridge University Press. (Chapters on SE(3), factor graphs, and alignment.)
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson4.html">
+          Lesson 4: Scale, Lighting, and Motion Blur Issues
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Global–Local–Reactive Navigation Layers
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="active-lesson" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

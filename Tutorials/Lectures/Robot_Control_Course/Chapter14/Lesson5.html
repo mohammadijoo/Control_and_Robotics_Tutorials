@@ -1,0 +1,1750 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation) - Lesson 5: Case Study: Simple Legged/ Humanoid Task Control | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>
+      Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)
+    </h1>
+    <h3>
+      <strong
+        >Lesson 5: Case Study: Simple Legged/ Humanoid Task Control</strong
+      >
+    </h3>
+    <p>
+      In this lesson we instantiate the whole-body task-space / QP control
+      framework on a minimal legged / humanoid example: a biped robot that must
+      balance on one foot, regulate its center of mass (CoM), and move the swing
+      foot to a desired location while respecting contact and torque
+      constraints. We focus on the equation-level structure, the QP formulation,
+      and multi-language implementations at the acceleration / torque level,
+      assuming familiarity with robot kinematics and dynamics from a previous
+      robotics course and with task-space QP control from the earlier lessons of
+      this chapter.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Scenario and High-Level Control Architecture -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Scenario and High-Level Control Architecture</h2>
+    <div class="down-content">
+      <p>
+        Consider a floating-base humanoid or planar biped with generalized
+        coordinates <strong>\( q \in \mathbb{R}^n \)</strong> and generalized
+        velocities <strong>\( \dot{q} \)</strong>. We study a simple task:
+      </p>
+      <ul>
+        <li>
+          Maintain balance while standing on one foot (stance foot in contact).
+        </li>
+        <li>
+          Regulate the center of mass (CoM) position above the stance foot.
+        </li>
+        <li>Move the swing foot along a prescribed Cartesian trajectory.</li>
+        <li>Keep the posture close to a comfortable nominal configuration.</li>
+      </ul>
+      <p>
+        At the control level, we assume an acceleration-based whole-body
+        controller that computes desired joint accelerations
+        <strong>\( \ddot{q}^{\star} \)</strong> and contact forces
+        <strong>\( \boldsymbol{\lambda} \)</strong>, and then maps them into
+        actuator torques <strong>\( &bsol;tau \)</strong> using the robot's
+        known dynamics model (imported from the robotics course):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(q)\ddot{q} + \mathbf{h}(q,\dot{q}) = \mathbf{S}^{\top}
+        \boldsymbol{&bsol;tau} + \mathbf{J}_c(q)^{\top}\boldsymbol{\lambda}, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{M}(q) \)</strong> is the inertia matrix,
+        <strong>\( \mathbf{h}(q,\dot{q}) \)</strong> collects Coriolis,
+        centrifugal, and gravity terms,
+        <strong>\( \mathbf{S} \)</strong> selects actuated joints, and
+        <strong>\( \mathbf{J}_c(q) \)</strong> is the contact Jacobian for the
+        stance foot.
+      </p>
+      <p>The high-level structure of the controller is:</p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  REF["Task references (com, swing foot, posture)"]
+    --> TASK["Compute task errors and desired task accelerations"]
+  TASK --> QP["Build quadratic program (H, g, Aeq, beq, Aineq, bineq)"]
+  QP --> SOL["Solve QP for qdd, lambda, tau"]
+  SOL --> TAU["Low-level torque command tau(t)"]
+  TAU --> ROBOT["Legged robot dynamics"]
+  ROBOT --> SENS["State estimation (q, qd, contacts)"]
+  SENS --> TASK
+        </pre>
+      </div>
+      <p>
+        Our case study is thus an example of the general whole-body QP control
+        framework from previous lessons, but instantiated for a simple legged /
+        humanoid task with explicit equations.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Task Definitions for a Simple Humanoid -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Task Definitions for a Simple Humanoid</h2>
+    <div class="down-content">
+      <p>
+        We focus on four main tasks, expressed at the acceleration level for a
+        whole-body controller:
+      </p>
+      <ol>
+        <li>CoM regulation task.</li>
+        <li>Stance foot contact consistency (holonomic constraint).</li>
+        <li>Swing foot tracking task.</li>
+        <li>Posture regularization task.</li>
+      </ol>
+
+      <h3>2.1 CoM regulation task</h3>
+      <p>
+        Let
+        <strong>\( \mathbf{p}_{\text{com}}(q) \in \mathbb{R}^3 \)</strong> be
+        the CoM position. Its acceleration is
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{\mathbf{p}}_{\text{com}} = \mathbf{J}_{\text{com}}(q)\ddot{q} +
+        \dot{\mathbf{J}}_{\text{com}}(q,\dot{q})\dot{q}, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{J}_{\text{com}}(q) \)</strong> is the CoM
+        Jacobian. A PD law in task space defines a desired CoM acceleration:
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{\mathbf{p}}_{\text{com}}^{\star} =
+        \ddot{\mathbf{p}}_{\text{com,ref}} + \mathbf{K}_p^{\text{com}}\bigl(
+        \mathbf{p}_{\text{com,ref}} - \mathbf{p}_{\text{com}}(q) \bigr) +
+        \mathbf{K}_d^{\text{com}}\bigl( \dot{\mathbf{p}}_{\text{com,ref}} -
+        \dot{\mathbf{p}}_{\text{com}}(q,\dot{q}) \bigr). \]
+      </h4>
+      <p>
+        The CoM task then becomes a linear equation in
+        <strong>\( \ddot{q} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_{\text{com}}(q)\ddot{q} =
+        \ddot{\mathbf{p}}_{\text{com}}^{\star} -
+        \dot{\mathbf{J}}_{\text{com}}(q,\dot{q})\dot{q}. \]
+      </h4>
+
+      <h3>2.2 Stance foot contact constraint</h3>
+      <p>
+        Let <strong>\( \mathbf{x}_c(q) \)</strong> denote the stance foot
+        Cartesian pose. Assuming it is rigidly fixed to the ground (no slip, no
+        lift-off), its velocity and acceleration must vanish:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{x}}_c(q,\dot{q}) = \mathbf{0}, \quad
+        \ddot{\mathbf{x}}_c(q,\dot{q},\ddot{q}) = \mathbf{0}. \]
+      </h4>
+      <p>
+        Since
+        <strong>\( \dot{\mathbf{x}}_c = \mathbf{J}_c(q)\dot{q} \)</strong> and
+        <strong
+          >\( \ddot{\mathbf{x}}_c = \mathbf{J}_c(q)\ddot{q} +
+          \dot{\mathbf{J}}_c(q,\dot{q})\dot{q} \)</strong
+        >, this yields the acceleration-level holonomic constraint
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_c(q)\ddot{q} + \dot{\mathbf{J}}_c(q,\dot{q})\dot{q} =
+        \mathbf{0}. \]
+      </h4>
+
+      <h3>2.3 Swing foot tracking task</h3>
+      <p>
+        For the swing foot pose <strong>\( \mathbf{x}_s(q) \)</strong>, we
+        define a desired acceleration based on a reference trajectory
+        <strong>\( \mathbf{x}_{s,\text{ref}}(t) \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{\mathbf{x}}_s^{\star} = \ddot{\mathbf{x}}_{s,\text{ref}} +
+        \mathbf{K}_p^{s}\bigl( \mathbf{x}_{s,\text{ref}} - \mathbf{x}_s(q)
+        \bigr) + \mathbf{K}_d^{s}\bigl( \dot{\mathbf{x}}_{s,\text{ref}} -
+        \dot{\mathbf{x}}_s(q,\dot{q}) \bigr), \]
+      </h4>
+      <p>and the corresponding task equation</p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_s(q)\ddot{q} = \ddot{\mathbf{x}}_s^{\star} -
+        \dot{\mathbf{J}}_s(q,\dot{q})\dot{q}. \]
+      </h4>
+
+      <h3>2.4 Posture task</h3>
+      <p>
+        Finally, we define a joint-space posture task that attracts the robot
+        toward a nominal configuration <strong>\( q_0 \)</strong>, e.g. a
+        comfortable upright stance. A simple choice is
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{q}^{\text{post},\star} = \ddot{q}_{0} + \mathbf{K}_p^{q}(q_0 -
+        q) + \mathbf{K}_d^{q}(\dot{q}_0 - \dot{q}), \]
+      </h4>
+      <p>
+        with task matrix
+        <strong>\( \mathbf{J}_{\text{post}} = \mathbf{I}_n \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_{\text{post}}\ddot{q} = \ddot{q}^{\text{post},\star}. \]
+      </h4>
+      <p>
+        In this case the posture task is directly an equality in
+        <strong>\( \ddot{q} \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Whole-Body QP Formulation for Legged/Humanoid Tasks -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Whole-Body QP Formulation for Legged/Humanoid Tasks</h2>
+    <div class="down-content">
+      <p>
+        We now construct a quadratic program in the decision variable
+        <strong>\( z \)</strong> defined as
+      </p>
+      <h4 class="mathJax">
+        \[ z = \begin{bmatrix} \ddot{q} \\ \boldsymbol{&bsol;tau} \\
+        \boldsymbol{\lambda} \end{bmatrix} \in \mathbb{R}^{n + n_a +
+        n_{\lambda}}, \]
+      </h4>
+      <p>
+        where <strong>\( n_a \)</strong> is the number of actuated joints and
+        <strong>\( n_{\lambda} \)</strong> is the dimension of the contact
+        wrench vector.
+      </p>
+
+      <h3>3.1 Quadratic cost from multiple tasks</h3>
+      <p>
+        Each acceleration-level task can be written in the affine form
+        <strong>\( \mathbf{A}_k \ddot{q} - \mathbf{b}_k = \mathbf{0} \)</strong
+        >, e.g. for CoM:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}_{\text{com}} = \mathbf{J}_{\text{com}}(q),\quad
+        \mathbf{b}_{\text{com}} = \ddot{\mathbf{p}}_{\text{com}}^{\star} -
+        \dot{\mathbf{J}}_{\text{com}}\dot{q}. \]
+      </h4>
+      <p>We embed these into a quadratic cost</p>
+      <h4 class="mathJax">
+        \[ J(z) = \sum_{k \in \{\text{com},s,\text{post}\}} \frac{1}{2} w_k
+        \bigl\| \mathbf{A}_k \ddot{q} - \mathbf{b}_k \bigr\|^2 + \frac{1}{2}
+        w_{\text{reg}}\|\ddot{q}\|^2, \]
+      </h4>
+      <p>
+        where <strong>\( w_k &gt; 0 \)</strong> are task weights and
+        <strong>\( w_{\text{reg}} \)</strong> regularizes the solution. Stacking
+        all tasks we obtain the standard QP form
+      </p>
+      <h4 class="mathJax">
+        \[ \min_{z} \;\; \frac{1}{2} z^{\top}\mathbf{H}z + \mathbf{g}^{\top}z.
+        \]
+      </h4>
+      <p>
+        In particular, if the cost depends only on
+        <strong>\( \ddot{q} \)</strong>, <strong>\( \mathbf{H} \)</strong> has a
+        block-diagonal structure with a nonzero
+        <strong>\( \ddot{q} \)</strong> block and zeros elsewhere (for
+        <strong>\( \boldsymbol{&bsol;tau} \)</strong>,
+        <strong>\( \boldsymbol{\lambda} \)</strong>).
+      </p>
+
+      <h3>3.2 Equality and inequality constraints</h3>
+      <p>We incorporate the dynamics and contact constraints as equalities:</p>
+      <ul>
+        <li>
+          Dynamics:
+          <h4 class="mathJax">
+            \[ \mathbf{M}(q)\ddot{q} + \mathbf{h}(q,\dot{q}) -
+            \mathbf{S}^{\top}\boldsymbol{&bsol;tau} -
+            \mathbf{J}_c^{\top}\boldsymbol{\lambda} = \mathbf{0}. \]
+          </h4>
+        </li>
+        <li>
+          Stance foot contact:
+          <h4 class="mathJax">
+            \[ \mathbf{J}_c(q)\ddot{q} + \dot{\mathbf{J}}_c(q,\dot{q})\dot{q} =
+            \mathbf{0}. \]
+          </h4>
+        </li>
+      </ul>
+      <p>
+        These equalities can be written compactly as
+        <strong>\( \mathbf{A}_{\text{eq}} z = \mathbf{b}_{\text{eq}} \)</strong
+        >.
+      </p>
+      <p>Inequality constraints encode actuation limits and friction cones:</p>
+      <ul>
+        <li>
+          Torque limits:
+          <h4 class="mathJax">
+            \[ \boldsymbol{&bsol;tau}_{\min} \le \boldsymbol{&bsol;tau} \le
+            \boldsymbol{&bsol;tau}_{\max}. \]
+          </h4>
+        </li>
+        <li>
+          Linearized friction cone:
+          <h4 class="mathJax">
+            \[ \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0}, \]
+          </h4>
+          where <strong>\( \mathbf{F} \)</strong> encodes the facets of the
+          friction pyramid at the stance foot.
+        </li>
+      </ul>
+      <p>
+        In matrix form we have
+        <strong
+          >\( \mathbf{A}_{\text{ineq}} z \le \mathbf{b}_{\text{ineq}} \)</strong
+        >.
+      </p>
+      <p>
+        The resulting whole-body QP for the humanoid case study is therefore:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} &\min_{z} && \frac{1}{2} z^{\top}\mathbf{H}z +
+        \mathbf{g}^{\top}z \\ &\text{subject to} && \mathbf{A}_{\text{eq}}z =
+        \mathbf{b}_{\text{eq}}, \\ & & & \mathbf{A}_{\text{ineq}}z \le
+        \mathbf{b}_{\text{ineq}}. \end{aligned} \]
+      </h4>
+      <p>
+        From a control perspective, the QP acts as a multi-objective inverse
+        kinematics and inverse dynamics solver that respects contact and
+        actuation limits.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Python Implementation Sketch (Pinocchio + QP Solver) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Python Implementation Sketch (Pinocchio + QP Solver)</h2>
+    <div class="down-content">
+      <p>
+        We now sketch a Python implementation using
+        <code>pinocchio</code> for rigid-body dynamics and
+        <code>qpsolvers</code> (or any similar QP package) for solving the
+        whole-body QP. The code illustrates how to build task matrices and
+        constraints; it omits robot-specific details such as URDF paths.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+import pinocchio as pin
+from qpsolvers import solve_qp
+
+# Assume we have a Pinocchio model of a simple humanoid
+# with data structure `model`, `data` already created.
+# CoM and foot frames:
+com_ref = np.array([0.0, 0.0, 0.8])   # desired CoM
+swing_ref = np.array([0.1, 0.1, 0.4]) # desired swing foot position
+posture_ref = None  # to be set to a nominal configuration q0
+
+Kp_com = 50.0
+Kd_com = 10.0
+Kp_swing = 150.0
+Kd_swing = 20.0
+Kp_post = 20.0
+Kd_post = 5.0
+
+def build_whole_body_qp(model, data, q, qd, support_frame, swing_frame):
+    """
+    Build the matrices H, g, Aeq, beq, Aineq, bineq
+    for a simple whole-body QP with CoM, swing foot,
+    and posture tasks.
+    """
+    nv = model.nv  # velocity dimension
+    na = model.nv  # assume all joints actuated for simplicity
+
+    # 1) Compute dynamics terms
+    pin.computeAllTerms(model, data, q, qd)
+    M = data.M.copy()
+    h = data.nle.copy()   # non-linear effects
+
+    # Selection matrix for actuated joints (identity here)
+    S = np.eye(na, nv)
+
+    # 2) CoM quantities
+    com_pos = pin.centerOfMass(model, data, q)
+    com_vel = data.vcom[0]
+    J_com = pin.jacobianCenterOfMass(model, data, q)
+
+    com_pos_err = com_ref - com_pos
+    com_vel_err = -com_vel
+    com_acc_des = (0.0
+                   + Kp_com * com_pos_err
+                   + Kd_com * com_vel_err)
+
+    # CoM task: J_com * qdd = com_acc_des - Jdot_com * qd
+    # Pinocchio does not give Jdot_com directly; we can approximate with finite difference
+    # or use a dedicated function in more complete code.
+    Jdot_com_qd = np.zeros(3)  # placeholder for simplicity
+    A_com = J_com
+    b_com = com_acc_des - Jdot_com_qd
+
+    # 3) Swing foot task
+    # Frame placement and Jacobian
+    swing_id = model.getFrameId(swing_frame)
+    pin.updateFramePlacement(model, data, swing_id)
+    x_swing = data.oMf[swing_id].translation
+    J_swing = pin.computeFrameJacobian(
+        model, data, q, swing_id, pin.LOCAL_WORLD_ALIGNED
+    )[:3, :]
+
+    # Approximate velocity and Jdot * qd
+    swing_vel = J_swing.dot(qd)
+    x_err = swing_ref - x_swing
+    v_err = -swing_vel
+    acc_des_swing = (0.0
+                     + Kp_swing * x_err
+                     + Kd_swing * v_err)
+    Jdot_swing_qd = np.zeros(3)  # placeholder
+
+    A_swing = J_swing
+    b_swing = acc_des_swing - Jdot_swing_qd
+
+    # 4) Posture task
+    global posture_ref
+    if posture_ref is None:
+        posture_ref = q.copy()
+    q_err = posture_ref - q
+    qd_err = -qd
+    acc_des_post = (0.0
+                    + Kp_post * q_err
+                    + Kd_post * qd_err)
+    A_post = np.eye(nv)
+    b_post = acc_des_post
+
+    # Stack tasks into least-squares cost:
+    w_com = 1.0
+    w_swing = 1.0
+    w_post = 0.1
+    w_reg = 1e-4
+
+    A_tasks = np.vstack([
+        np.sqrt(w_com) * A_com,
+        np.sqrt(w_swing) * A_swing,
+        np.sqrt(w_post) * A_post
+    ])
+    b_tasks = np.concatenate([
+        np.sqrt(w_com) * b_com,
+        np.sqrt(w_swing) * b_swing,
+        np.sqrt(w_post) * b_post
+    ])
+
+    # Cost: 0.5 * ||A_tasks * qdd - b_tasks||^2 + 0.5 * w_reg ||qdd||^2
+    H_qdd = A_tasks.T @ A_tasks + w_reg * np.eye(nv)
+    g_qdd = -A_tasks.T @ b_tasks
+
+    # Decision vector: z = [qdd, tau] (ignore contact forces for simplicity)
+    # Introduce approximate dynamics: M * qdd + h = S.T * tau
+    # so tau = (S^-T) * (M * qdd + h); here S is identity.
+    # We eliminate tau instead of including it in z.
+    H = H_qdd
+    g = g_qdd
+
+    # Equality constraints: contact acceleration (stance foot)
+    support_id = model.getFrameId(support_frame)
+    pin.updateFramePlacement(model, data, support_id)
+    Jc = pin.computeFrameJacobian(
+        model, data, q, support_id, pin.LOCAL_WORLD_ALIGNED
+    )[:3, :]
+    Jcdot_qd = np.zeros(3)  # placeholder
+    Aeq = Jc
+    beq = -Jcdot_qd
+
+    # Inequalities (e.g. joint acceleration bounds)
+    qdd_max = 20.0 * np.ones(nv)
+    qdd_min = -20.0 * np.ones(nv)
+    Aineq = np.vstack([np.eye(nv), -np.eye(nv)])
+    bineq = np.concatenate([qdd_max, -qdd_min])
+
+    return H, g, Aeq, beq, Aineq, bineq
+
+def solve_whole_body_qp(H, g, Aeq, beq, Aineq, bineq):
+    # qpsolvers interface: solve_qp(P, q, G, h, A, b)
+    qdd_star = solve_qp(H, g, Aineq, bineq, Aeq, beq, solver="osqp")
+    return qdd_star
+      </code></pre>
+      <p>
+        In a full implementation, one would: (i) use exact expressions for
+        <strong>\( \dot{\mathbf{J}}_k\dot{q} \)</strong>, (ii) keep
+        <strong>\( \boldsymbol{\lambda} \)</strong> and
+        <strong>\( \boldsymbol{&bsol;tau} \)</strong> as decision variables in
+        the QP, (iii) include friction inequalities, and (iv) wrap this
+        computation inside a real-time control loop.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: C++ Implementation Sketch (Eigen + OSQP-Eigen) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. C++ Implementation Sketch (Eigen + OSQP-Eigen)</h2>
+    <div class="down-content">
+      <p>
+        In C++, it is natural to combine <code>Eigen</code> for linear algebra,
+        <code>pinocchio</code> or another rigid-body library for dynamics, and
+        <code>OSQP-Eigen</code> for QP solving. Below is a minimal sketch that
+        assumes that the task matrices for the legged case have already been
+        assembled into <code>H</code>, <code>g</code>, <code>Aeq</code>, and
+        <code>beq</code>.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+#include &lt;OsqpEigen/OsqpEigen.h&gt;
+
+// H, g, Aeq, beq, Aineq, bineq constructed elsewhere
+struct WholeBodyQP {
+  Eigen::MatrixXd H;
+  Eigen::VectorXd g;
+  Eigen::MatrixXd Aeq;
+  Eigen::VectorXd beq;
+  Eigen::MatrixXd Aineq;
+  Eigen::VectorXd bineq;
+};
+
+Eigen::VectorXd solveWholeBodyQP(const WholeBodyQP&amp; qp) {
+  const int nv = static_cast&lt;int&gt;(qp.H.rows());
+
+  OsqpEigen::Solver solver;
+  solver.settings().setVerbosity(false);
+  solver.settings().setWarmStart(true);
+
+  // OSQP uses sparse matrices
+  solver.data()-&gt;setNumberOfVariables(nv);
+  solver.data()-&gt;setNumberOfConstraints(
+      qp.Aeq.rows() + qp.Aineq.rows()
+  );
+
+  // Build constraint matrix and bounds:
+  Eigen::MatrixXd Aall(qp.Aeq.rows() + qp.Aineq.rows(), nv);
+  Aall << qp.Aeq,
+          qp.Aineq;
+
+  Eigen::VectorXd lower(qp.Aeq.rows() + qp.Aineq.rows());
+  Eigen::VectorXd upper(qp.Aeq.rows() + qp.Aineq.rows());
+
+  // Equalities: Aeq * z = beq
+  lower.head(qp.Aeq.rows()) = qp.beq;
+  upper.head(qp.Aeq.rows()) = qp.beq;
+
+  // Inequalities: Aineq * z &lt;= bineq
+  lower.tail(qp.Aineq.rows()) =
+      Eigen::VectorXd::Constant(qp.Aineq.rows(), -OsqpEigen::INFTY);
+  upper.tail(qp.Aineq.rows()) = qp.bineq;
+
+  solver.data()-&gt;setHessianMatrix(qp.H.sparseView());
+  solver.data()-&gt;setGradient(qp.g);
+  solver.data()-&gt;setLinearConstraintsMatrix(Aall.sparseView());
+  solver.data()-&gt;setLowerBound(lower);
+  solver.data()-&gt;setUpperBound(upper);
+
+  if (!solver.initSolver()) {
+    throw std::runtime_error("OSQP init failed");
+  }
+
+  if (!solver.solve()) {
+    throw std::runtime_error("OSQP solve failed");
+  }
+
+  return solver.getSolution();
+}
+      </code></pre>
+      <p>
+        The robot-specific part is the construction of the
+        <code>WholeBodyQP</code>
+        matrices from CoM, swing-foot, posture tasks and contact/dynamics
+        constraints, exactly as in the Python sketch but using C++ bindings of
+        the robotics library.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Java Implementation Sketch (EJML + ojAlgo) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Java Implementation Sketch (EJML + ojAlgo)</h2>
+    <div class="down-content">
+      <p>
+        While Java is less common in low-level whole-body control, we can still
+        implement the QP using libraries such as <code>EJML</code> (for linear
+        algebra) and <code>ojAlgo</code> (for optimization). The following
+        sketch assumes a simplified QP with only inequality bounds on joint
+        accelerations and lumped tasks into <code>H</code> and <code>g</code>.
+      </p>
+      <pre><code class="language-java">
+import org.ejml.simple.SimpleMatrix;
+import org.ojalgo.optimisation.ExpressionsBasedModel;
+import org.ojalgo.optimisation.Variable;
+import org.ojalgo.optimisation.Optimisation.Result;
+
+public class WholeBodyQPJava {
+
+    public static double[] solveQP(SimpleMatrix H, SimpleMatrix g,
+                                   double[] qddMin, double[] qddMax) {
+
+        int n = H.numRows();
+        ExpressionsBasedModel model = new ExpressionsBasedModel();
+
+        Variable[] qddVars = new Variable[n];
+        for (int i = 0; i &lt; n; ++i) {
+            qddVars[i] = Variable.make("qdd" + i)
+                    .lower(qddMin[i])
+                    .upper(qddMax[i]);
+            model.addVariable(qddVars[i]);
+        }
+
+        // Quadratic objective: 0.5 * qdd^T H qdd + g^T qdd
+        var expr = model.addExpression("cost");
+        for (int i = 0; i &lt; n; ++i) {
+            expr.set(qddVars[i], g.get(i, 0));
+            for (int j = 0; j &lt; n; ++j) {
+                double hij = 0.5 * H.get(i, j);
+                expr.setQuadraticFactor(qddVars[i], qddVars[j], hij);
+            }
+        }
+        expr.weight(1.0);
+
+        Result result = model.minimise();
+        double[] qdd = new double[n];
+        for (int i = 0; i &lt; n; ++i) {
+            qdd[i] = result.get(i).doubleValue();
+        }
+        return qdd;
+    }
+}
+      </code></pre>
+      <p>
+        The dynamics and task construction steps mirror the Python and C++
+        implementations; only the linear algebra and optimization libraries
+        change. The state update and low-level torque commands would typically
+        be handled in a real-time loop written in another language or via JNI.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is widely used for rapid prototyping of whole-body controllers.
+        We can use the Robotics System Toolbox for kinematics/dynamics and
+        <code>quadprog</code> for the QP. A simple script for the legged case
+        is:
+      </p>
+      <pre><code class="language-matlab">
+% Assume rigidBodyTree object 'humanoid' from Robotics System Toolbox
+% and kinematics helpers have been defined.
+function qdd_star = wholeBodyQP_step(humanoid, q, qd, supportBody, swingBody)
+
+  % Compute dynamics
+  [M, C, G] = manipulatorDynamics(humanoid, q, qd);
+  h = C * qd.' + G;
+
+  % CoM Jacobian and position
+  Jcom = centerOfMassJacobian(humanoid, q);
+  pcom = centerOfMass(humanoid, q);
+
+  pcomRef = [0, 0, 0.8];
+  Kp_com = 50; Kd_com = 10;
+
+  vcom = Jcom * qd.';
+  comErr = pcomRef - pcom;
+  comVelErr = -vcom;
+  comAccDes = Kp_com * comErr + Kd_com * comVelErr;
+  JdotComQd = zeros(1, size(Jcom, 2)); % placeholder
+
+  Acom = Jcom;
+  bcom = comAccDes - JdotComQd;
+
+  % Swing foot task
+  swingId = bodyIndex(humanoid, swingBody);
+  [Tswing, Jswing] = forwardKinematics(humanoid, q, swingId);
+  xswing = tform2trvec(Tswing);
+  vswing = Jswing * qd.';
+
+  swingRef = [0.1, 0.1, 0.4];
+  Kp_s = 150; Kd_s = 20;
+  xErr = swingRef - xswing;
+  vErr = -vswing;
+  accSwingDes = Kp_s * xErr + Kd_s * vErr;
+  JdotSwingQd = zeros(1, size(Jswing, 2)); % placeholder
+
+  Aswing = Jswing(1:3, :);
+  bswing = accSwingDes - JdotSwingQd(1:3);
+
+  % Posture task
+  q0 = q; % nominal posture
+  Kp_q = 20; Kd_q = 5;
+  qErr = q0 - q;
+  qdErr = -qd;
+  accPostDes = Kp_q * qErr + Kd_q * qdErr;
+
+  Apost = eye(numel(q));
+  bpost = accPostDes;
+
+  % Stack tasks
+  w_com = 1.0; w_swing = 1.0; w_post = 0.1; w_reg = 1e-4;
+
+  At = [sqrt(w_com) * Acom;
+        sqrt(w_swing) * Aswing;
+        sqrt(w_post) * Apost];
+
+  bt = [sqrt(w_com) * bcom.';
+        sqrt(w_swing) * bswing.';
+        sqrt(w_post) * bpost.'];
+
+  H = At.' * At + w_reg * eye(size(At, 2));
+  f = -At.' * bt;
+
+  % Contact acceleration constraint (holonomic, stance foot)
+  supportId = bodyIndex(humanoid, supportBody);
+  [Tsup, Jsup] = forwardKinematics(humanoid, q, supportId);
+  Jc = Jsup(1:3, :);
+  JcdotQd = zeros(3, 1); % placeholder
+
+  Aeq = Jc;
+  beq = -JcdotQd;
+
+  % Acceleration bounds
+  n = numel(q);
+  qddMax = 20 * ones(n, 1);
+  qddMin = -20 * ones(n, 1);
+  Aineq = [eye(n); -eye(n)];
+  bineq = [qddMax; -qddMin];
+
+  opts = optimoptions('quadprog', 'Display', 'off');
+  qdd_star = quadprog(H, f, Aineq, bineq, Aeq, beq, [], [], [], opts).';
+end
+      </code></pre>
+      <p>
+        In Simulink, this function can be wrapped inside a MATLAB Function block
+        that runs at the control rate; the block inputs are
+        <strong>\( q \)</strong>, <strong>\( \dot{q} \)</strong>, contact
+        information, and reference trajectories, while the outputs are
+        <strong>\( \ddot{q}^{\star} \)</strong> or directly
+        <strong>\( \boldsymbol{&bsol;tau} \)</strong> via
+        <strong>\( \mathbf{M}(q)\ddot{q}^{\star} + \mathbf{h} \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Wolfram Mathematica Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Wolfram Mathematica Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        In Wolfram Mathematica, the acceleration-level QP can be encoded using
+        <code>QuadraticOptimization</code> or <code>NMinimize</code>. The
+        following sketch considers only joint accelerations
+        <strong>\( \ddot{q} \)</strong> as decision variables and aggregates
+        CoM, swing, and posture tasks:
+      </p>
+      <pre><code class="language-mathematica">
+(* Dimensions *)
+nv = 6; (* for example *)
+
+(* Symbolic decision variables for joint accelerations *)
+qdd = Array[qdd, nv];
+
+(* Task matrices and vectors (numeric arrays from kinematics/dynamics) *)
+Acom   = { {(* ... fill with J_com entries ... *)} };
+bcom   = {(* ... com_acc_des - Jdot_com.qd ... *)};
+
+Aswing = { {(* ... J_swing ... *)} };
+bswing = {(* ... swing_acc_des - Jdot_swing.qd ... *)};
+
+Apost  = IdentityMatrix[nv];
+bpost  = {(* ... posture_acc_des ... *)};
+
+wcom   = 1.0;
+wswing = 1.0;
+wpost  = 0.1;
+wreg   = 10.^(-4);
+
+At = Join[
+  Sqrt[wcom]  Acom,
+  Sqrt[wswing] Aswing,
+  Sqrt[wpost] Apost
+];
+
+bt = Join[
+  Sqrt[wcom]  bcom,
+  Sqrt[wswing] bswing,
+  Sqrt[wpost] bpost
+];
+
+H = Transpose[At].At + wreg IdentityMatrix[nv];
+g = -Transpose[At].bt;
+
+(* Contact constraint Jc qdd + Jcdot_qd == 0 *)
+Jc        = { {(* ... stance foot Jacobian rows ... *)} };
+Jcdot_qd  = {(* ... precomputed numeric vector ... *)};
+
+eqConstr = {
+  Jc.qdd + Jcdot_qd == ConstantArray[0, Length[Jcdot_qd]]
+};
+
+(* Acceleration bounds *)
+qddMin = -20 ConstantArray[1, nv];
+qddMax =  20 ConstantArray[1, nv];
+
+ineqConstr = Thread[qddMin &lt;= qdd &lt;= qddMax];
+
+(* Quadratic optimization *)
+cost[qv_] := 1/2 qv.H.qv + g.qv;
+
+sol = NMinimize[
+  { cost[qdd], Join[eqConstr, ineqConstr] },
+  qdd
+];
+
+qddStar = qdd /. Last[sol];
+      </code></pre>
+      <p>
+        In a more advanced setup, one may represent the kinematics symbolically
+        and generate optimized C code from Mathematica, but that lies beyond the
+        scope of this case study.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Contact constraint derivation).</strong>
+        For a stance foot point with Cartesian position
+        <strong>\( \mathbf{x}_c(q) \)</strong>, show that enforcing zero
+        velocity and acceleration at the contact yields the constraint
+        <strong
+          >\( \mathbf{J}_c(q)\ddot{q} + \dot{\mathbf{J}}_c(q,\dot{q})\dot{q} =
+          \mathbf{0} \)</strong
+        >. Explain its physical meaning.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        The stance foot velocity is
+        <strong>\( \dot{\mathbf{x}}_c = \mathbf{J}_c(q)\dot{q} \)</strong>.
+        Differentiating once more in time:
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{\mathbf{x}}_c = \frac{\mathrm{d}}{\mathrm{d}t} \bigl(
+        \mathbf{J}_c(q)\dot{q} \bigr) = \dot{\mathbf{J}}_c(q,\dot{q})\dot{q} +
+        \mathbf{J}_c(q)\ddot{q}. \]
+      </h4>
+      <p>
+        Rigid contact with the environment requires
+        <strong>\( \dot{\mathbf{x}}_c = \mathbf{0} \)</strong> and
+        <strong>\( \ddot{\mathbf{x}}_c = \mathbf{0} \)</strong>. Thus,
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_c(q)\ddot{q} + \dot{\mathbf{J}}_c(q,\dot{q})\dot{q} =
+        \mathbf{0}, \]
+      </h4>
+      <p>
+        which is the desired constraint. Physically, it ensures that the contact
+        point neither moves nor accelerates relative to the ground, preventing
+        slip and lift-off at the acceleration level.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Closed-form solution for 1-DOF two-task QP).</strong>
+        Consider a single joint with acceleration
+        <strong>\( \ddot{q} \)</strong>
+        and two tasks expressed as desired accelerations
+        <strong>\( a_1^{\star} \)</strong> (e.g. CoM-related) and
+        <strong>\( a_2^{\star} \)</strong> (e.g. posture-related). The QP is
+      </p>
+      <h4 class="mathJax">
+        \[ \min_{\ddot{q}} \; \frac{1}{2} w_1(\ddot{q} - a_1^{\star})^2 +
+        \frac{1}{2} w_2(\ddot{q} - a_2^{\star})^2, \]
+      </h4>
+      <p>
+        with <strong>\( w_1, w_2 &gt; 0 \)</strong>. Derive the optimal
+        <strong>\( \ddot{q}^{\star} \)</strong> explicitly.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        Differentiate the cost with respect to <strong>\( \ddot{q} \)</strong>,
+        set the derivative to zero:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial}{\partial \ddot{q}} \left( \frac{1}{2} w_1(\ddot{q} -
+        a_1^{\star})^2 + \frac{1}{2} w_2(\ddot{q} - a_2^{\star})^2 \right) =
+        w_1(\ddot{q} - a_1^{\star}) + w_2(\ddot{q} - a_2^{\star}) = 0. \]
+      </h4>
+      <p>Solving for <strong>\( \ddot{q} \)</strong>:</p>
+      <h4 class="mathJax">
+        \[ (w_1 + w_2)\ddot{q} = w_1 a_1^{\star} + w_2 a_2^{\star}
+        \quad\Rightarrow\quad \ddot{q}^{\star} = \frac{w_1 a_1^{\star} + w_2
+        a_2^{\star}}{w_1 + w_2}. \]
+      </h4>
+      <p>
+        Thus the optimal acceleration is a weighted average of the two task
+        accelerations, consistent with the general multi-task QP structure.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Limit of large task weight and hierarchy).</strong>
+        In the previous problem, assume that task 1 (e.g. CoM regulation) is
+        more important than task 2. Show that, as
+        <strong>\( w_1 \to \infty \)</strong> with
+        <strong>\( w_2 \)</strong> fixed, the solution satisfies
+        <strong>\( \ddot{q}^{\star} \to a_1^{\star} \)</strong>. Interpret this
+        as an approximation of strict task hierarchy.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        We have
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{q}^{\star}(w_1, w_2) = \frac{w_1 a_1^{\star} + w_2
+        a_2^{\star}}{w_1 + w_2}. \]
+      </h4>
+      <p>Rewrite as</p>
+      <h4 class="mathJax">
+        \[ \ddot{q}^{\star} = a_1^{\star} + \frac{w_2}{w_1 + w_2} (a_2^{\star} -
+        a_1^{\star}). \]
+      </h4>
+      <p>
+        As <strong>\( w_1 \to \infty \)</strong>, the factor
+        <strong>\( \frac{w_2}{w_1 + w_2} \to 0 \)</strong>, hence
+      </p>
+      <h4 class="mathJax">
+        \[ \lim_{w_1 \to \infty} \ddot{q}^{\star} = a_1^{\star}. \]
+      </h4>
+      <p>
+        In the limit of very large weight, the solution enforces task 1 exactly
+        while task 2 only influences the solution when there is residual
+        redundancy. This illustrates how large weights approximate strict task
+        priority in a QP, though true hierarchical QPs are numerically more
+        robust.
+      </p>
+
+      <p>
+        <strong
+          >Problem 4 (Stacked task ordering for a legged humanoid).</strong
+        >
+        For the standing-on-one-foot case, propose a priority ordering of the
+        following tasks and discuss the rationale:
+      </p>
+      <ul>
+        <li>(A) Contact consistency for the stance foot.</li>
+        <li>(B) CoM regulation.</li>
+        <li>(C) Swing foot tracking.</li>
+        <li>(D) Posture regularization.</li>
+      </ul>
+      <p>
+        <strong>Solution.</strong>
+        A natural ordering from highest to lowest priority is (A) &rarr; (B)
+        &rarr; (C) &rarr; (D). The reasoning can be summarized by the following
+        schematic:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  ROOT["Start"] --> T1["Highest: stance contact constraints (A)"]
+  T1 --> T2["High: balance via com regulation (B)"]
+  T2 --> T3["Medium: swing foot tracking (C)"]
+  T3 --> T4["Low: posture regularization (D)"]
+  T4 --> SOL["Solve QP and send torques"]
+        </pre>
+      </div>
+      <p>
+        Contact consistency (A) is essential for physical feasibility; breaking
+        it invalidates the whole model. CoM regulation (B) is critical for
+        balance; a loss of CoM control leads to falls. Swing foot tracking (C)
+        is important but can be sacrificed temporarily to avoid losing balance.
+        Posture regularization (D) is purely aesthetic / comfort-related and
+        should never compromise the higher-priority tasks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we applied the general whole-body QP control framework to
+        a concrete legged / humanoid scenario: balancing on one foot while
+        regulating the CoM, tracking a swing-foot trajectory, and maintaining a
+        comfortable posture. We expressed each task as an acceleration-level
+        linear relation in <strong>\( \ddot{q} \)</strong>, aggregated them into
+        a quadratic cost, and enforced dynamics, contact, and actuation limits
+        as equality and inequality constraints.
+      </p>
+      <p>
+        We then showed how to implement this controller sketch in multiple
+        programming environments (Python, C++, Java, MATLAB/Simulink, Wolfram
+        Mathematica), emphasizing the construction of the QP matrices rather
+        than library-specific details. Finally, we solved several analytical
+        problems to deepen intuition about contact constraints, multi-task
+        blending, and hierarchical priorities. These ideas provide a bridge
+        between abstract whole-body control theory and practical implementations
+        on legged and humanoid robots.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. References</h2>
+    <ol>
+      <li>
+        Khatib, O. (1987). A unified approach for motion and force control of
+        robot manipulators: The operational space formulation.
+        <em>IEEE Journal on Robotics and Automation</em>, 3(1), 43–53.
+      </li>
+      <li>
+        Sentis, L., &amp; Khatib, O. (2006). A whole-body control framework for
+        humanoids operating in human environments.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 2641–2648.
+      </li>
+      <li>
+        Saab, L., Ramos, O., Mansard, N., Keith, F., Sou&egrave;res, P., &amp;
+        Fourquet, J.Y. (2013). Dynamic whole-body motion generation under rigid
+        contacts and other unilateral constraints.
+        <em>IEEE Transactions on Robotics</em>, 29(2), 346–362.
+      </li>
+      <li>
+        Escande, A., Mansard, N., &amp; Wieber, P.B. (2014). Hierarchical
+        quadratic programming: Fast online humanoid-robot motion generation.
+        <em>International Journal of Robotics Research</em>, 33(7), 1006–1028.
+      </li>
+      <li>
+        Ott, C., Dietrich, A., &amp; Albu-Sch&auml;ffer, A. (2016). Prioritized
+        multi-task compliance control of redundant manipulators.
+        <em>Automatica</em>, 53, 416–423.
+      </li>
+      <li>
+        Herzog, A., Righetti, L., Grimminger, F., Pastor, P., &amp; Schaal, S.
+        (2016). Balancing experiments on a torque-controlled humanoid with
+        hierarchical inverse dynamics.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 981–988.
+      </li>
+      <li>
+        Kim, J., &amp; Sentis, L. (2014). Prioritized control of humanoid robots
+        with task scaling under physical constraints.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 1449–1454.
+      </li>
+      <li>
+        Wieber, P.B., Tedrake, R., &amp; Kuindersma, S. (2016). Modeling and
+        control of legged robots. In <em>Springer Handbook of Robotics</em> (2nd
+        ed.), 1203–1234.
+      </li>
+      <li>
+        Kuindersma, S., Deits, R., Fallon, M., Valenzuela, A., Dai, H.,
+        Permenter, F., Koolen, T., Marion, P., &amp; Tedrake, R. (2016).
+        Optimization-based locomotion planning, estimation, and control design
+        for the Atlas humanoid robot.
+        <em>Autonomous Robots</em>, 40(3), 429–455.
+      </li>
+      <li>
+        Del Prete, A. (2021). Joint torque control with contact-stable
+        optimization. <em>IEEE Transactions on Robotics</em>, 37(1), 219–237.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Buttons -->
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter14/Lesson4.html">
+          Lesson 4: Prioritization vs Optimality Trade-offs
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Why Combine Learning with Control?
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1997 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 10: Advanced Perception for Manipulation - Lesson 6: Lab: Pose Estimation + Grasp Execution Loop | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 10: Advanced Perception for Manipulation</h1>
+    <h3>
+      <strong>Lesson 6: Lab: Pose Estimation + Grasp Execution Loop</strong>
+    </h3>
+    <p>
+      This lab connects 3D object pose estimation to closed-loop grasp execution
+      on a manipulator. You will build a complete perception-to-action loop that
+      (i) estimates an object pose from depth/point-cloud data, (ii) maps
+      object-frame grasps to robot-frame commands, and (iii) refines execution
+      through re-perception and feedback.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Goals and High-Level Pipeline -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Goals and High-Level Pipeline</h2>
+    <div class="down-content">
+      <p>By the end of this lab, you should be able to:</p>
+      <ul>
+        <li>
+          Implement a pipeline that converts raw sensor data (point cloud or
+          depth image) into an object pose estimate
+          <strong>\( \hat{T}_{bo} \in SE(3) \)</strong> (base frame
+          <strong>\( b \)</strong> to object frame <strong>\( o \)</strong>).
+        </li>
+        <li>
+          Compose this estimate with a grasp defined in the object frame to
+          obtain a target gripper pose <strong>\( \hat{T}_{bg} \)</strong>, and
+          solve inverse kinematics to command the arm.
+        </li>
+        <li>
+          Run a closed loop where perception is repeated, pose is updated, and
+          the commanded trajectory is corrected during the approach to the
+          object.
+        </li>
+        <li>
+          Reason mathematically about how pose estimation uncertainty affects
+          grasp accuracy and closed-loop stability.
+        </li>
+      </ul>
+      <p>We assume:</p>
+      <ul>
+        <li>
+          A calibrated RGB-D or 3D sensor rigidly attached to the robot or
+          world.
+        </li>
+        <li>
+          A known object model with pre-computed grasp candidates in the object
+          frame:
+          <h4 class="mathJax">
+            \[ \mathcal{G} = \{\, T_{og}^{(j)} \in SE(3) \mid j = 1,\dots,n_g
+            \,\}, \]
+          </h4>
+          where <strong>\( g \)</strong> is a gripper frame attached to the hand
+          palm.
+        </li>
+        <li>
+          A motion planning and inverse-kinematics stack from previous chapters
+          (e.g. RRT*/PRM-based planner, IK solver), abstracted as functions
+          <strong>\( \mathrm{IK}(\cdot) \)</strong> and
+          <strong>\( \mathrm{Plan}(\cdot) \)</strong>.
+        </li>
+      </ul>
+      <p>The essential mapping in this lab is:</p>
+      <h4 class="mathJax">
+        \[ \hat{T}_{bo} \;\stackrel{\text{compose with
+        }T_{og}^{(j)}}{\longrightarrow}\; \hat{T}_{bg}^{(j)}
+        \;\stackrel{\mathrm{IK+Plan}}{\longrightarrow}\;
+        \mathbf{q}_{\text{traj}}^{(j)}, \]
+      </h4>
+      <p>followed by closed-loop corrections as new measurements arrive.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Frame Conventions and Transform Composition -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Frame Conventions and Transform Composition</h2>
+    <div class="down-content">
+      <p>Let frames be:</p>
+      <ul>
+        <li><strong>\( b \)</strong>: robot base frame (world for the arm).</li>
+        <li><strong>\( c \)</strong>: camera frame.</li>
+        <li><strong>\( o \)</strong>: object frame.</li>
+        <li><strong>\( g \)</strong>: gripper (hand) frame.</li>
+      </ul>
+      <p>
+        A homogeneous transform from frame <strong>\( b \)</strong> to frame
+        <strong>\( a \)</strong> is:
+      </p>
+      <h4 class="mathJax">
+        \[ T_{ab} = \begin{bmatrix} R_{ab} & \mathbf{t}_{ab} \\ \mathbf{0}^\top
+        & 1 \end{bmatrix}, \quad R_{ab} \in SO(3),\; \mathbf{t}_{ab} \in
+        \mathbb{R}^3. \]
+      </h4>
+      <p>
+        If <strong>\( \mathbf{x}_b \)</strong> is a point in frame
+        <strong>\( b \)</strong>, its coordinates in frame
+        <strong>\( a \)</strong> are:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_a = R_{ab} \mathbf{x}_b + \mathbf{t}_{ab} =
+        \begin{bmatrix} R_{ab} & \mathbf{t}_{ab} \end{bmatrix} \begin{bmatrix}
+        \mathbf{x}_b \\ 1 \end{bmatrix} = T_{ab} \begin{bmatrix} \mathbf{x}_b \\
+        1 \end{bmatrix}. \]
+      </h4>
+      <p>For three frames <strong>\( a,b,c \)</strong>, composition follows:</p>
+      <h4 class="mathJax">\[ T_{ac} = T_{ab} T_{bc}. \]</h4>
+      <p>
+        <strong>Proof sketch.</strong> Start from
+        <strong>\( \mathbf{x}_c \)</strong>, transform to
+        <strong>\( b \)</strong>:
+        <strong
+          >\( \mathbf{x}_b = R_{bc} \mathbf{x}_c + \mathbf{t}_{bc} \)</strong
+        >. Then to <strong>\( a \)</strong>:
+        <strong
+          >\( \mathbf{x}_a = R_{ab} \mathbf{x}_b + \mathbf{t}_{ab} \)</strong
+        >. Substitute and group terms to obtain
+        <strong
+          >\( \mathbf{x}_a = R_{ab} R_{bc} \mathbf{x}_c + (R_{ab}\mathbf{t}_{bc}
+          + \mathbf{t}_{ab}) \)</strong
+        >, which is the affine transformation with homogeneous matrix
+        <strong>\( T_{ab}T_{bc} \)</strong>.
+      </p>
+      <p>
+        In this lab, the camera is rigidly mounted, so we treat the calibration
+        <strong>\( T_{bc} \)</strong> as known. The pose estimator outputs
+        <strong>\( \hat{T}_{co} \)</strong> (object in camera frame), and the
+        grasp database gives <strong>\( T_{og}^{(j)} \)</strong>. The commanded
+        gripper pose in base frame is:
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{T}_{bg}^{(j)} = T_{bc}\,\hat{T}_{co}\,T_{og}^{(j)}. \]
+      </h4>
+      <p>
+        To obtain joint-space targets, we use the forward kinematics map
+        <strong>\( f_{\mathrm{FK}} : \mathbb{R}^n \to SE(3) \)</strong> and
+        solve the inverse kinematics problem:
+      </p>
+      <h4 class="mathJax">
+        \[ f_{\mathrm{FK}}(\mathbf{q}^\ast) = \hat{T}_{bg}^{(j)}, \]
+      </h4>
+      <p>
+        using an IK routine covered in earlier chapters. The motion planner then
+        finds a collision-free trajectory connecting the current joint
+        configuration to <strong>\( \mathbf{q}^\ast \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Pose Estimation as a Least Squares Problem -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Pose Estimation as a Least Squares Problem</h2>
+    <div class="down-content">
+      <p>
+        You have already seen ICP and point-to-point registration in Lesson 1 of
+        this chapter. Here we recall the core least-squares formulation that our
+        implementation will rely on (either directly, or through a library such
+        as Open3D or PCL).
+      </p>
+      <p>
+        Suppose we have <strong>\( N \)</strong> 3D model points in the object
+        frame, <strong>\( \mathbf{m}_i \in \mathbb{R}^3 \)</strong>, and
+        corresponding measured points in the camera frame,
+        <strong>\( \mathbf{p}_i \in \mathbb{R}^3 \)</strong>. The goal is to
+        find rotation <strong>\( R \in SO(3) \)</strong> and translation
+        <strong>\( \mathbf{t} \in \mathbb{R}^3 \)</strong> that minimize:
+      </p>
+      <h4 class="mathJax">
+        \[ J(R,\mathbf{t}) = \sum_{i=1}^{N} \bigl\| R \mathbf{m}_i + \mathbf{t}
+        - \mathbf{p}_i \bigr\|_2^2. \]
+      </h4>
+      <p>
+        Let centroids be
+        <strong
+          >\( \bar{\mathbf{m}} = \tfrac{1}{N}\sum_i \mathbf{m}_i \)</strong
+        >
+        and
+        <strong>\( \bar{\mathbf{p}} = \tfrac{1}{N}\sum_i \mathbf{p}_i \)</strong
+        >, and define centered points
+        <strong
+          >\( \tilde{\mathbf{m}}_i = \mathbf{m}_i - \bar{\mathbf{m}} \)</strong
+        >,
+        <strong
+          >\( \tilde{\mathbf{p}}_i = \mathbf{p}_i - \bar{\mathbf{p}} \)</strong
+        >. Expanding the cost and differentiating with respect to
+        <strong>\( \mathbf{t} \)</strong> gives:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial J}{\partial \mathbf{t}} = 2 \sum_{i=1}^N \bigl( R
+        \mathbf{m}_i + \mathbf{t} - \mathbf{p}_i \bigr) = 0. \]
+      </h4>
+      <p>Setting this derivative to zero yields:</p>
+      <h4 class="mathJax">
+        \[ N \,\mathbf{t} + R \sum_i \mathbf{m}_i - \sum_i \mathbf{p}_i = 0
+        \quad\Rightarrow\quad \mathbf{t}^\ast = \bar{\mathbf{p}} - R
+        \bar{\mathbf{m}}. \]
+      </h4>
+      <p>
+        Therefore, the translation is determined by the rotation and centroids.
+        Substituting <strong>\( \mathbf{t}^\ast \)</strong> back into the cost
+        reduces the problem to:
+      </p>
+      <h4 class="mathJax">
+        \[ J(R) = \sum_{i=1}^{N} \bigl\| R \tilde{\mathbf{m}}_i -
+        \tilde{\mathbf{p}}_i \bigr\|_2^2. \]
+      </h4>
+      <p>Define the cross-covariance matrix:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{S} = \sum_{i=1}^{N} \tilde{\mathbf{p}}_i
+        \tilde{\mathbf{m}}_i^\top. \]
+      </h4>
+      <p>
+        The optimal rotation is obtained via an SVD
+        <strong
+          >\( \mathbf{S} = \mathbf{U} \boldsymbol{\Sigma} \mathbf{V}^\top
+          \)</strong
+        >:
+      </p>
+      <h4 class="mathJax">
+        \[ R^\ast = \mathbf{U} \begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 &
+        \det(\mathbf{U}\mathbf{V}^\top) \end{bmatrix} \mathbf{V}^\top, \]
+      </h4>
+      <p>
+        followed by
+        <strong
+          >\( \mathbf{t}^\ast = \bar{\mathbf{p}} - R^\ast \bar{\mathbf{m}}
+          \)</strong
+        >. Iterative ICP variants update correspondences between points or
+        surfaces and re-solve this problem until convergence.
+      </p>
+      <p>
+        In practice, you will rely on library implementations of ICP, but it is
+        crucial to understand that each ICP iteration is solving a least-squares
+        registration of this form.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Uncertainty Propagation from Pose to Grasp -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Uncertainty Propagation from Pose to Grasp</h2>
+    <div class="down-content">
+      <p>
+        Pose estimation is noisy. Let
+        <strong>\( \mathbf{x} \in \mathbb{R}^6 \)</strong> be a minimal
+        parameterization of the object pose (for example, a 3D translation and a
+        3D axis-angle vector). Assume a Gaussian posterior:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x} \sim \mathcal{N}(\hat{\mathbf{x}}, \boldsymbol{\Sigma}_x).
+        \]
+      </h4>
+      <p>
+        A candidate grasp pose in the base frame is a deterministic function of
+        the pose parameters:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{y} = f(\mathbf{x}) = \operatorname{Log}_{SE(3)}\!\bigl(
+        T_{bc}\,\mathrm{Exp}_{SE(3)}(\mathbf{x})\,T_{og}^{(j)} \bigr), \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{y} \in \mathbb{R}^6 \)</strong> is a minimal
+        parameterization of the gripper pose, and
+        <strong>\( \mathrm{Exp}_{SE(3)}, \operatorname{Log}_{SE(3)} \)</strong>
+        are the exponential and logarithm maps (you can treat them abstractly
+        here, since your implementation will often work directly with
+        homogeneous matrices).
+      </p>
+      <p>
+        Linearizing <strong>\( f \)</strong> about
+        <strong>\( \hat{\mathbf{x}} \)</strong>, we have:
+      </p>
+      <h4 class="mathJax">
+        \[ f(\mathbf{x}) \approx f(\hat{\mathbf{x}}) +
+        \mathbf{J}_f(\hat{\mathbf{x}})\, (\mathbf{x} - \hat{\mathbf{x}}), \]
+      </h4>
+      <p>
+        where
+        <strong
+          >\( \mathbf{J}_f(\hat{\mathbf{x}}) \in \mathbb{R}^{6 \times 6}
+          \)</strong
+        >
+        is the Jacobian of <strong>\( f \)</strong> with respect to pose
+        parameters. It follows that:
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{Cov}[\mathbf{y}] \approx \boldsymbol{\Sigma}_y =
+        \mathbf{J}_f(\hat{\mathbf{x}}) \,\boldsymbol{\Sigma}_x\,
+        \mathbf{J}_f(\hat{\mathbf{x}})^\top. \]
+      </h4>
+      <p>
+        This covariance describes the spatial uncertainty of the gripper target
+        pose induced by pose estimation noise. In practice:
+      </p>
+      <ul>
+        <li>
+          Large eigenvalues of
+          <strong>\( \boldsymbol{\Sigma}_y \)</strong> indicate directions in
+          which the grasp pose is poorly constrained.
+        </li>
+        <li>
+          You can reject grasp candidates for which the probability of remaining
+          inside the friction-cone-consistent region is low under this
+          uncertainty.
+        </li>
+      </ul>
+      <p>
+        A simple approximation for translational uncertainty is to track only
+        the covariance of the grasp center position
+        <strong>\( \mathbf{p}_g \)</strong>, obtained by propagating the
+        translational part of the Jacobian.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Closed-Loop Correction and Stability (Discrete-Time View) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Closed-Loop Correction and Stability (Discrete-Time View)</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \mathbf{e}_k \in \mathbb{R}^6 \)</strong> be the pose
+        error between the desired grasp pose and the current end-effector pose
+        at the <strong>\( k \)</strong>-th perception update, expressed in some
+        error coordinate (for example, twist coordinates in the gripper frame).
+      </p>
+      <p>A simple discrete-time correction law is:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{e}_{k+1} = ( \mathbf{I} - \mathbf{K} )\,\mathbf{e}_k +
+        \mathbf{w}_k, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{K} \in \mathbb{R}^{6 \times 6} \)</strong> is a
+        gain matrix, and <strong>\( \mathbf{w}_k \)</strong> captures pose
+        estimation noise and unmodeled disturbances. In the noise-free case
+        <strong>\( \mathbf{w}_k = 0 \)</strong>, the solution is:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{e}_k = (\mathbf{I} - \mathbf{K})^k \mathbf{e}_0. \]
+      </h4>
+      <p>
+        For a scalar one-dimensional error with gain
+        <strong>\( K = k \in \mathbb{R} \)</strong> (so the update is
+        <strong>\( e_{k+1} = (1 - k)e_k \)</strong>), we have:
+      </p>
+      <h4 class="mathJax">\[ e_k = (1 - k)^k e_0. \]</h4>
+      <p>
+        Asymptotic stability requires
+        <strong>\( |1 - k| &lt; 1 \)</strong>, i.e.,
+        <strong>\( 0 &lt; k &lt; 2 \)</strong>. In the 6D case, the condition
+        generalizes to requiring the spectral radius
+        <strong>\( \rho(\mathbf{I} - \mathbf{K}) &lt; 1 \)</strong>, so that all
+        eigenvalues lie strictly inside the unit circle. In the presence of
+        noise <strong>\( \mathbf{w}_k \)</strong>, a stationary covariance
+        <strong>\( \boldsymbol{\Sigma}_e \)</strong> solves the discrete
+        Lyapunov equation:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\Sigma}_e = (\mathbf{I} - \mathbf{K})\,
+        \boldsymbol{\Sigma}_e\, (\mathbf{I} - \mathbf{K})^\top +
+        \boldsymbol{\Sigma}_w, \]
+      </h4>
+      <p>
+        where <strong>\( \boldsymbol{\Sigma}_w \)</strong> is the covariance of
+        <strong>\( \mathbf{w}_k \)</strong>. This shows the classic trade-off:
+        larger gains reduce deterministic error faster but amplify measurement
+        noise in steady state.
+      </p>
+      <p>
+        In your implementation, you will not explicitly solve this Lyapunov
+        equation; instead, you will tune the gains and observation rate and
+        verify empirically that the approach is stable and robust for the given
+        object and robot.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Algorithmic Structure of the Pose–Grasp Loop (Diagram) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Algorithmic Structure of the Pose–Grasp Loop</h2>
+    <div class="down-content">
+      <p>
+        The perception-to-grasp loop combines pose estimation, grasp selection,
+        motion planning, and execution with re-perception. A high-level view is:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Start loop (k = 0)"] --> B["Capture depth frame / point cloud"]
+  B --> C["Segment object point cloud"]
+  C --> D["Estimate pose T_co(k) via registration"]
+  D --> E["Compose T_bg_j(k) = T_bc * T_co(k) * T_og_j"]
+  E --> F["Score grasps Q_j and select argmax_j Q_j"]
+  F --> G["Plan motion and send trajectory to controller"]
+  G --> H["Execute approach and close gripper"]
+  H --> I{"Success detected?"}
+  I -->|yes| J["Lift and place object"]
+  I -->|no| K["Increment k, optionally update view"]
+  K --> B
+        </pre>
+      </div>
+      <p>
+        The loop terminates either when a grasp succeeds
+        (tactile/force/pose-based criterion) or when a maximum number of
+        attempts is reached.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Lab — Open3D + Motion Planning Skeleton -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab &mdash; Pose Estimation and Grasp Execution</h2>
+    <div class="down-content">
+      <p>
+        In Python we can combine <code>numpy</code> for linear algebra,
+        <code>open3d</code> for point-cloud ICP, and a ROS-based motion planning
+        stack (e.g. MoveIt Python bindings). Below is a simplified skeleton that
+        illustrates the main elements of the loop.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+import open3d as o3d
+
+# Assume: T_bc is known (4x4 numpy array)
+# Assume: grasps_og is a list of 4x4 numpy arrays T_og_j
+
+def estimate_pose_icp(model_pcd, scene_pcd, init_T=None):
+    if init_T is None:
+        init_T = np.eye(4)
+    reg = o3d.pipelines.registration.registration_icp(
+        model_pcd,
+        scene_pcd,
+        max_correspondence_distance=0.01,
+        init=init_T,
+        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+    )
+    return reg.transformation, reg.fitness, reg.inlier_rmse
+
+def transform_grasp_candidates(T_bc, T_co, grasps_og):
+    T_bg_list = []
+    for T_og in grasps_og:
+        T_bg = T_bc @ T_co @ T_og
+        T_bg_list.append(T_bg)
+    return T_bg_list
+
+def score_grasp(T_bg):
+    # Placeholder for a score based on reachability, clearance, wrench metric, etc.
+    # For this lab, you might plug in a precomputed grasp quality stored with T_og.
+    return 1.0
+
+def select_best_grasp(T_bc, T_co, grasps_og):
+    T_bg_list = transform_grasp_candidates(T_bc, T_co, grasps_og)
+    scores = [score_grasp(T_bg) for T_bg in T_bg_list]
+    idx_best = int(np.argmax(scores))
+    return T_bg_list[idx_best], scores[idx_best]
+
+def ik_solve(T_bg_target):
+    # Interface to your IK solver from earlier chapters.
+    # Returns joint vector q_star or None if infeasible.
+    raise NotImplementedError
+
+def plan_and_execute(q_star):
+    # Interface to your planner and controller (e.g. MoveIt).
+    # Should send a trajectory to the robot and wait for completion.
+    raise NotImplementedError
+
+def capture_scene_point_cloud():
+    # Interface to a ROS subscriber or simulator API that returns an Open3D point cloud
+    raise NotImplementedError
+
+def run_pose_grasp_loop(
+    model_pcd,
+    T_bc,
+    grasps_og,
+    max_attempts=5,
+):
+    T_co_init = np.eye(4)
+    for k in range(max_attempts):
+        scene_pcd = capture_scene_point_cloud()
+        T_co, fitness, rmse = estimate_pose_icp(model_pcd, scene_pcd, init_T=T_co_init)
+
+        T_bg_best, score = select_best_grasp(T_bc, T_co, grasps_og)
+
+        q_star = ik_solve(T_bg_best)
+        if q_star is None:
+            continue
+
+        plan_and_execute(q_star)
+
+        # Here you would check success via tactile / force / post-grasp pose
+        success = False  # replace with real condition
+        if success:
+            break
+
+        # Use latest pose as initialization for the next ICP call
+        T_co_init = T_co
+      </code></pre>
+      <p>
+        The key robotics-specific components are delegated to specialized
+        subsystems: pose estimation via ICP, grasp scoring via grasp metrics,
+        and planning via your existing motion planner. The loop itself is
+        conceptually simple but must be carefully engineered to handle failures
+        and outliers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Lab — Eigen, PCL, and a Planning Hook -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Lab &mdash; Eigen, PCL, and Planning Hook</h2>
+    <div class="down-content">
+      <p>
+        In C++, we typically use <code>Eigen</code> for linear algebra and
+        <code>PCL</code> for 3D perception, with a motion planning stack such as
+        MoveIt. The snippet below abstracts away the ROS integration and focuses
+        on transformations and function interfaces.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+#include &lt;vector&gt;
+
+// Forward declarations for perception and planning hooks
+Eigen::Matrix4f estimatePoseICP(
+    const Eigen::MatrixXf&amp; model_points,
+    const Eigen::MatrixXf&amp; scene_points,
+    const Eigen::Matrix4f&amp; T_init
+);
+
+bool ikSolve(
+    const Eigen::Matrix4f&amp; T_bg_target,
+    Eigen::VectorXf&amp; q_star
+);
+
+bool planAndExecute(
+    const Eigen::VectorXf&amp; q_star
+);
+
+// Compose base-to-gripper transform from base-to-camera, camera-to-object,
+// and object-to-gripper
+Eigen::Matrix4f composeGrasp(
+    const Eigen::Matrix4f&amp; T_bc,
+    const Eigen::Matrix4f&amp; T_co,
+    const Eigen::Matrix4f&amp; T_og
+) {
+    return T_bc * T_co * T_og;
+}
+
+void poseGraspLoop(
+    const Eigen::MatrixXf&amp; model_points,
+    const Eigen::Matrix4f&amp; T_bc,
+    const std::vector&lt;Eigen::Matrix4f&gt;&amp; grasps_og,
+    int max_attempts
+) {
+    Eigen::Matrix4f T_co_init = Eigen::Matrix4f::Identity();
+
+    for (int k = 0; k &lt; max_attempts; ++k) {
+        Eigen::MatrixXf scene_points;
+        // TODO: fill scene_points from sensor or simulator
+
+        Eigen::Matrix4f T_co = estimatePoseICP(model_points, scene_points, T_co_init);
+
+        // For simplicity, choose the first grasp; in practice score them.
+        Eigen::Matrix4f T_bg = composeGrasp(T_bc, T_co, grasps_og[0]);
+
+        Eigen::VectorXf q_star;
+        bool ik_ok = ikSolve(T_bg, q_star);
+        if (!ik_ok) {
+            T_co_init = T_co;
+            continue;
+        }
+
+        bool exec_ok = planAndExecute(q_star);
+        if (exec_ok) {
+            break;
+        }
+
+        T_co_init = T_co;
+    }
+}
+      </code></pre>
+      <p>
+        In your project code, you would implement
+        <code>estimatePoseICP</code> using PCL registration routines, and
+        <code>planAndExecute</code> using your preferred motion planning
+        library.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Lab — Matrix-Based Implementation Skeleton -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Lab &mdash; Matrix-Based Implementation Skeleton</h2>
+    <div class="down-content">
+      <p>
+        Java is less common for mainstream manipulation, but matrix-based
+        implementations can be built with libraries such as EJML. Below is a
+        minimal example using plain 2D arrays to emphasize the structure rather
+        than the specific library.
+      </p>
+      <pre><code class="language-java">
+public class PoseGraspLoop {
+
+    // 4x4 matrix multiplication
+    public static double[][] mul4x4(double[][] A, double[][] B) {
+        double[][] C = new double[4][4];
+        for (int i = 0; i != 4; ++i) {
+            for (int j = 0; j != 4; ++j) {
+                double s = 0.0;
+                for (int k = 0; k != 4; ++k) {
+                    s += A[i][k] * B[k][j];
+                }
+                C[i][j] = s;
+            }
+        }
+        return C;
+    }
+
+    public static double[][] composeGrasp(
+        double[][] T_bc,
+        double[][] T_co,
+        double[][] T_og
+    ) {
+        return mul4x4(mul4x4(T_bc, T_co), T_og);
+    }
+
+    // Placeholders for perception and planning
+    public static double[][] estimatePoseICP(
+        double[][] modelPoints,
+        double[][] scenePoints,
+        double[][] T_init
+    ) {
+        // Call into native or library code
+        return T_init;
+    }
+
+    public static double[] ikSolve(double[][] T_bg_target) {
+        // Call IK solver; return joint configuration or null if infeasible
+        return null;
+    }
+
+    public static boolean planAndExecute(double[] qStar) {
+        // Send trajectory to robot controller
+        return false;
+    }
+
+    public static void runLoop(
+        double[][] modelPoints,
+        double[][] T_bc,
+        double[][][] grasps_og,
+        int maxAttempts
+    ) {
+        double[][] T_co_init = new double[4][4];
+        for (int i = 0; i != 4; ++i) {
+            T_co_init[i][i] = 1.0;
+        }
+
+        for (int k = 0; k != maxAttempts; ++k) {
+            double[][] scenePoints = {}; // fill from sensor or simulator
+
+            double[][] T_co = estimatePoseICP(modelPoints, scenePoints, T_co_init);
+
+            double[][] T_bg = composeGrasp(T_bc, T_co, grasps_og[0]);
+
+            double[] qStar = ikSolve(T_bg);
+            if (qStar == null) {
+                T_co_init = T_co;
+                continue;
+            }
+
+            boolean execOk = planAndExecute(qStar);
+            if (execOk) {
+                break;
+            }
+
+            T_co_init = T_co;
+        }
+    }
+}
+      </code></pre>
+      <p>
+        In a real system you would replace the stubs with JNI bindings to
+        robotics libraries or a Java-native robotics framework.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      10. MATLAB/Simulink Lab &mdash; Pose Composition and Model-Based Control
+    </h2>
+    <div class="down-content">
+      <p>
+        MATLAB provides convenient robotics toolboxes and Simulink integration
+        for real-time execution. Here is a script that:
+      </p>
+      <ul>
+        <li>Composes base-to-gripper transforms.</li>
+        <li>
+          Uses an inverse kinematics solver for a <code>rigidBodyTree</code>.
+        </li>
+        <li>
+          Sketches how to integrate the perception-to-grasp loop in Simulink.
+        </li>
+      </ul>
+      <pre><code class="language-matlab">
+% Assume: robot is a robotics.RigidBodyTree
+%        T_bc (4x4), T_co (4x4), grasps_og cell array of 4x4 matrices
+
+function T_bg = composeGrasp(T_bc, T_co, T_og)
+    T_bg = T_bc * T_co * T_og;
+end
+
+% Example IK call
+function qStar = solveIK(robot, T_bg_target)
+    ik = inverseKinematics("RigidBodyTree", robot);
+    weights = [1 1 1 1 1 1];
+    initialGuess = robot.homeConfiguration;
+    [configSol, ~] = ik(robot.EndEffector, T_bg_target, weights, initialGuess);
+    qStar = [configSol.JointPosition];
+end
+
+% High-level loop (to be called from a Simulink MATLAB Function block)
+function [qCmd, success] = poseGraspStep( ...
+    robot, T_bc, T_co, grasps_og, maxAttempts, k)
+
+    persistent T_co_init
+    if isempty(T_co_init)
+        T_co_init = eye(4);
+    end
+
+    % In practice, T_co would come from a ROS topic or sensor block
+    % Here we take T_co as input to this step
+
+    T_bg = composeGrasp(T_bc, T_co, grasps_og{1});
+
+    qStar = solveIK(robot, T_bg);
+
+    % Plan a simple joint-space interpolation (for illustration)
+    qCurrent = [robot.homeConfiguration.JointPosition];
+    nSteps = 50;
+    qTrajectory = zeros(numel(qStar), nSteps);
+    for i = 1:numel(qStar)
+        qTrajectory(i, :) = linspace(qCurrent(i), qStar(i), nSteps);
+    end
+
+    qCmd = qTrajectory(:, end);  % last point as instantaneous command
+    success = true;
+
+    T_co_init = T_co;
+end
+
+% Sketch of Simulink integration (to be built graphically):
+% 1) ROS Subscribe block for point cloud
+% 2) MATLAB Function block "PoseEstimationICP" that outputs T_co
+% 3) MATLAB Function block "PoseGraspStep" (above) that outputs qCmd
+% 4) ROS Publish block for joint trajectory or joint targets
+      </code></pre>
+      <p>
+        In Simulink, this logic is implemented as a combination of ROS I/O
+        blocks, MATLAB Function blocks for ICP and grasp composition, and a
+        controller that runs at a fixed sample time.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      11. Wolfram Mathematica Lab &mdash; Symbolic and Numeric Pose–Grasp
+      Composition
+    </h2>
+    <div class="down-content">
+      <p>
+        Wolfram Mathematica is well suited for prototyping symbolic computations
+        and for verifying transformation and uncertainty formulas before coding
+        them in a real-time system.
+      </p>
+      <pre><code class="language-mathematica">
+(* Homogeneous transform from rotation matrix R (3x3) and translation t (3x1) *)
+HomogeneousTransform[R_, t_] := ArrayFlatten[{
+  {R, t},
+  
+}];
+
+(* Compose transforms: T_ab * T_bc *)
+ComposeTransform[T1_, T2_] := T1 . T2;
+
+(* Example: base-to-camera, camera-to-object, object-to-gripper *)
+Tbc = IdentityMatrix[4];
+Tco = HomogeneousTransform[
+  RotationMatrix[Pi/4, {0, 0, 1}],
+  { {0.1}, {0.0}, {0.2} }
+];
+Tog = HomogeneousTransform[
+  RotationMatrix[Pi/2, {0, 1, 0}],
+  { {0.0}, {0.0}, {0.05} }
+];
+
+Tbg = ComposeTransform[Tbc, ComposeTransform[Tco, Tog]] // Simplify;
+
+(* Linearization of pose-to-grasp map with respect to small perturbations dx *)
+(* Here we treat the pose parameters as symbolic variables *)
+dx = Array[Subscript[dx, #] &, 6];
+(* Symbolic Jacobian J_f could be derived by choosing a specific parameterization
+   (e.g., axis-angle for rotation, t for translation) and differentiating the
+   elements of Tbg with respect to those parameters. *)
+
+(* Example numerical evaluation of propagated covariance *)
+SigmaX = DiagonalMatrix[{1.*10^-4, 1.*10^-4, 1.*10^-4, 1.*10^-4, 1.*10^-4, 1.*10^-4}];
+Jf = IdentityMatrix[6]; (* placeholder for actual Jacobian *)
+SigmaY = Jf . SigmaX . Transpose[Jf];
+Eigenvalues[SigmaY]
+      </code></pre>
+      <p>
+        Symbolic differentiation in Mathematica can be used to derive
+        closed-form Jacobians for the pose-to-grasp map, which can then be
+        exported to other languages if needed.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Secondary Diagram — Control and Re-Perception Loop -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Control and Re-Perception Loop (Conceptual Diagram)</h2>
+    <div class="down-content">
+      <p>
+        The next diagram emphasizes the feedback nature of the loop, where pose
+        errors guide new control commands and new sensor views.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sensor frame data (point cloud / depth)"] --> P["Pose estimator: T_co(k)"]
+  P --> GSEL["Grasp mapping and selection"]
+  GSEL --> CTRL["IK + planner: joint trajectory"]
+  CTRL --> ROBOT["Robot execution (approach, close, lift)"]
+  ROBOT --> OBS["Success / failure detection"]
+  OBS -->|failure| VIEW["Update view / camera pose"]
+  VIEW --> S
+  OBS -->|success| DONE["End loop"]
+        </pre>
+      </div>
+      <p>
+        This architecture connects naturally to active perception (from the
+        previous lesson): when failures occur, the robot may deliberately move
+        to poses that reduce occlusions and improve the conditioning of the pose
+        estimation problem.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Frame Composition Identity):</strong>
+        Let <strong>\( T_{bc} \)</strong> be the base-to-camera transform,
+        <strong>\( T_{co} \)</strong> the camera-to-object transform, and
+        <strong>\( T_{og} \)</strong> the object-to-gripper transform for a
+        candidate grasp. Show that the base-to-gripper transform is
+        <strong>\( T_{bg} = T_{bc} T_{co} T_{og} \)</strong>, and verify this by
+        writing the corresponding affine transformations on a point
+        <strong>\( \mathbf{x}_g \)</strong> in the gripper frame.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A point in the gripper frame <strong>\( \mathbf{x}_g \)</strong> is
+        mapped to the object frame as
+        <strong
+          >\( \mathbf{x}_o = R_{og} \mathbf{x}_g + \mathbf{t}_{og} \)</strong
+        >, to the camera frame as
+        <strong
+          >\( \mathbf{x}_c = R_{co} \mathbf{x}_o + \mathbf{t}_{co} \)</strong
+        >, and to the base frame as
+        <strong
+          >\( \mathbf{x}_b = R_{bc} \mathbf{x}_c + \mathbf{t}_{bc} \)</strong
+        >.
+      </p>
+      <p>Substituting, we have:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_b = R_{bc}\bigl( R_{co}(R_{og}\mathbf{x}_g +
+        \mathbf{t}_{og}) + \mathbf{t}_{co} \bigr) + \mathbf{t}_{bc}. \]
+      </h4>
+      <p>Expanding gives:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_b = (R_{bc} R_{co} R_{og})\,\mathbf{x}_g + \bigl( R_{bc}
+        R_{co} \mathbf{t}_{og} + R_{bc} \mathbf{t}_{co} + \mathbf{t}_{bc}
+        \bigr). \]
+      </h4>
+      <p>
+        This is the affine transformation associated with the homogeneous matrix
+        <strong>\( T_{bg} = T_{bc} T_{co} T_{og} \)</strong>. Thus, composing
+        the three transforms yields the correct base-to-gripper transform.
+      </p>
+
+      <p>
+        <strong
+          >Problem 2 (Translation Closed Form in Least Squares Pose):</strong
+        >
+        In the pose estimation problem of Section 3, derive explicitly the
+        optimal translation <strong>\( \mathbf{t}^\ast \)</strong> given a fixed
+        rotation <strong>\( R \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The cost is
+        <strong
+          >\( J(R,\mathbf{t}) = \sum_i \lVert R\mathbf{m}_i + \mathbf{t} -
+          \mathbf{p}_i \rVert_2^2 \)</strong
+        >. Differentiating:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial J}{\partial \mathbf{t}} = 2 \sum_i (R\mathbf{m}_i +
+        \mathbf{t} - \mathbf{p}_i). \]
+      </h4>
+      <p>
+        Setting
+        <strong>\( \frac{\partial J}{\partial \mathbf{t}} = 0 \)</strong> gives:
+      </p>
+      <h4 class="mathJax">
+        \[ N\mathbf{t} + R \sum_i \mathbf{m}_i - \sum_i \mathbf{p}_i = 0
+        \quad\Rightarrow\quad \mathbf{t}^\ast = \bar{\mathbf{p}} - R
+        \bar{\mathbf{m}}, \]
+      </h4>
+      <p>
+        where
+        <strong
+          >\( \bar{\mathbf{m}} = \tfrac{1}{N}\sum_i \mathbf{m}_i \)</strong
+        >
+        and
+        <strong>\( \bar{\mathbf{p}} = \tfrac{1}{N}\sum_i \mathbf{p}_i \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Scalar Gain Condition):</strong>
+        Consider the scalar closed-loop error update
+        <strong>\( e_{k+1} = (1 - k)e_k \)</strong> from Section 5, with
+        <strong>\( k \in \mathbb{R} \)</strong> and no noise. Prove that
+        <strong>\( e_k \to 0 \)</strong> as
+        <strong>\( k \to \infty \)</strong> if and only if
+        <strong>\( 0 &lt; k &lt; 2 \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The closed-form solution is
+        <strong>\( e_k = (1 - k)^k e_0 \)</strong>. This converges to zero if
+        and only if the magnitude of the base is strictly less than one:
+        <strong>\( |1 - k| &lt; 1 \)</strong>. Solving the inequality:
+      </p>
+      <h4 class="mathJax">
+        \[ |1 - k| &lt; 1 \quad\Leftrightarrow\quad -1 &lt; 1 - k &lt; 1
+        \quad\Leftrightarrow\quad 0 &lt; k &lt; 2. \]
+      </h4>
+      <p>
+        Thus, the scalar proportional gain must satisfy
+        <strong>\( 0 &lt; k &lt; 2 \)</strong> for asymptotic stability.
+      </p>
+
+      <p>
+        <strong>Problem 4 (First-Order Uncertainty Propagation):</strong>
+        Let
+        <strong
+          >\( \mathbf{x} \sim \mathcal{N}(\hat{\mathbf{x}},
+          \boldsymbol{\Sigma}_x) \)</strong
+        >
+        and <strong>\( \mathbf{y} = f(\mathbf{x}) \)</strong>, where
+        <strong>\( f \)</strong> is differentiable at
+        <strong>\( \hat{\mathbf{x}} \)</strong>. Show that under first-order
+        linearization, <strong>\( \mathbf{y} \)</strong> is approximately
+        Gaussian with covariance
+        <strong
+          >\( \boldsymbol{\Sigma}_y \approx \mathbf{J}_f(\hat{\mathbf{x}})\,
+          \boldsymbol{\Sigma}_x\,\mathbf{J}_f(\hat{\mathbf{x}})^\top \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Linearizing:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{y} = f(\mathbf{x}) \approx f(\hat{\mathbf{x}}) +
+        \mathbf{J}_f(\hat{\mathbf{x}})\, (\mathbf{x} - \hat{\mathbf{x}}). \]
+      </h4>
+      <p>
+        Let
+        <strong>\( \delta\mathbf{x} = \mathbf{x} - \hat{\mathbf{x}} \)</strong>,
+        so
+        <strong
+          >\( \delta\mathbf{x} \sim \mathcal{N}(\mathbf{0},
+          \boldsymbol{\Sigma}_x) \)</strong
+        >. Then the perturbation in <strong>\( \mathbf{y} \)</strong> is:
+      </p>
+      <h4 class="mathJax">
+        \[ \delta\mathbf{y} \approx
+        \mathbf{J}_f(\hat{\mathbf{x}})\,\delta\mathbf{x}, \]
+      </h4>
+      <p>
+        which is a linear transformation of a Gaussian vector. Therefore,
+        <strong>\( \delta\mathbf{y} \)</strong> is Gaussian with zero mean and
+        covariance:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\Sigma}_y = \mathbf{J}_f(\hat{\mathbf{x}})
+        \,\boldsymbol{\Sigma}_x\, \mathbf{J}_f(\hat{\mathbf{x}})^\top. \]
+      </h4>
+      <p>
+        Hence,
+        <strong
+          >\( \mathbf{y} \approx \mathcal{N}(f(\hat{\mathbf{x}}),
+          \boldsymbol{\Sigma}_y) \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Pose Error and Grasp Offset):</strong>
+        Suppose the true object pose is
+        <strong>\( T_{bo}^{\text{true}} \)</strong> and the estimate used for
+        control is
+        <strong>\( \hat{T}_{bo} = T_{bo}^{\text{true}} \Delta T \)</strong>,
+        where <strong>\( \Delta T \in SE(3) \)</strong> is a
+        right-multiplicative error close to identity. For a fixed object-frame
+        grasp <strong>\( T_{og} \)</strong>, show that the commanded gripper
+        pose <strong>\( \hat{T}_{bg} = \hat{T}_{bo} T_{og} \)</strong> differs
+        from the ideal pose
+        <strong
+          >\( T_{bg}^{\text{true}} = T_{bo}^{\text{true}} T_{og} \)</strong
+        >
+        by the same group error <strong>\( \Delta T \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        By definition,
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{T}_{bg} = \hat{T}_{bo} T_{og} = T_{bo}^{\text{true}} \Delta T
+        T_{og} = T_{bo}^{\text{true}} T_{og} \bigl( T_{og}^{-1} \Delta T T_{og}
+        \bigr). \]
+      </h4>
+      <p>
+        The ideal gripper pose is
+        <strong>\( T_{bg}^{\text{true}} = T_{bo}^{\text{true}} T_{og} \)</strong
+        >. Thus:
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{T}_{bg} = T_{bg}^{\text{true}} \,\Delta T_g, \quad \Delta T_g =
+        T_{og}^{-1} \Delta T T_{og}. \]
+      </h4>
+      <p>
+        Hence, the gripper pose error is the conjugation of
+        <strong>\( \Delta T \)</strong> by <strong>\( T_{og} \)</strong>. For
+        small pose errors, the twist representation of
+        <strong>\( \Delta T_g \)</strong> is approximately the same as that of
+        <strong>\( \Delta T \)</strong>, up to a frame rotation, so the
+        magnitude of the pose error directly reflects the magnitude of the
+        estimation error.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. Summary</h2>
+    <div class="down-content">
+      <p>In this lab you integrated perception and manipulation by:</p>
+      <ul>
+        <li>
+          Using 3D registration (ICP or related methods) to estimate object pose
+          <strong>\( \hat{T}_{bo} \)</strong> from point clouds.
+        </li>
+        <li>
+          Composing this estimate with object-frame grasp templates
+          <strong>\( T_{og}^{(j)} \)</strong> to obtain gripper targets
+          <strong>\( \hat{T}_{bg}^{(j)} \)</strong>.
+        </li>
+        <li>
+          Feeding these targets into IK and motion planning routines to produce
+          grasp execution trajectories.
+        </li>
+        <li>
+          Closing the loop with repeated perception and a simple discrete-time
+          correction law, and analyzing stability and uncertainty propagation.
+        </li>
+      </ul>
+      <p>
+        This pose estimation plus grasp execution loop is a central building
+        block of advanced manipulation systems. Subsequent chapters build on
+        this structure with learning from demonstration, reinforcement learning,
+        and sim-to-real transfer.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 15: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>15. References</h2>
+    <ol>
+      <li>
+        Horn, B.K.P. (1987). Closed-form solution of absolute orientation using
+        unit quaternions. <em>Journal of the Optical Society of America A</em>,
+        4(4), 629&ndash;642.
+      </li>
+      <li>
+        Arun, K.S., Huang, T.S., &amp; Blostein, S.D. (1987). Least-squares
+        fitting of two 3-D point sets.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        9(5), 698&ndash;700.
+      </li>
+      <li>
+        Besl, P.J., &amp; McKay, N.D. (1992). A method for registration of 3-D
+        shapes.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        14(2), 239&ndash;256.
+      </li>
+      <li>
+        Murray, R.M., Li, Z., &amp; Sastry, S.S. (1994).
+        <em>A Mathematical Introduction to Robotic Manipulation</em>. CRC Press.
+      </li>
+      <li>
+        Brockett, R.W. (1983). Lie algebras and Lie groups in control theory.
+        In: <em>Geometric Control Theory</em>, Academic Press, 43&ndash;82.
+      </li>
+      <li>
+        Bicchi, A., &amp; Kumar, V. (2000). Robotic grasping and contact: a
+        review.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation</em
+        >, 348&ndash;353.
+      </li>
+      <li>
+        Bohg, J., Morales, A., Asfour, T., &amp; Kragic, D. (2014). Data-driven
+        grasp synthesis &mdash; A survey.
+        <em>IEEE Transactions on Robotics</em>, 30(2), 289&ndash;309.
+      </li>
+      <li>
+        Burdick, J.W. (1989). A classification of 3R orthogonal manipulators
+        with spherical wrists. <em>Journal of Robotic Systems</em>, 6(6),
+        781&ndash;805.
+      </li>
+      <li>
+        Censi, A. (2007). An accurate closed-form estimate of ICP's covariance.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation</em
+        >, 3167&ndash;3172.
+      </li>
+      <li>
+        Mason, M.T. (2001). Mechanics of robotic manipulation.
+        <em>CRC Press</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter10/Lesson5.html">
+          Lesson 5: Active Perception for Better Manipulation
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter11/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="active-lesson" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

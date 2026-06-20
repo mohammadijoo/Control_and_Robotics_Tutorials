@@ -1,0 +1,2128 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 6: Probabilistic Robotics Foundations - Lesson 5: Lab: Build a Basic Bayes Filter Loop | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 6: Probabilistic Robotics Foundations</h1>
+    <h3><strong>Lesson 5: Lab: Build a Basic Bayes Filter Loop</strong></h3>
+    <p>
+      This lab constructs a complete discrete Bayes-filter loop suitable for a
+      mobile robot pose (here: 1D cyclic position as a controlled teaching
+      proxy). You will implement prediction (motion update), correction
+      (measurement update), normalization, and a MAP pose estimate. We derive
+      the recursion formally from conditional probability and the
+      Markov/conditional-independence assumptions introduced earlier in this
+      chapter, then implement it from scratch in Python, C++, Java,
+      MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Deliverables -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Deliverables</h2>
+    <div class="down-content">
+      <p>By the end of this lab you will be able to:</p>
+      <ul>
+        <li>
+          Implement the Bayes-filter recursion for a discrete state space
+          <strong>\( x_t \in \mathcal{X} \)</strong> and compute the belief
+          <strong>\( bel_t(x_t) \)</strong>.
+        </li>
+        <li>
+          Build a motion model as a stochastic transition operator and recognize
+          when it reduces to a cyclic convolution.
+        </li>
+        <li>
+          Build a sensor likelihood function and perform a numerically stable
+          correction step with explicit normalization.
+        </li>
+        <li>
+          Validate your implementation with sanity checks (mass conservation,
+          non-negativity, predictable failure modes).
+        </li>
+      </ul>
+
+      <p>
+        <strong>Files (included in the ZIP at the end of this lesson):</strong>
+        <code>Chapter6_Lesson5.py</code>, <code>Chapter6_Lesson5_Ex1.py</code>,
+        <code>Chapter6_Lesson5.cpp</code>, <code>Chapter6_Lesson5.java</code>,
+        <code>Chapter6_Lesson5.m</code>,
+        <code>Chapter6_Lesson5_SimulinkBuild.m</code>,
+        <code>Chapter6_Lesson5.nb</code>.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start"] --> I["Choose grid X, initialize bel0(x)"]
+  I --> LOOP["For t = 1..T"]
+  LOOP --> UZ["Read control u_t and measurement z_t"]
+  UZ --> P["Prediction: bel_bar(x) = sum_xprev p(x|u_t,xprev)*bel_prev(xprev)"]
+  P --> L["Likelihood: l(x) = p(z_t|x)"]
+  L --> C["Correction: bel(x) = eta * l(x) * bel_bar(x)"]
+  C --> N["Normalize: eta = 1 / sum_x l(x)*bel_bar(x)"]
+  N --> E["Estimate: x_hat = argmax_x bel(x)"]
+  E --> LOG["Log diagnostics (sum=1, min>=0, entropy)"]
+  LOG --> LOOP
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Discrete Belief and the Bayes Filter Target -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Discrete Belief and the Bayes Filter Target</h2>
+    <div class="down-content">
+      <p>
+        We represent robot pose on a discrete grid. Let the state be
+        <strong> \( x_t \in \mathcal{X}=\{x^{(1)},\dots,x^{(N)}\} \)</strong>.
+        The belief is the posterior distribution:
+        <strong> \( bel_t(x_t) \):</strong> the probability mass function over
+        states conditioned on all data up to time <strong>\( t \)</strong>.
+      </p>
+
+      <p>
+        Formally,
+        <strong> \( bel_t(x_t) \):</strong>
+      </p>
+      <h4 class="mathJax">
+        \[ bel_t(x_t) \;=\; p\!\left(x_t \mid z_{1:t},\, u_{1:t}\right), \quad
+        z_{1:t} := \{z_1,\dots,z_t\},\;\; u_{1:t} := \{u_1,\dots,u_t\}. \]
+      </h4>
+
+      <p>
+        In this lab, <strong>\( x_t \)</strong> is a 1D cyclic position (a ring
+        track) to make the full loop implementable in a single session without
+        introducing higher-dimensional approximations. The same recursion
+        applies to 2D/3D pose grids; only computational cost changes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Deriving the Bayes Filter Recursion (with proofs) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Deriving the Bayes Filter Recursion</h2>
+    <div class="down-content">
+      <p>
+        The Bayes filter is a two-step recursion: prediction (motion update) and
+        correction (measurement update). The derivation uses the assumptions
+        emphasized in Lesson 4:
+      </p>
+      <ul>
+        <li>
+          <strong>First-order Markov motion:</strong>
+          <strong
+            >\( p(x_t \mid x_{0:t-1}, u_{1:t}) = p(x_t \mid x_{t-1}, u_t)
+            \)</strong
+          >.
+        </li>
+        <li>
+          <strong>Conditional independence of measurement:</strong>
+          <strong
+            >\( p(z_t \mid x_{0:t}, z_{1:t-1}, u_{1:t}) = p(z_t \mid x_t)
+            \)</strong
+          >.
+        </li>
+      </ul>
+
+      <p>
+        <strong>Proposition 1 (Prediction step):</strong> The predicted belief
+        <strong>\( \overline{bel}_t(x_t) \)</strong> satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ \overline{bel}_t(x_t) \;=\; \sum_{x_{t-1}\in\mathcal{X}} p\!\left(x_t
+        \mid u_t, x_{t-1}\right)\, bel_{t-1}(x_{t-1}). \]
+      </h4>
+      <p><strong>Proof:</strong></p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \overline{bel}_t(x_t) &:= p\!\left(x_t \mid
+        z_{1:t-1}, u_{1:t}\right) \\ &= \sum_{x_{t-1}\in\mathcal{X}}
+        p\!\left(x_t, x_{t-1} \mid z_{1:t-1}, u_{1:t}\right) \\ &=
+        \sum_{x_{t-1}\in\mathcal{X}} p\!\left(x_t \mid x_{t-1}, z_{1:t-1},
+        u_{1:t}\right)\, p\!\left(x_{t-1} \mid z_{1:t-1}, u_{1:t}\right) \\
+        &\overset{\text{Markov}}{=} \sum_{x_{t-1}\in\mathcal{X}} p\!\left(x_t
+        \mid x_{t-1}, u_t\right)\, p\!\left(x_{t-1} \mid z_{1:t-1},
+        u_{1:t-1}\right) \\ &= \sum_{x_{t-1}\in\mathcal{X}} p\!\left(x_t \mid
+        u_t, x_{t-1}\right)\, bel_{t-1}(x_{t-1}). \end{aligned} \]
+      </h4>
+      <p>
+        The key step is that <strong>\( x_t \)</strong> depends on the past only
+        through <strong>\( (x_{t-1},u_t) \)</strong>.
+      </p>
+
+      <p>
+        <strong>Proposition 2 (Correction step):</strong> The posterior belief
+        satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ bel_t(x_t) \;=\; \eta_t\; p(z_t \mid x_t)\;\overline{bel}_t(x_t),
+        \quad \eta_t := \frac{1}{p(z_t \mid z_{1:t-1}, u_{1:t})}. \]
+      </h4>
+
+      <p>
+        <strong>Proof:</strong> Apply Bayes’ rule and conditional independence.
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} bel_t(x_t) &= p\!\left(x_t \mid z_{1:t},
+        u_{1:t}\right) \\ &= \frac{p\!\left(z_t \mid x_t, z_{1:t-1},
+        u_{1:t}\right)\;p\!\left(x_t \mid z_{1:t-1}, u_{1:t}\right)}
+        {p\!\left(z_t \mid z_{1:t-1}, u_{1:t}\right)} \\ &\overset{\text{cond.
+        indep.}}{=} \frac{p(z_t \mid x_t)\;\overline{bel}_t(x_t)}{p\!\left(z_t
+        \mid z_{1:t-1}, u_{1:t}\right)} \;=\; \eta_t\;p(z_t \mid
+        x_t)\;\overline{bel}_t(x_t). \end{aligned} \]
+      </h4>
+
+      <p>
+        <strong>Proposition 3 (Normalization constant):</strong> The constant
+        <strong>\( \eta_t \)</strong> can be computed by summation:
+      </p>
+      <h4 class="mathJax">
+        \[ \eta_t \;=\; \left( \sum_{x_t\in\mathcal{X}} p(z_t \mid
+        x_t)\;\overline{bel}_t(x_t) \right)^{-1}. \]
+      </h4>
+      <p>
+        <strong>Proof:</strong> Sum both sides of Proposition 2 over
+        <strong>\( x_t \)</strong> and impose
+        <strong>\( \sum_{x_t} bel_t(x_t)=1 \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Transition Operator View (matrix form) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Transition Operator View (Vector / Matrix Form)</h2>
+    <div class="down-content">
+      <p>
+        For implementation, it is convenient to stack probabilities into a
+        vector:
+        <strong>\( \mathbf{b}_t \in \mathbb{R}^{N} \)</strong> where
+        <strong>\( [\mathbf{b}_t]_i = bel_t(x^{(i)}) \)</strong>. Define the
+        transition matrix
+        <strong>\( \mathbf{T}(u_t)\in\mathbb{R}^{N\times N} \)</strong>:
+        <strong
+          >\( [\mathbf{T}(u_t)]_{i j} = p(x^{(i)} \mid u_t, x^{(j)}) \)</strong
+        >. Let
+        <strong
+          >\( \mathbf{L}(z_t)=\mathrm{diag}(\boldsymbol{\ell}_t) \)</strong
+        >
+        with
+        <strong>\( [\boldsymbol{\ell}_t]_i = p(z_t \mid x^{(i)}) \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \overline{\mathbf{b}}_t = \mathbf{T}(u_t)\,\mathbf{b}_{t-1}, \quad
+        \mathbf{b}_t = \eta_t\;\mathbf{L}(z_t)\,\overline{\mathbf{b}}_t, \quad
+        \eta_t = \left(\mathbf{1}^\top
+        \mathbf{L}(z_t)\,\overline{\mathbf{b}}_t\right)^{-1}. \]
+      </h4>
+
+      <p>
+        <strong>Mass conservation (important implementation invariant):</strong>
+      </p>
+      <p>
+        If <strong>\( \mathbf{T}(u_t) \)</strong> is <em>column-stochastic</em>,
+        i.e. <strong>\( \sum_{i=1}^N [\mathbf{T}(u_t)]_{i j} = 1 \)</strong> for
+        every column <strong>\( j \)</strong>, and
+        <strong>\( \mathbf{b}_{t-1} \)</strong> is a valid distribution, then
+        <strong>\( \overline{\mathbf{b}}_t \)</strong> is also a valid
+        distribution:
+      </p>
+      <h4 class="mathJax">
+        \[ \sum_{i=1}^N [\overline{\mathbf{b}}_t]_i \;=\; \sum_{i=1}^N
+        \sum_{j=1}^N [\mathbf{T}]_{i j}[\mathbf{b}_{t-1}]_j \;=\; \sum_{j=1}^N
+        \left(\sum_{i=1}^N [\mathbf{T}]_{i j}\right)[\mathbf{b}_{t-1}]_j \;=\;
+        \sum_{j=1}^N 1\cdot [\mathbf{b}_{t-1}]_j \;=\; 1. \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  B0["b[t-1] (belief vector)"] --> T["T(u[t]) (transition operator)"]
+  T --> BB["b_bar[t] (predicted)"]
+  BB --> MUL["Elementwise multiply with l[t]=p(z[t]|x)"]
+  L["l[t]"] --> MUL
+  MUL --> NORM["Normalize by sum"]
+  NORM --> B1["b[t] (posterior)"]
+  B1 --> MAP["MAP: argmax(b[t])"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Lab Scenario (1D cyclic pose + landmark sensor) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Lab Scenario: 1D Cyclic Pose with a Landmark Sensor</h2>
+    <div class="down-content">
+      <p>
+        We model a robot driving on a ring track of length
+        <strong>\( L \)</strong> discretized into
+        <strong>\( N \)</strong> cells. The state is cell index
+        <strong>\( i \in \{0,\dots,N-1\} \)</strong> (or physical position
+        <strong>\( x=i\,\Delta x \)</strong>).
+      </p>
+
+      <p><strong>Motion model (Gaussian translation on a ring):</strong></p>
+      <p>
+        Let the commanded translation be <strong>\( \Delta \)</strong> meters
+        per step with motion noise <strong>\( \sigma_u \)</strong>. On the
+        discrete ring, the transition probability depends only on offset, making
+        it a cyclic convolution:
+      </p>
+      <h4 class="mathJax">
+        \[ p(x_t=x^{(i)} \mid u_t, x_{t-1}=x^{(j)}) \;=\; \kappa\;\exp\!\left(
+        -\frac{1}{2}\frac{(d(i-j)-\mu)^2}{\sigma^2} \right), \]
+      </h4>
+      <p>
+        where <strong>\( d(\cdot) \)</strong> is the signed cyclic offset
+        (wrapped to the nearest representative),
+        <strong>\( \mu=\Delta/\Delta x \)</strong> is the mean shift in cells,
+        <strong>\( \sigma=\sigma_u/\Delta x \)</strong> is the std in cells, and
+        <strong>\( \kappa \)</strong> normalizes the discrete kernel so the
+        conditional distribution sums to 1.
+      </p>
+
+      <p><strong>Sensor model (signed displacement to a landmark):</strong></p>
+      <p>
+        Place one landmark at <strong>\( x_\ell \)</strong>. The measurement is
+        the signed wrapped displacement
+        <strong>\( z_t \approx \mathrm{wrap}(x_t-x_\ell) \)</strong> with noise
+        <strong>\( \sigma_z \)</strong>.
+      </p>
+      <h4 class="mathJax">
+        \[ p(z_t \mid x_t) \;=\; \frac{1}{\sqrt{2\pi}\sigma_z} \exp\!\left(
+        -\frac{1}{2}\frac{(z_t - \mathrm{wrap}(x_t-x_\ell))^2}{\sigma_z^2}
+        \right). \]
+      </h4>
+
+      <p>
+        This is intentionally minimal: it isolates Bayes-filter mechanics. Later
+        chapters will replace the discrete pose grid with continuous-state
+        approximations and richer sensors.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementation Notes (numerics + complexity) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementation Notes: Numerics, Stability, and Complexity</h2>
+    <div class="down-content">
+      <p>
+        <strong>Normalization is not optional.</strong> In finite precision,
+        even small underflow/overflow errors accumulate. Always compute
+      </p>
+      <h4 class="mathJax">
+        \[ \eta_t = \left(\sum_{x_t\in\mathcal{X}} p(z_t \mid
+        x_t)\overline{bel}_t(x_t)\right)^{-1} \quad\text{and set}\quad
+        bel_t(x_t) = \eta_t\,p(z_t \mid x_t)\overline{bel}_t(x_t). \]
+      </h4>
+
+      <p>
+        <strong>Non-negativity:</strong> Probability mass must satisfy
+        <strong>\( bel_t(x)\ge 0 \)</strong>. Clip tiny negative values caused
+        by FFT roundoff (if using FFT) and renormalize.
+      </p>
+
+      <p><strong>Complexity:</strong></p>
+      <ul>
+        <li>
+          Naïve prediction (matrix multiply / double loop):
+          <strong>\( \mathcal{O}(N^2) \)</strong>.
+        </li>
+        <li>
+          If the transition depends only on offset (shift-invariant on a ring),
+          prediction becomes cyclic convolution: using FFT gives
+          <strong>\( \mathcal{O}(N\log N) \)</strong>.
+        </li>
+      </ul>
+
+      <p>
+        <strong>Diagnostic quantities:</strong> Track entropy as a compact
+        summary of concentration:
+      </p>
+      <h4 class="mathJax">
+        \[ H(bel_t) \;=\; -\sum_{x\in\mathcal{X}} bel_t(x)\,\log\!\left(bel_t(x)
+        + \epsilon\right), \quad \epsilon &gt; 0. \]
+      </h4>
+      <p>
+        Entropy should decrease when measurements are informative and increase
+        when motion noise dominates.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation (from scratch; FFT prediction)</h2>
+    <div class="down-content">
+      <p>
+        This implementation uses <code>numpy</code> and an FFT-based cyclic
+        convolution for the prediction step. In robotics practice, Python
+        Bayes-filter concepts appear inside ROS localization stacks (e.g., in
+        AMCL’s discrete logic), but here we implement the loop directly.
+      </p>
+
+      <h3>Chapter6_Lesson5.py</h3>
+      <pre><code class="language-python">#!/usr/bin/env python3
+# Chapter6_Lesson5.py
+# Lab: Build a Basic Bayes Filter Loop (discrete 1D cyclic state)
+
+import math
+import numpy as np
+
+def wrap_interval(x, half_period):
+    """Wrap x into [-half_period, +half_period)."""
+    period = 2.0 * half_period
+    return (x + half_period) % period - half_period
+
+def gaussian_pdf(x, mu, sigma):
+    return (1.0 / (math.sqrt(2.0 * math.pi) * sigma)) * math.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+def build_cyclic_motion_kernel(N, dx, delta_m, sigma_m):
+    """Return kernel k over cyclic index offsets so that prediction is cyclic convolution."""
+    mu_cells = delta_m / dx
+    sigma_cells = sigma_m / dx
+
+    # offsets in [-N/2, N/2)
+    k = np.zeros(N, dtype=float)
+    half = N // 2
+    for idx in range(N):
+        d = idx
+        if idx &gt;= half:
+            d = idx - N  # negative offset
+        k[idx] = math.exp(-0.5 * ((d - mu_cells) / sigma_cells) ** 2)
+
+    k /= np.sum(k)
+    return k
+
+def predict_cyclic_fft(bel_prev, kernel):
+    """Cyclic convolution using FFT: bel_bar = bel_prev (*) kernel."""
+    B = np.fft.fft(bel_prev)
+    K = np.fft.fft(kernel)
+    bel_bar = np.real(np.fft.ifft(B * K))
+    bel_bar = np.maximum(bel_bar, 0.0)
+    bel_bar /= np.sum(bel_bar)
+    return bel_bar
+
+def likelihood_vector(N, dx, landmark_x, z_meas, sigma_z, half_period):
+    xs = np.arange(N) * dx
+    # signed displacement to landmark in [-L/2, L/2)
+    d = np.array([wrap_interval(x - landmark_x, half_period) for x in xs])
+    l = np.array([gaussian_pdf(z_meas, di, sigma_z) for di in d])
+    l = np.maximum(l, 1e-300)
+    return l
+
+def bayes_filter_step(bel_prev, u_delta_m, kernel, z_meas, sigma_z, landmark_x, dx, half_period):
+    bel_bar = predict_cyclic_fft(bel_prev, kernel)
+    l = likelihood_vector(len(bel_prev), dx, landmark_x, z_meas, sigma_z, half_period)
+    bel = bel_bar * l
+    bel /= np.sum(bel)
+    return bel, bel_bar
+
+def run_demo():
+    # Discretization
+    L = 10.0       # [m] track length (cyclic)
+    N = 200        # number of grid cells
+    dx = L / N
+    half_period = L / 2.0
+
+    # Models
+    u_delta_m = 0.35      # commanded translation per step [m]
+    sigma_m   = 0.12      # motion noise std [m]
+    sigma_z   = 0.20      # sensor noise std [m]
+    landmark_x = 2.0      # landmark position [m] on the ring
+
+    # Build motion kernel once (time-invariant for fixed u)
+    kernel = build_cyclic_motion_kernel(N, dx, u_delta_m, sigma_m)
+
+    # Initial belief: uniform
+    bel = np.ones(N, dtype=float) / N
+
+    # Ground truth (for simulation only)
+    rng = np.random.default_rng(7)
+    x_true = 7.0
+
+    T = 25
+    print("t, x_true[m], x_hat_MAP[m], z_meas[m]")
+    for t in range(1, T + 1):
+        # Simulate motion
+        x_true = (x_true + u_delta_m + rng.normal(0.0, sigma_m)) % L
+
+        # Simulate sensor: signed displacement to landmark
+        z_true = wrap_interval(x_true - landmark_x, half_period)
+        z_meas = wrap_interval(z_true + rng.normal(0.0, sigma_z), half_period)
+
+        # Bayes filter update
+        bel, bel_bar = bayes_filter_step(
+            bel_prev=bel,
+            u_delta_m=u_delta_m,
+            kernel=kernel,
+            z_meas=z_meas,
+            sigma_z=sigma_z,
+            landmark_x=landmark_x,
+            dx=dx,
+            half_period=half_period
+        )
+
+        idx_hat = int(np.argmax(bel))
+        x_hat = idx_hat * dx
+        print(f"{t:2d}, {x_true:7.3f}, {x_hat:10.3f}, {z_meas:7.3f}")
+
+    # Optional: report posterior entropy as a sanity check
+    eps = 1e-12
+    H = -np.sum(bel * np.log(bel + eps))
+    print(f"Posterior entropy (nats): {H:.4f}")
+
+if __name__ == "__main__":
+    run_demo()
+</code></pre>
+
+      <h3>Chapter6_Lesson5_Ex1.py</h3>
+      <pre><code class="language-python">#!/usr/bin/env python3
+# Chapter6_Lesson5_Ex1.py
+# Exercise: verify normalization and compare FFT convolution to direct O(N^2) prediction
+
+import numpy as np
+
+def predict_direct(bel_prev, kernel):
+    N = len(bel_prev)
+    bel_bar = np.zeros(N, dtype=float)
+    for j in range(N):
+        s = 0.0
+        for i in range(N):
+            # kernel offset (j - i) mod N
+            k = (j - i) % N
+            s += kernel[k] * bel_prev[i]
+        bel_bar[j] = s
+    bel_bar = np.maximum(bel_bar, 0.0)
+    bel_bar /= np.sum(bel_bar)
+    return bel_bar
+
+def predict_fft(bel_prev, kernel):
+    B = np.fft.fft(bel_prev)
+    K = np.fft.fft(kernel)
+    bel_bar = np.real(np.fft.ifft(B * K))
+    bel_bar = np.maximum(bel_bar, 0.0)
+    bel_bar /= np.sum(bel_bar)
+    return bel_bar
+
+def main():
+    rng = np.random.default_rng(0)
+    N = 128
+    bel = rng.random(N)
+    bel /= np.sum(bel)
+
+    # random cyclic kernel
+    k = rng.random(N)
+    k /= np.sum(k)
+
+    d = predict_direct(bel, k)
+    f = predict_fft(bel, k)
+
+    print("sum(d) =", float(np.sum(d)))
+    print("sum(f) =", float(np.sum(f)))
+    print("max|d-f| =", float(np.max(np.abs(d - f))))
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation (Eigen; direct prediction loop)</h2>
+    <div class="down-content">
+      <p>
+        This C++ version uses Eigen for vector storage and implements the
+        prediction step with a direct double loop (useful for clarity and
+        debugging). In production AMR stacks, C++ Bayes filters commonly appear
+        inside ROS 2 nodes (<code>rclcpp</code>) and localization packages; here
+        we keep it stand-alone.
+      </p>
+
+      <h3>Chapter6_Lesson5.cpp</h3>
+      <pre><code class="language-cpp">// Chapter6_Lesson5.cpp
+// Lab: Build a Basic Bayes Filter Loop (discrete 1D cyclic state)
+//
+// Dependencies: Eigen (header-only). Compile example (Linux/macOS):
+//   g++ -O2 -std=c++17 Chapter6_Lesson5.cpp -I /usr/include/eigen3 -o bayes_loop
+//
+// This file implements:
+//   bel_bar = T(u) * bel
+//   bel     = normalize( bel_bar .* l(z) )
+//
+// where T(u) is a cyclic convolution operator parameterized by a Gaussian kernel.
+
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+#include &lt;random&gt;
+#include &lt;Eigen/Dense&gt;
+
+static double wrap_interval(double x, double half_period) {
+    double period = 2.0 * half_period;
+    double y = std::fmod(x + half_period, period);
+    if (y &lt; 0.0) y += period;
+    return y - half_period;
+}
+
+static double gaussian_pdf(double x, double mu, double sigma) {
+    const double c = 1.0 / (std::sqrt(2.0 * M_PI) * sigma);
+    const double z = (x - mu) / sigma;
+    return c * std::exp(-0.5 * z * z);
+}
+
+static Eigen::VectorXd build_cyclic_kernel(int N, double dx, double delta_m, double sigma_m) {
+    double mu_cells = delta_m / dx;
+    double sigma_cells = sigma_m / dx;
+
+    Eigen::VectorXd k(N);
+    int half = N / 2;
+    for (int idx = 0; idx &lt; N; ++idx) {
+        int d = idx;
+        if (idx &gt;= half) d = idx - N;
+        double v = std::exp(-0.5 * std::pow((d - mu_cells) / sigma_cells, 2.0));
+        k(idx) = v;
+    }
+    k /= k.sum();
+    return k;
+}
+
+static Eigen::VectorXd predict_cyclic_direct(const Eigen::VectorXd& bel_prev, const Eigen::VectorXd& kernel) {
+    int N = static_cast&lt;int&gt;(bel_prev.size());
+    Eigen::VectorXd bel_bar(N);
+    bel_bar.setZero();
+
+    for (int j = 0; j &lt; N; ++j) {
+        double s = 0.0;
+        for (int i = 0; i &lt; N; ++i) {
+            int k = (j - i) % N;
+            if (k &lt; 0) k += N;
+            s += kernel(k) * bel_prev(i);
+        }
+        bel_bar(j) = s;
+    }
+
+    // numerical hygiene
+    for (int j = 0; j &lt; N; ++j) bel_bar(j) = std::max(0.0, bel_bar(j));
+    bel_bar /= bel_bar.sum();
+    return bel_bar;
+}
+
+static Eigen::VectorXd likelihood_vector(int N, double dx, double landmark_x, double z_meas, double sigma_z, double half_period) {
+    Eigen::VectorXd l(N);
+    for (int i = 0; i &lt; N; ++i) {
+        double x = i * dx;
+        double d = wrap_interval(x - landmark_x, half_period);
+        l(i) = std::max(gaussian_pdf(z_meas, d, sigma_z), 1e-300);
+    }
+    return l;
+}
+
+static Eigen::VectorXd bayes_step(const Eigen::VectorXd& bel_prev,
+                                 const Eigen::VectorXd& kernel,
+                                 double z_meas, double sigma_z,
+                                 double landmark_x, double dx, double half_period) {
+    Eigen::VectorXd bel_bar = predict_cyclic_direct(bel_prev, kernel);
+    Eigen::VectorXd l = likelihood_vector(static_cast&lt;int&gt;(bel_prev.size()), dx, landmark_x, z_meas, sigma_z, half_period);
+    Eigen::VectorXd bel = bel_bar.array() * l.array();
+    bel /= bel.sum();
+    return bel;
+}
+
+int main() {
+    // Discretization
+    const double L = 10.0;
+    const int    N = 200;
+    const double dx = L / N;
+    const double half_period = L / 2.0;
+
+    // Models
+    const double u_delta_m = 0.35;
+    const double sigma_m   = 0.12;
+    const double sigma_z   = 0.20;
+    const double landmark_x = 2.0;
+
+    Eigen::VectorXd kernel = build_cyclic_kernel(N, dx, u_delta_m, sigma_m);
+
+    // Initial belief: uniform
+    Eigen::VectorXd bel = Eigen::VectorXd::Ones(N) / static_cast&lt;double&gt;(N);
+
+    // RNG
+    std::mt19937 gen(7);
+    std::normal_distribution&lt;double&gt; n_m(0.0, sigma_m);
+    std::normal_distribution&lt;double&gt; n_z(0.0, sigma_z);
+
+    double x_true = 7.0;
+
+    const int T = 25;
+    std::cout &lt;&lt; "t, x_true[m], x_hat_MAP[m], z_meas[m]\n";
+    for (int t = 1; t &lt;= T; ++t) {
+        x_true = std::fmod(x_true + u_delta_m + n_m(gen), L);
+        if (x_true &lt; 0.0) x_true += L;
+
+        double z_true = wrap_interval(x_true - landmark_x, half_period);
+        double z_meas = wrap_interval(z_true + n_z(gen), half_period);
+
+        bel = bayes_step(bel, kernel, z_meas, sigma_z, landmark_x, dx, half_period);
+
+        Eigen::Index idx_hat = 0;
+        bel.maxCoeff(&amp;idx_hat);
+        double x_hat = static_cast&lt;double&gt;(idx_hat) * dx;
+
+        std::cout &lt;&lt; t &lt;&lt; ", " &lt;&lt; x_true &lt;&lt; ", " &lt;&lt; x_hat &lt;&lt; ", " &lt;&lt; z_meas &lt;&lt; "\n";
+    }
+
+    return 0;
+}
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (stand-alone arrays; robotics notes)</h2>
+    <div class="down-content">
+      <p>
+        Java is less common in core AMR localization than C++/Python, but it
+        appears in Android robotics, educational stacks, and some ROSJava
+        ecosystems. This version mirrors the same discrete Bayes loop with
+        simple arrays.
+      </p>
+
+      <h3>Chapter6_Lesson5.java</h3>
+      <pre><code class="language-java">// Chapter6_Lesson5.java
+// Lab: Build a Basic Bayes Filter Loop (discrete 1D cyclic state)
+//
+// Compile:
+//   javac Chapter6_Lesson5.java
+// Run:
+//   java Chapter6_Lesson5
+//
+// This implementation avoids external dependencies; for linear algebra in robotics
+// you may consider EJML, Apache Commons Math, or ROSJava bindings.
+
+import java.util.Random;
+
+public class Chapter6_Lesson5 {
+
+    static double wrapInterval(double x, double halfPeriod) {
+        double period = 2.0 * halfPeriod;
+        double y = (x + halfPeriod) % period;
+        if (y &lt; 0.0) y += period;
+        return y - halfPeriod;
+    }
+
+    static double gaussianPdf(double x, double mu, double sigma) {
+        double c = 1.0 / (Math.sqrt(2.0 * Math.PI) * sigma);
+        double z = (x - mu) / sigma;
+        return c * Math.exp(-0.5 * z * z);
+    }
+
+    static double[] buildCyclicKernel(int N, double dx, double deltaM, double sigmaM) {
+        double muCells = deltaM / dx;
+        double sigmaCells = sigmaM / dx;
+
+        double[] k = new double[N];
+        int half = N / 2;
+        double sum = 0.0;
+        for (int idx = 0; idx &lt; N; idx++) {
+            int d = idx;
+            if (idx &gt;= half) d = idx - N;
+            double v = Math.exp(-0.5 * Math.pow((d - muCells) / sigmaCells, 2.0));
+            k[idx] = v;
+            sum += v;
+        }
+        for (int i = 0; i &lt; N; i++) k[i] /= sum;
+        return k;
+    }
+
+    static double[] predictCyclicDirect(double[] belPrev, double[] kernel) {
+        int N = belPrev.length;
+        double[] belBar = new double[N];
+
+        for (int j = 0; j &lt; N; j++) {
+            double s = 0.0;
+            for (int i = 0; i &lt; N; i++) {
+                int k = (j - i) % N;
+                if (k &lt; 0) k += N;
+                s += kernel[k] * belPrev[i];
+            }
+            belBar[j] = Math.max(0.0, s);
+        }
+
+        // normalize
+        double sum = 0.0;
+        for (double v : belBar) sum += v;
+        for (int j = 0; j &lt; N; j++) belBar[j] /= sum;
+
+        return belBar;
+    }
+
+    static double[] likelihoodVector(int N, double dx, double landmarkX, double zMeas, double sigmaZ, double halfPeriod) {
+        double[] l = new double[N];
+        for (int i = 0; i &lt; N; i++) {
+            double x = i * dx;
+            double d = wrapInterval(x - landmarkX, halfPeriod);
+            double v = gaussianPdf(zMeas, d, sigmaZ);
+            l[i] = Math.max(v, 1e-300);
+        }
+        return l;
+    }
+
+    static double[] bayesStep(double[] belPrev, double[] kernel,
+                             double zMeas, double sigmaZ,
+                             double landmarkX, double dx, double halfPeriod) {
+
+        double[] belBar = predictCyclicDirect(belPrev, kernel);
+        double[] l = likelihoodVector(belPrev.length, dx, landmarkX, zMeas, sigmaZ, halfPeriod);
+
+        double[] bel = new double[belPrev.length];
+        double sum = 0.0;
+        for (int i = 0; i &lt; bel.length; i++) {
+            bel[i] = belBar[i] * l[i];
+            sum += bel[i];
+        }
+        for (int i = 0; i &lt; bel.length; i++) bel[i] /= sum;
+        return bel;
+    }
+
+    static int argmax(double[] a) {
+        int idx = 0;
+        double best = a[0];
+        for (int i = 1; i &lt; a.length; i++) {
+            if (a[i] &gt; best) {
+                best = a[i];
+                idx = i;
+            }
+        }
+        return idx;
+    }
+
+    public static void main(String[] args) {
+        // Discretization
+        double L = 10.0;
+        int N = 200;
+        double dx = L / N;
+        double halfPeriod = L / 2.0;
+
+        // Models
+        double uDeltaM = 0.35;
+        double sigmaM  = 0.12;
+        double sigmaZ  = 0.20;
+        double landmarkX = 2.0;
+
+        double[] kernel = buildCyclicKernel(N, dx, uDeltaM, sigmaM);
+
+        // Initial belief: uniform
+        double[] bel = new double[N];
+        for (int i = 0; i &lt; N; i++) bel[i] = 1.0 / N;
+
+        Random rng = new Random(7);
+        double xTrue = 7.0;
+
+        int T = 25;
+        System.out.println("t, x_true[m], x_hat_MAP[m], z_meas[m]");
+        for (int t = 1; t &lt;= T; t++) {
+            xTrue = (xTrue + uDeltaM + rng.nextGaussian() * sigmaM) % L;
+            if (xTrue &lt; 0.0) xTrue += L;
+
+            double zTrue = wrapInterval(xTrue - landmarkX, halfPeriod);
+            double zMeas = wrapInterval(zTrue + rng.nextGaussian() * sigmaZ, halfPeriod);
+
+            bel = bayesStep(bel, kernel, zMeas, sigmaZ, landmarkX, dx, halfPeriod);
+
+            int idxHat = argmax(bel);
+            double xHat = idxHat * dx;
+            System.out.println(t + ", " + xTrue + ", " + xHat + ", " + zMeas);
+        }
+    }
+}
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB + Simulink -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB + Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is convenient for rapid prototyping and numerical verification.
+        The script below implements the same cyclic Bayes loop. Then we provide
+        an additional script that programmatically builds a minimal Simulink
+        wiring diagram of the loop (Prediction → Likelihood → Multiply →
+        Normalize).
+      </p>
+
+      <h3>Chapter6_Lesson5.m</h3>
+      <pre><code class="language-matlab">% Chapter6_Lesson5.m
+% Lab: Build a Basic Bayes Filter Loop (discrete 1D cyclic state)
+%
+% This script runs a simple Bayes filter on a 1D cyclic track with:
+%   - motion model: cyclic Gaussian translation kernel
+%   - sensor model: signed displacement to a landmark + Gaussian noise
+%
+% Requirements:
+%   - MATLAB (no special toolboxes required for the core script)
+% Optional:
+%   - Robotics System Toolbox for later ROS integration (not required here)
+
+clear; clc;
+
+% Discretization
+L = 10.0;          % [m]
+N = 200;
+dx = L / N;
+halfPeriod = L / 2;
+
+% Models
+uDeltaM = 0.35;    % [m] commanded translation per step
+sigmaM  = 0.12;    % [m]
+sigmaZ  = 0.20;    % [m]
+landmarkX = 2.0;   % [m]
+
+% Kernel (cyclic offsets in [-N/2, N/2))
+muCells = uDeltaM / dx;
+sigmaCells = sigmaM / dx;
+
+idx = 0:(N-1);
+d = idx;
+half = floor(N/2);
+d(d &gt;= half) = d(d &gt;= half) - N;     % negative offsets
+k = exp(-0.5 * ((d - muCells) / sigmaCells).^2);
+k = k / sum(k);
+
+% Initial belief: uniform
+bel = ones(N,1) / N;
+
+% Ground truth (simulation only)
+rng(7);
+xTrue = 7.0;
+
+T = 25;
+fprintf("t, x_true[m], x_hat_MAP[m], z_meas[m]\n");
+
+for t = 1:T
+    % Motion simulation
+    xTrue = mod(xTrue + uDeltaM + sigmaM * randn(), L);
+
+    % Sensor simulation: signed displacement in [-L/2, L/2)
+    zTrue = wrapInterval(xTrue - landmarkX, halfPeriod);
+    zMeas = wrapInterval(zTrue + sigmaZ * randn(), halfPeriod);
+
+    % Prediction: cyclic convolution via FFT
+    belBar = real(ifft(fft(bel) .* fft(k(:))));
+    belBar = max(belBar, 0);
+    belBar = belBar / sum(belBar);
+
+    % Likelihood
+    xs = (0:(N-1))' * dx;
+    dispToLm = arrayfun(@(x) wrapInterval(x - landmarkX, halfPeriod), xs);
+    l = normpdf(zMeas, dispToLm, sigmaZ);
+    l = max(l, 1e-300);
+
+    % Update
+    bel = belBar .* l;
+    bel = bel / sum(bel);
+
+    % MAP estimate
+    [~, idxHat] = max(bel);
+    xHat = (idxHat - 1) * dx;
+
+    fprintf("%2d, %7.3f, %10.3f, %7.3f\n", t, xTrue, xHat, zMeas);
+end
+
+% Posterior entropy (sanity check)
+eps = 1e-12;
+H = -sum(bel .* log(bel + eps));
+fprintf("Posterior entropy (nats): %.4f\n", H);
+
+% --- Local function(s)
+function y = wrapInterval(x, halfPeriod)
+    % Wrap x into [-halfPeriod, +halfPeriod)
+    period = 2.0 * halfPeriod;
+    y = mod(x + halfPeriod, period) - halfPeriod;
+end
+</code></pre>
+
+      <h3>Chapter6_Lesson5_SimulinkBuild.m</h3>
+      <pre><code class="language-matlab">% Chapter6_Lesson5_SimulinkBuild.m
+% Programmatically build a minimal Simulink diagram for the Bayes filter loop.
+% Output model: Chapter6_Lesson5_BayesLoop.slx
+%
+% Note: This is a pedagogical wiring diagram (not a full estimator blockset).
+% It shows the loop structure: Prediction -&gt; Likelihood -&gt; Product -&gt; Normalize.
+%
+% Run in MATLAB with Simulink installed.
+
+function Chapter6_Lesson5_SimulinkBuild()
+
+model = 'Chapter6_Lesson5_BayesLoop';
+if bdIsLoaded(model)
+    close_system(model, 0);
+end
+new_system(model); open_system(model);
+
+% Layout helpers
+x0 = 30; y0 = 50; dx = 160; dy = 80;
+
+% Sources
+add_block('simulink/Sources/Constant', [model '/bel_prev'], 'Value', 'bel0', ...
+    'Position', [x0 y0 x0+80 y0+30]);
+
+add_block('simulink/Sources/Constant', [model '/kernel'], 'Value', 'k', ...
+    'Position', [x0 y0+dy x0+80 y0+dy+30]);
+
+add_block('simulink/Sources/Constant', [model '/likelihood'], 'Value', 'l', ...
+    'Position', [x0 y0+2*dy x0+80 y0+2*dy+30]);
+
+% Prediction (placeholder): bel_bar = Conv(bel_prev, kernel)
+add_block('simulink/Math Operations/Product', [model '/ConvPlaceholder'], ...
+    'Position', [x0+dx y0+dy/2 x0+dx+80 y0+dy/2+40]);
+set_param([model '/ConvPlaceholder'], 'Inputs', '**'); % used as placeholder
+
+% Update: multiply bel_bar .* likelihood
+add_block('simulink/Math Operations/Product', [model '/Multiply'], ...
+    'Position', [x0+2*dx y0+dy x0+2*dx+80 y0+dy+40]);
+set_param([model '/Multiply'], 'Inputs', '.*'); % elementwise
+
+% Normalize: bel = bel_unnorm / sum(bel_unnorm)
+add_block('simulink/Math Operations/Sum', [model '/SumBel'], ...
+    'Position', [x0+3*dx y0+dy-10 x0+3*dx+60 y0+dy+10]);
+set_param([model '/SumBel'], 'Inputs', '+');
+
+add_block('simulink/Math Operations/Divide', [model '/Normalize'], ...
+    'Position', [x0+3*dx y0+dy+30 x0+3*dx+80 y0+dy+70]);
+
+% Sink
+add_block('simulink/Sinks/Out1', [model '/bel'], ...
+    'Position', [x0+4*dx y0+dy+40 x0+4*dx+60 y0+dy+60]);
+
+% Connections
+add_line(model, 'bel_prev/1', 'ConvPlaceholder/1');
+add_line(model, 'kernel/1',   'ConvPlaceholder/2');
+
+add_line(model, 'ConvPlaceholder/1', 'Multiply/1');
+add_line(model, 'likelihood/1',      'Multiply/2');
+
+add_line(model, 'Multiply/1', 'SumBel/1');
+add_line(model, 'Multiply/1', 'Normalize/1');
+add_line(model, 'SumBel/1',   'Normalize/2');
+
+add_line(model, 'Normalize/1', 'bel/1');
+
+% Clean
+set_param(model, 'StopTime', '1');
+save_system(model);
+disp(['Saved model: ' model '.slx']);
+
+end
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is useful for symbolic checks and concise numerical
+        prototyping. The notebook file is provided as plain Wolfram Language
+        text.
+      </p>
+
+      <h3>Chapter6_Lesson5.nb</h3>
+      <pre><code class="language-mathematica">(* Chapter6_Lesson5.nb
+   Lab: Build a Basic Bayes Filter Loop (discrete 1D cyclic state)
+
+   This notebook is stored as plain Wolfram Language so it can be version-controlled.
+   You can open it in Mathematica (it will appear as an input cell script).
+*)
+
+ClearAll["Global`*"];
+
+wrapInterval[x_, half_] := Module[{period = 2 half},
+  Mod[x + half, period] - half
+];
+
+gaussianPDF[x_, mu_, sigma_] := (1/(Sqrt[2 Pi] sigma)) Exp[-1/2 ((x - mu)/sigma)^2];
+
+buildCyclicKernel[N_, dx_, deltaM_, sigmaM_] := Module[
+  {muCells = deltaM/dx, sigmaCells = sigmaM/dx, half = Floor[N/2], d, k},
+  d = Range[0, N - 1];
+  d = Map[If[# &gt;= half, # - N, #] &amp;, d];
+  k = Exp[-1/2 ((d - muCells)/sigmaCells)^2];
+  k/Total[k]
+];
+
+predictCyclicFFT[belPrev_, kernel_] := Module[
+  {belBar},
+  belBar = Re[InverseFourier[Fourier[belPrev] Fourier[kernel]]];
+  belBar = Map[Max[#, 0] &amp;, belBar];
+  belBar/Total[belBar]
+];
+
+likelihoodVector[N_, dx_, landmarkX_, zMeas_, sigmaZ_, halfPeriod_] := Module[
+  {xs, dispToLm, l},
+  xs = Range[0, N - 1] dx;
+  dispToLm = wrapInterval[#, halfPeriod] &amp; /@ (xs - landmarkX);
+  l = gaussianPDF[zMeas, #, sigmaZ] &amp; /@ dispToLm;
+  Map[Max[#, 10^-300] &amp;, l]
+];
+
+bayesStep[belPrev_, kernel_, zMeas_, sigmaZ_, landmarkX_, dx_, halfPeriod_] := Module[
+  {belBar, l, bel},
+  belBar = predictCyclicFFT[belPrev, kernel];
+  l = likelihoodVector[Length[belPrev], dx, landmarkX, zMeas, sigmaZ, halfPeriod];
+  bel = belBar * l;
+  bel/Total[bel]
+];
+
+(* Demo *)
+L = 10.0; N = 200; dx = L/N; halfPeriod = L/2;
+uDeltaM = 0.35; sigmaM = 0.12; sigmaZ = 0.20; landmarkX = 2.0;
+
+kernel = buildCyclicKernel[N, dx, uDeltaM, sigmaM];
+bel = ConstantArray[1.0/N, N];
+
+SeedRandom[7];
+xTrue = 7.0;
+
+Print["t, x_true[m], x_hat_MAP[m], z_meas[m]"];
+Do[
+  xTrue = Mod[xTrue + uDeltaM + RandomVariate[NormalDistribution[0, sigmaM]], L];
+  zTrue = wrapInterval[xTrue - landmarkX, halfPeriod];
+  zMeas = wrapInterval[zTrue + RandomVariate[NormalDistribution[0, sigmaZ]], halfPeriod];
+
+  bel = bayesStep[bel, kernel, zMeas, sigmaZ, landmarkX, dx, halfPeriod];
+  idxHat = First@Ordering[bel, -1];
+  xHat = (idxHat - 1) dx;
+
+  Print[t, ", ", NumberForm[xTrue, {Infinity, 3}], ", ", NumberForm[xHat, {Infinity, 3}], ", ", NumberForm[zMeas, {Infinity, 3}]];
+, {t, 1, 25}];
+
+H = -Total[bel Log[bel + 10^-12]];
+Print["Posterior entropy (nats): ", NumberForm[H, {Infinity, 4}]];
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Derivation drill):</strong> Starting from
+        <strong>\( bel_t(x_t)=p(x_t \mid z_{1:t},u_{1:t}) \)</strong>, derive
+        the two-step recursion (prediction and correction) using (i) the law of
+        total probability and (ii) the Markov and conditional-independence
+        assumptions.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> The prediction step follows Proposition 1 by
+        marginalizing <strong>\( x_{t-1} \)</strong> and applying the Markov
+        property. The correction step follows Proposition 2 by Bayes’ rule and
+        conditional independence:
+      </p>
+      <h4 class="mathJax">
+        \[ \overline{bel}_t(x_t)=\sum_{x_{t-1}} p(x_t \mid
+        u_t,x_{t-1})\,bel_{t-1}(x_{t-1}), \quad bel_t(x_t)=\eta_t\,p(z_t \mid
+        x_t)\,\overline{bel}_t(x_t). \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Normalization constant):</strong> Prove that
+        <strong>\( \eta_t^{-1} = p(z_t \mid z_{1:t-1},u_{1:t}) \)</strong>
+        equals the evidence obtained by summing over states.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> From Bayes’ rule (Proposition 2), sum over
+        <strong>\( x_t \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ 1=\sum_{x_t} bel_t(x_t) =\eta_t \sum_{x_t} p(z_t \mid
+        x_t)\overline{bel}_t(x_t) \;\;\Rightarrow\;\; \eta_t^{-1}=\sum_{x_t}
+        p(z_t \mid x_t)\overline{bel}_t(x_t). \]
+      </h4>
+      <p>
+        But also by definition,
+        <strong
+          >\( p(z_t \mid z_{1:t-1},u_{1:t})=\sum_{x_t} p(z_t \mid x_t)p(x_t \mid
+          z_{1:t-1},u_{1:t}) \)</strong
+        >, and
+        <strong
+          >\( p(x_t \mid z_{1:t-1},u_{1:t})=\overline{bel}_t(x_t) \)</strong
+        >, proving equality.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Mass conservation):</strong> Let
+        <strong>\( \mathbf{T} \)</strong> be column-stochastic and
+        <strong>\( \mathbf{b} \)</strong> a distribution vector. Prove
+        <strong>\( \overline{\mathbf{b}}=\mathbf{T}\mathbf{b} \)</strong> is
+        also a distribution vector.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Non-negativity holds because products of
+        non-negative terms are non-negative. For total mass:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{1}^\top \overline{\mathbf{b}} = \mathbf{1}^\top
+        \mathbf{T}\mathbf{b} = \left(\mathbf{1}^\top
+        \mathbf{T}\right)\mathbf{b}. \]
+      </h4>
+      <p>
+        Column-stochasticity implies
+        <strong>\( \mathbf{1}^\top \mathbf{T}=\mathbf{1}^\top \)</strong>, hence
+        <strong
+          >\( \mathbf{1}^\top \overline{\mathbf{b}}=\mathbf{1}^\top \mathbf{b}=1
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Complexity comparison):</strong> For a ring grid of
+        size <strong>\( N \)</strong>, compare the prediction-step complexity
+        of: (i) the direct double loop; (ii) FFT-based cyclic convolution. State
+        when FFT is beneficial.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Direct computation evaluates
+        <strong>\( N^2 \)</strong> products, so
+        <strong>\( \mathcal{O}(N^2) \)</strong>. FFT convolution requires two
+        FFTs and one inverse FFT (plus elementwise products), giving
+        <strong>\( \mathcal{O}(N\log N) \)</strong>. FFT becomes beneficial when
+        <strong>\( N \)</strong> is large enough that
+        <strong>\( N\log N \)</strong> is far smaller than
+        <strong>\( N^2 \)</strong>
+        and when the transition is shift-invariant (depends only on offset).
+      </p>
+
+      <p>
+        <strong>Problem 5 (One-step hand calculation):</strong> Consider
+        <strong>\( \mathcal{X}=\{0,1,2\} \)</strong> and prior
+        <strong>\( \mathbf{b}_{t-1}=[0.2,0.5,0.3]^\top \)</strong>. Let the
+        transition matrix be
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{T}= \begin{bmatrix} 0.7 &amp; 0.2 &amp; 0.1 \\ 0.2 &amp; 0.6
+        &amp; 0.2 \\ 0.1 &amp; 0.2 &amp; 0.7 \end{bmatrix} \quad (\text{each
+        column sums to }1), \quad \boldsymbol{\ell}=[0.1, 1.0, 0.4]^\top. \]
+      </h4>
+      <p>
+        Compute <strong>\( \overline{\mathbf{b}}_t \)</strong> and
+        <strong>\( \mathbf{b}_t \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Prediction:
+        <strong>\( \overline{\mathbf{b}}_t=\mathbf{T}\mathbf{b}_{t-1} \)</strong
+        >.
+      </p>
+      <h4 class="mathJax">
+        \[ \overline{\mathbf{b}}_t = \begin{bmatrix} 0.7 &amp; 0.2 &amp; 0.1 \\
+        0.2 &amp; 0.6 &amp; 0.2 \\ 0.1 &amp; 0.2 &amp; 0.7 \end{bmatrix}
+        \begin{bmatrix} 0.2\\0.5\\0.3 \end{bmatrix} = \begin{bmatrix}
+        0.7(0.2)+0.2(0.5)+0.1(0.3)\\ 0.2(0.2)+0.6(0.5)+0.2(0.3)\\
+        0.1(0.2)+0.2(0.5)+0.7(0.3) \end{bmatrix} = \begin{bmatrix} 0.27\\ 0.40\\
+        0.33 \end{bmatrix}. \]
+      </h4>
+      <p>
+        Correction:
+        <strong
+          >\( \mathbf{b}_t \propto \boldsymbol{\ell}\odot
+          \overline{\mathbf{b}}_t \)</strong
+        >.
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{b}}_t = \begin{bmatrix}0.1\\1.0\\0.4\end{bmatrix}
+        \odot \begin{bmatrix}0.27\\0.40\\0.33\end{bmatrix} =
+        \begin{bmatrix}0.027\\0.40\\0.132\end{bmatrix}, \quad \eta_t^{-1} =
+        0.027+0.40+0.132 = 0.559, \\ \mathbf{b}_t = \frac{1}{0.559}
+        \begin{bmatrix}0.027\\0.40\\0.132\end{bmatrix} \]
+      </h4>
+      <p>
+        Numerically,
+        <strong
+          >\( \mathbf{b}_t \approx [0.0483,\;0.7156,\;0.2361]^\top \)</strong
+        >.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        You implemented the full discrete Bayes filter loop: prediction via a
+        stochastic transition operator (specializing to cyclic convolution when
+        shift-invariant), correction via a measurement likelihood, and explicit
+        normalization. You also validated core invariants (non-negativity, unit
+        mass) and extracted a MAP estimate. This implementation becomes the
+        conceptual baseline for later localization methods that change
+        representation (continuous state, Gaussian approximations, particles),
+        while preserving the same Bayesian recursion structure.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Smith, R.C., Self, M., &amp; Cheeseman, P. (1986). Estimating uncertain
+        spatial relationships in robotics.
+        <em>Autonomous Robot Vehicles</em> (Springer), 167–193.
+      </li>
+      <li>
+        Fox, D., Burgard, W., &amp; Thrun, S. (1999). Markov localization for
+        mobile robots in dynamic environments.
+        <em>Journal of Artificial Intelligence Research</em>, 11, 391–427.
+      </li>
+      <li>
+        Thrun, S. (2001). A probabilistic online mapping algorithm for teams of
+        mobile robots.
+        <em>The International Journal of Robotics Research</em>, 20(5), 335–363.
+      </li>
+      <li>
+        Leonard, J.J., &amp; Durrant-Whyte, H.F. (1991). Mobile robot
+        localization by tracking geometric beacons.
+        <em>IEEE Transactions on Robotics and Automation</em>, 7(3), 376–382.
+      </li>
+      <li>
+        Moravec, H.P., &amp; Elfes, A. (1985). High resolution maps from wide
+        angle sonar.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >, 116–121.
+      </li>
+      <li>
+        Arulampalam, M.S., Maskell, S., Gordon, N., &amp; Clapp, T. (2002). A
+        tutorial on particle filters for online nonlinear/non-Gaussian Bayesian
+        tracking.
+        <em>IEEE Transactions on Signal Processing</em>, 50(2), 174–188.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter6/Lesson4.html">
+          Lesson 4: Independence Assumptions and Their Limits
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter7/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: EKF Localization Pipeline (mobile framing)
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="active-lesson" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

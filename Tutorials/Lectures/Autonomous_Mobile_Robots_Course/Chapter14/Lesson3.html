@@ -1,0 +1,2734 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Navigation Architecture for AMR - Lesson 3: Behavior Trees / State Machines for Navigation | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 14: Navigation Architecture for AMR</h1>
+    <h3>
+      <strong>Lesson 3: Behavior Trees / State Machines for Navigation</strong>
+    </h3>
+    <p>
+      This lesson formalizes how an AMR’s navigation stack is orchestrated by a
+      discrete decision layer. We develop rigorous semantics for hierarchical
+      finite-state machines (HFSMs) and behavior trees (BTs), connect them to
+      correctness properties (safety invariants, progress guarantees), and show
+      how they schedule global planning, local control, and monitoring in a
+      principled way. Implementations are provided in Python, C++, Java,
+      MATLAB/Simulink (Stateflow-oriented), and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 14 Lesson 1 you saw the
+        <em>global–local–reactive</em> layering; in Lesson 2 you learned
+        costmaps and inflation as the key interface between perception and
+        motion generation. The missing piece is the
+        <strong>decision executive</strong> that answers:
+        <em>when do we replan?</em> <em>when do we keep tracking?</em>
+        <em>what conditions must hold before issuing commands?</em>
+      </p>
+      <p>Two dominant formalisms are used in AMR navigation executives:</p>
+      <ul>
+        <li>
+          <strong
+            >Hierarchical Finite-State Machines (HFSM / Statecharts):</strong
+          >
+          explicit modes (PLAN, CONTROL, …) with guarded transitions. Common in
+          embedded deployments and in MATLAB/Simulink via Stateflow.
+        </li>
+        <li>
+          <strong>Behavior Trees (BTs):</strong> a compositional tree of
+          conditions/actions evaluated by periodic “ticks,” widely used in ROS2
+          navigation stacks due to modularity and readable recovery/fallback
+          composition.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Inputs: goal, localization, costmap, odom"] --> E["Decision Executive (HFSM / BT)"]
+  E --> GP["Global Plan (low rate)"]
+  E --> LC["Local Control (high rate)"]
+  E --> MON["Monitors: progress, safety, validity"]
+  GP --> LC
+  MON --> E
+  LC --> OUT["cmd_vel / steering commands"]
+        </pre>
+      </div>
+
+      <p>
+        The key engineering tradeoff is
+        <strong>expressivity vs maintainability</strong>. Flat FSMs tend to grow
+        brittle as the number of modes and exceptions increases. BTs mitigate
+        “state explosion” by composing reusable subtrees, but require careful
+        semantics for <strong>\( \text{RUNNING} \)</strong> propagation and tick
+        scheduling.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Mathematical Model of a Navigation Executive as a Discrete Event System -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Navigation Executive as a Discrete Event System</h2>
+    <div class="down-content">
+      <p>
+        Let the navigation stack expose a set of
+        <em>observable signals</em> (from localization, costmaps, controllers):
+        <strong>\( \mathbf{o}_k \in \mathbb{R}^m \)</strong>, sampled every tick
+        <strong>\( k \)</strong>. The executive maintains an internal
+        <em>mode</em> and <em>memory</em>.
+      </p>
+
+      <p>A deterministic HFSM can be modeled as:</p>
+
+      <h4 class="mathJax">
+        \[ \mathcal{M} = (\mathcal{S}, \mathcal{X}, \Sigma, \delta, \lambda),
+        \quad s_k \in \mathcal{S},\; \mathbf{x}_k \in \mathcal{X} \]
+      </h4>
+
+      <p>
+        where <strong>\( \mathcal{S} \)</strong> is a finite set of modes (PLAN,
+        CONTROL, …), <strong>\( \mathbf{x}_k \)</strong> is “extended state”
+        (timers, counters, last plan time), <strong>\( \Sigma \)</strong> is an
+        event alphabet, and <strong>\( \delta \)</strong>,
+        <strong>\( \lambda \)</strong> are transition/output maps. With guards
+        expressed as predicates
+        <strong>\( g_j(\mathbf{o}_k,\mathbf{x}_k) \in \{0,1\} \)</strong>, a
+        common deterministic semantics is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ (s_{k+1}, \mathbf{x}_{k+1}) = \delta(s_k, \mathbf{o}_k,
+        \mathbf{x}_k), \qquad \mathbf{u}_k = \lambda(s_k, \mathbf{o}_k,
+        \mathbf{x}_k) \]
+      </h4>
+
+      <p>
+        <strong>Determinism condition.</strong> For each mode
+        <strong>\( s \in \mathcal{S} \)</strong>, suppose outgoing transitions
+        have guards <strong>\( g_1,\dots,g_r \)</strong> evaluated at tick
+        <strong>\( k \)</strong>. If at most one guard is true at a time:
+        <strong>\( \sum_{j=1}^r g_j(\mathbf{o}_k,\mathbf{x}_k) \le 1 \)</strong
+        >, then the next mode is unique.
+      </p>
+
+      <p>
+        <strong>Proof sketch:</strong> If all guards are false, the “default
+        self-loop” (or “do nothing”) transition applies. If exactly one is true,
+        it selects a unique edge. The inequality excludes the ambiguous case
+        with two simultaneously enabled transitions.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Behavior Tree Semantics (Tick Algebra) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Behavior Trees: Formal Semantics</h2>
+    <div class="down-content">
+      <p>
+        A BT is a rooted tree with leaf nodes (<em>conditions</em> and
+        <em>actions</em>) and internal nodes (<em>control flow</em>,
+        <em>decorators</em>). Each tick maps a blackboard (memory) to a status:
+        <strong>SUCCESS</strong>, <strong>FAILURE</strong>, or
+        <strong>RUNNING</strong>.
+      </p>
+
+      <p>
+        Let <strong>\( \mathcal{B} \)</strong> be the blackboard space and
+        <strong>\( \Sigma = \{\text{S},\text{F},\text{R}\} \)</strong> the
+        status set. Each node <strong>\( n \)</strong> defines a (possibly
+        stateful) tick map:
+      </p>
+
+      <h4 class="mathJax">
+        \[ T_n:\mathcal{B} \rightarrow \Sigma \times \mathcal{B}, \qquad
+        T_n(\mathbf{b}) = (\sigma, \mathbf{b}') \]
+      </h4>
+
+      <p>
+        A <strong>condition</strong> is typically memoryless:
+        <strong>\( T_c(\mathbf{b}) = (\text{S},\mathbf{b}) \)</strong> if
+        predicate true, else <strong>\( (\text{F},\mathbf{b}) \)</strong>. An
+        <strong>action</strong> may update the blackboard and return RUNNING for
+        multiple ticks.
+      </p>
+
+      <p>Two essential control-flow nodes:</p>
+      <ul>
+        <li>
+          <strong>Sequence</strong> (AND-like): fails fast, succeeds only if all
+          children succeed.
+        </li>
+        <li>
+          <strong>Fallback</strong> (OR-like selector): succeeds fast, fails
+          only if all children fail.
+        </li>
+      </ul>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ \text{Sequence}(n_1,\dots,n_M):\; \begin{cases} \text{F} & \text{if some child returns F before all succeed} \\ \text{R} & \text{if some child returns R and no earlier child fails} \\ \text{S} & \text{if all children return S} \end{cases} \]
+      </h4>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ \text{Fallback}(n_1,\dots,n_M):\; \begin{cases} \text{S} & \text{if some child returns S before all fail} \\ \text{R} & \text{if some child returns R and no earlier child succeeds} \\ \text{F} & \text{if all children return F} \end{cases} \]
+      </h4>
+
+      <p>
+        Many robotics BTs use <em>memory</em>: if child
+        <strong>\( n_i \)</strong> is RUNNING, the next tick resumes at
+        <strong>\( i \)</strong> rather than re-ticking from
+        <strong>\( 1 \)</strong>. This approximates a compact HFSM over
+        “currently active” leaves.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  T["Tick root"] --> SQ["Sequence node"]
+  SQ --> C1["Child 1 returns S/F/R"]
+  C1 -->|S| C2["Child 2 tick"]
+  C1 -->|F| F["Return FAILURE (reset index)"]
+  C1 -->|R| R["Return RUNNING \n(remember index)"]
+  C2 -->|S ... all S| S["Return SUCCESS (reset index)"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Correctness Properties (Safety + Progress) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Correctness: Safety Invariants and Progress Guarantees</h2>
+    <div class="down-content">
+      <p>
+        Navigation executives are judged by two classes of properties:
+        <strong>safety</strong> (“never command unsafe motion”) and
+        <strong>progress</strong> (“eventually reach goal if feasible and
+        sensors remain valid”).
+      </p>
+
+      <p>
+        <strong>Safety as an invariant.</strong> Let
+        <strong>\( \mathcal{U} \)</strong> be an unsafe set of outputs (e.g.,
+        too large velocity near obstacles, or motion while localization
+        uncertainty is high). Define a predicate <strong>Safe</strong> on
+        blackboard and outputs:
+        <strong>\( \text{Safe}(\mathbf{b},\mathbf{u}) \)</strong>. If the root
+        is a sequence that checks safety before commanding motion:
+        <strong>\( \text{Seq}(\text{Safe?}, \text{CommandMotion}) \)</strong>,
+        then any tick that issues motion must have passed Safe?.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Big(\sigma_k = \text{S from Safe?}\Big) \;\Rightarrow\;
+        \text{Safe}(\mathbf{b}_k,\mathbf{u}_k) \]
+      </h4>
+
+      <p>
+        <strong>Invariant proof pattern (tick induction).</strong> Suppose: (i)
+        Safe? returns SUCCESS only when
+        <strong>\( \text{Safe}(\mathbf{b},\mathbf{u}) \)</strong> holds; (ii)
+        CommandMotion is implemented so that it never violates Safe when called
+        under Safe; then by induction over ticks, the system never emits unsafe
+        commands.
+      </p>
+
+      <p>
+        <strong>Progress with a Lyapunov-like “distance” certificate.</strong>
+        Let <strong>\( d_k \)</strong> be distance-to-goal exposed by the
+        tracking module (or a proxy like path index). A simple progress
+        condition is: while RUNNING in control,
+        <strong>\( d_{k+1} \le d_k - \epsilon \)</strong> whenever no blocking
+        obstacle is present.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \neg \text{Blocked}_k \;\Rightarrow\; d_{k+1} \le d_k - \epsilon,
+        \quad \epsilon &gt; 0 \]
+      </h4>
+
+      <p>
+        If <strong>\( d_k \ge 0 \)</strong> and decreases by at least
+        <strong>\( \epsilon \)</strong> on unblocked ticks, then after at most
+        <strong>\( \left\lceil d_0/\epsilon \right\rceil \)</strong> such ticks,
+        the goal tolerance is reached. This is the discrete analogue of
+        finite-time convergence under a descent condition.
+      </p>
+
+      <p>
+        <strong>Tick-rate constraint (real-time safety margin).</strong>
+        If a monitor detects hazards with a maximum detection delay of one tick,
+        then for a required reaction time
+        <strong>\( T_{\text{react}} \)</strong>, the tick period must satisfy:
+      </p>
+
+      <h4 class="mathJax">\[ \Delta t_{\text{tick}} \le T_{\text{react}} \]</h4>
+
+      <p>
+        In practice: local control runs fast (e.g., 20–50 Hz), while global
+        planning is rate-limited (e.g., 1 Hz), and monitors (progress, validity)
+        run at intermediate rates.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Probabilistic Performance Model (Expected Time / Retries) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Probabilistic Analysis: Expected Completion Time</h2>
+    <div class="down-content">
+      <p>
+        To reason about “how often do we replan?” and “what is the expected
+        time-to-goal?” we can model the executive as a Markov chain over
+        abstract phases. Consider phases
+        <strong>\( \{P, C, D\} \)</strong> (Plan, Control, Done). Let:
+      </p>
+      <ul>
+        <li>
+          <strong> \( p \):</strong> probability that global planning succeeds
+          when called
+        </li>
+        <li>
+          <strong> \( q \):</strong> probability that a control tick makes
+          progress (not blocked)
+        </li>
+        <li>
+          <strong> \( r \):</strong> probability that a control tick reaches
+          goal given progress (simplified)
+        </li>
+      </ul>
+
+      <p>
+        A minimal expected-ticks model (coarse but useful) can be written with
+        linear equations:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} E_D &= 0 \\ E_P &= 1 + p\,E_C + (1-p)\,E_P \\ E_C &=
+        1 + (q r)\,E_D + (q(1-r))\,E_C + (1-q)\,E_P \end{aligned} \]
+      </h4>
+
+      <p>
+        Solving:
+        <strong>\( E_P = \frac{1}{p} + E_C \)</strong> and
+        <strong>\( E_C = \frac{1 + (1-q)\,E_P}{1-q(1-r)} \)</strong>. This type
+        of analysis lets you compare architectural choices (e.g.,
+        replan-on-failure vs replan-on-timer) without changing the motion
+        algorithms.
+      </p>
+
+      <p>
+        For richer executives with many modes, write the transient-state matrix
+        <strong>\( \mathbf{Q} \)</strong> and use the fundamental matrix:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{N} = (\mathbf{I} - \mathbf{Q})^{-1}, \qquad
+        \mathbb{E}[\text{ticks to absorption}] = \mathbf{N}\mathbf{1} \]
+      </h4>
+
+      <p>
+        This is particularly helpful when comparing HFSM vs BT versions of the
+        <em>same</em> policy: their state graphs may differ, but you can measure
+        expected replans, recoveries, and total time by mapping them to the same
+        abstract chain.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementation Patterns in AMR Navigation (What to Put in BT/HFSM) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Practical Design Patterns for Navigation Executives</h2>
+    <div class="down-content">
+      <p>
+        The executive should orchestrate (not re-implement) the navigation
+        pipeline:
+      </p>
+      <ul>
+        <li>
+          <strong>Preconditions (guards):</strong> localization quality, goal
+          validity, costmap availability.
+        </li>
+        <li>
+          <strong>Scheduling:</strong> rate-limit expensive modules (global
+          planning), keep control responsive.
+        </li>
+        <li>
+          <strong>Monitoring:</strong> progress (distance decreases), validity
+          (path not blocked), safety constraints.
+        </li>
+        <li>
+          <strong>Fallbacks:</strong> minimal and modular (detailed recovery is
+          next lesson).
+        </li>
+      </ul>
+
+      <p>A typical navigation BT skeleton (conceptually) is:</p>
+
+      <h4 class="mathJax">
+        \[ \text{Seq}( \text{HaveGoal?}, \text{LocalizationOK?},
+        \text{RateLimit}(\text{GlobalPlan}), \\
+        \text{Fallback}(\text{DriveToGoal}, \text{MinimalFallback}) ) \]
+      </h4>
+
+      <p>
+        In an HFSM, the same policy becomes explicit modes:
+        <strong
+          >\( \text{IDLE} \rightarrow \text{PLAN} \rightarrow \text{CONTROL}
+          \rightarrow \text{DONE} \)</strong
+        >, with a guarded transition to a fallback mode if progress stalls. BTs
+        typically keep this compact and compositional.
+      </p>
+
+      <p>
+        <strong>Robotics libraries (industry practice):</strong>
+      </p>
+      <ul>
+        <li>
+          <strong>Python:</strong> <code>py_trees</code>,
+          <code>py_trees_ros</code>; ROS2 integration via <code>rclpy</code>.
+        </li>
+        <li>
+          <strong>C++:</strong> <code>BehaviorTree.CPP</code> (widely used),
+          ROS2 Nav2 uses BT-based task execution.
+        </li>
+        <li>
+          <strong>Java:</strong> robotics stacks often use explicit FSMs;
+          integration options include ROSJava and custom BT frameworks.
+        </li>
+        <li>
+          <strong>MATLAB/Simulink:</strong> Stateflow for HFSM/Statecharts;
+          Simulink blocks for interfacing with controllers/filters.
+        </li>
+        <li>
+          <strong>Wolfram Mathematica:</strong> rapid prototyping of policy
+          logic and symbolic analysis (e.g., expected-time equations).
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation (BT + HFSM demo) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab — Minimal BT Framework and Navigation Executive</h2>
+    <div class="down-content">
+      <p>
+        This implementation builds a minimal BT (Sequence, Fallback,
+        RateLimiter) with a blackboard, plus a comparable HFSM. The “global
+        plan” and “local control” are mocked to focus on executive logic.
+      </p>
+
+      <p><strong>Chapter14_Lesson3.py</strong></p>
+      <pre><code class="language-python">"""
+Chapter14_Lesson3.py
+Autonomous Mobile Robots (AMR) — Chapter 14 Lesson 3
+Behavior Trees / State Machines for Navigation
+
+This file provides:
+- A minimal Behavior Tree (BT) framework (from scratch)
+- A navigation-oriented BT example using a shared blackboard
+- A comparable hierarchical finite-state machine (HFSM) example
+
+No external dependencies required (standard library only).
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Callable, Dict, List, Optional, Any
+import time
+
+
+# -----------------------------
+# Behavior Tree core
+# -----------------------------
+
+class Status(Enum):
+    SUCCESS = auto()
+    FAILURE = auto()
+    RUNNING = auto()
+
+
+Blackboard = Dict[str, Any]
+
+
+class Node:
+    """Abstract BT node."""
+    def __init__(self, name: str):
+        self.name = name
+
+    def tick(self, bb: Blackboard) -&gt; Status:
+        raise NotImplementedError
+
+
+class Condition(Node):
+    def __init__(self, name: str, fn: Callable[[Blackboard], bool]):
+        super().__init__(name)
+        self.fn = fn
+
+    def tick(self, bb: Blackboard) -&gt; Status:
+        return Status.SUCCESS if self.fn(bb) else Status.FAILURE
+
+
+class Action(Node):
+    """
+    Action node with optional internal state.
+    The action function returns one of: 'success', 'failure', 'running'.
+    """
+    def __init__(self, name: str, fn: Callable[[Blackboard], str]):
+        super().__init__(name)
+        self.fn = fn
+
+    def tick(self, bb: Blackboard) -&gt; Status:
+        out = self.fn(bb).lower().strip()
+        if out == "success":
+            return Status.SUCCESS
+        if out == "failure":
+            return Status.FAILURE
+        return Status.RUNNING
+
+
+class Sequence(Node):
+    """Ticks children left-to-right. Fails fast; succeeds only if all succeed."""
+    def __init__(self, name: str, children: List[Node]):
+        super().__init__(name)
+        self.children = children
+        self._i = 0  # memory for RUNNING semantics (Sequence with memory)
+
+    def tick(self, bb: Blackboard) -&gt; Status:
+        while self._i &lt; len(self.children):
+            s = self.children[self._i].tick(bb)
+            if s == Status.SUCCESS:
+                self._i += 1
+                continue
+            if s == Status.FAILURE:
+                self._i = 0
+                return Status.FAILURE
+            return Status.RUNNING
+        self._i = 0
+        return Status.SUCCESS
+
+
+class Fallback(Node):
+    """Ticks children left-to-right. Succeeds fast; fails only if all fail."""
+    def __init__(self, name: str, children: List[Node]):
+        super().__init__(name)
+        self.children = children
+        self._i = 0  # memory for RUNNING semantics (Fallback with memory)
+
+    def tick(self, bb: Blackboard) -&gt; Status:
+        while self._i &lt; len(self.children):
+            s = self.children[self._i].tick(bb)
+            if s == Status.FAILURE:
+                self._i += 1
+                continue
+            if s == Status.SUCCESS:
+                self._i = 0
+                return Status.SUCCESS
+            return Status.RUNNING
+        self._i = 0
+        return Status.FAILURE
+
+
+class RateLimiter(Node):
+    """Ticks child at most once every dt seconds (simple 'decorator' node)."""
+    def __init__(self, name: str, child: Node, dt: float):
+        super().__init__(name)
+        self.child = child
+        self.dt = float(dt)
+        self._t_last = 0.0
+        self._last_status = Status.FAILURE
+
+    def tick(self, bb: Blackboard) -&gt; Status:
+        now = time.time()
+        if now - self._t_last &gt;= self.dt:
+            self._t_last = now
+            self._last_status = self.child.tick(bb)
+        return self._last_status
+
+
+# -----------------------------
+# Navigation-oriented primitives
+# -----------------------------
+
+def cond_have_goal(bb: Blackboard) -&gt; bool:
+    return bb.get("goal") is not None
+
+def cond_goal_reached(bb: Blackboard) -&gt; bool:
+    # Goal is reached if distance &lt;= tol
+    return bb.get("dist_to_goal", float("inf")) &lt;= bb.get("goal_tol", 0.2)
+
+def cond_localization_ok(bb: Blackboard) -&gt; bool:
+    # "Localization OK" if covariance trace below a threshold
+    P = bb.get("P_trace", 1e9)
+    return P &lt;= bb.get("P_trace_max", 2.0)
+
+def cond_path_valid(bb: Blackboard) -&gt; bool:
+    # A coarse validity bit (e.g., global path not blocked)
+    return bool(bb.get("path_valid", False))
+
+
+def act_global_plan(bb: Blackboard) -&gt; str:
+    """
+    Mock global planning:
+    - Requires localization OK and a goal.
+    - Produces a 'path' and marks path_valid.
+    """
+    if bb.get("goal") is None:
+        return "failure"
+    if not cond_localization_ok(bb):
+        return "failure"
+    # pretend planning succeeds with high probability
+    bb["path"] = ["(x0,y0)", "(x1,y1)", "(xg,yg)"]
+    bb["path_valid"] = True
+    bb.setdefault("planner_calls", 0)
+    bb["planner_calls"] += 1
+    return "success"
+
+
+def act_local_control(bb: Blackboard) -&gt; str:
+    """
+    Mock local control:
+    - If no valid path, fail.
+    - Otherwise, reduce distance-to-goal.
+    - Can 'stall' if obstacle flag is set.
+    """
+    if not bb.get("path_valid", False):
+        return "failure"
+    if bb.get("obstacle_blocking", False):
+        # local controller running but not making progress
+        bb["dist_to_goal"] = bb.get("dist_to_goal", 5.0)
+        return "running"
+
+    # progress
+    d = float(bb.get("dist_to_goal", 5.0))
+    v = float(bb.get("progress_per_tick", 0.15))
+    bb["dist_to_goal"] = max(0.0, d - v)
+    return "running" if not cond_goal_reached(bb) else "success"
+
+
+def act_recover_clear_costmap(bb: Blackboard) -&gt; str:
+    """
+    Mock recovery: clears obstacle and invalidates path (forces re-plan).
+    """
+    bb["obstacle_blocking"] = False
+    bb["path_valid"] = False
+    bb.setdefault("recoveries", 0)
+    bb["recoveries"] += 1
+    return "success"
+
+
+def build_navigation_bt() -&gt; Node:
+    """
+    A typical pattern:
+    - Preconditions: have goal, localization ok
+    - Plan at limited rate
+    - Control until goal reached
+    - If control stalls (obstacle), run recovery then re-plan
+    """
+    return Sequence("NavigateToGoal", [
+        Condition("HaveGoal?", cond_have_goal),
+        Condition("LocalizationOK?", cond_localization_ok),
+        RateLimiter("Replan@1Hz", Action("GlobalPlan", act_global_plan), dt=1.0),
+        Fallback("DriveOrRecover", [
+            Sequence("DriveToGoal", [
+                Condition("PathValid?", cond_path_valid),
+                Action("LocalControl", act_local_control),
+                Condition("GoalReached?", cond_goal_reached),
+            ]),
+            Action("RecoveryClearCostmap", act_recover_clear_costmap),
+        ])
+    ])
+
+
+# -----------------------------
+# Comparable Hierarchical FSM (HFSM)
+# -----------------------------
+
+class NavState(Enum):
+    IDLE = auto()
+    PLAN = auto()
+    CONTROL = auto()
+    RECOVERY = auto()
+    DONE = auto()
+    FAIL = auto()
+
+
+@dataclass
+class HFSM:
+    state: NavState = NavState.IDLE
+    stall_ticks: int = 0
+    stall_max: int = 10
+
+    def step(self, bb: Blackboard) -&gt; NavState:
+        if self.state == NavState.IDLE:
+            if cond_have_goal(bb) and cond_localization_ok(bb):
+                self.state = NavState.PLAN
+            else:
+                self.state = NavState.FAIL
+            return self.state
+
+        if self.state == NavState.PLAN:
+            if act_global_plan(bb) == "success":
+                self.state = NavState.CONTROL
+            else:
+                self.state = NavState.FAIL
+            return self.state
+
+        if self.state == NavState.CONTROL:
+            if cond_goal_reached(bb):
+                self.state = NavState.DONE
+                return self.state
+            out = act_local_control(bb)
+            if out == "failure":
+                self.state = NavState.PLAN
+                return self.state
+            # detect stall (no distance decrease) by obstacle flag
+            if bb.get("obstacle_blocking", False):
+                self.stall_ticks += 1
+                if self.stall_ticks &gt;= self.stall_max:
+                    self.state = NavState.RECOVERY
+                    self.stall_ticks = 0
+            else:
+                self.stall_ticks = 0
+            return self.state
+
+        if self.state == NavState.RECOVERY:
+            act_recover_clear_costmap(bb)
+            self.state = NavState.PLAN
+            return self.state
+
+        return self.state
+
+
+# -----------------------------
+# Demo
+# -----------------------------
+
+def run_demo():
+    bb: Blackboard = {
+        "goal": (5.0, 0.0),
+        "dist_to_goal": 5.0,
+        "goal_tol": 0.2,
+        "P_trace": 0.8,
+        "P_trace_max": 2.0,
+        "progress_per_tick": 0.2,
+        "obstacle_blocking": False,
+        "path_valid": False,
+    }
+
+    bt = build_navigation_bt()
+    fsm = HFSM()
+
+    print("=== Behavior Tree demo ===")
+    for t in range(60):
+        # inject an obstacle episode
+        if t == 12:
+            bb["obstacle_blocking"] = True
+        if t == 25:
+            bb["obstacle_blocking"] = False
+
+        s = bt.tick(bb)
+        print(f"t={t:02d} status={s.name:7s} dist={bb['dist_to_goal']:.2f} "
+              f"path_valid={bb['path_valid']} rec={bb.get('recoveries',0)}")
+        if s == Status.SUCCESS:
+            break
+        time.sleep(0.02)
+
+    # reset
+    bb["dist_to_goal"] = 5.0
+    bb["path_valid"] = False
+    bb["obstacle_blocking"] = False
+    bb["recoveries"] = 0
+
+    print("\n=== HFSM demo ===")
+    for t in range(60):
+        if t == 12:
+            bb["obstacle_blocking"] = True
+        if t == 25:
+            bb["obstacle_blocking"] = False
+
+        st = fsm.step(bb)
+        print(f"t={t:02d} state={st.name:9s} dist={bb['dist_to_goal']:.2f} "
+              f"path_valid={bb['path_valid']} rec={bb.get('recoveries',0)}")
+        if st == NavState.DONE:
+            break
+        time.sleep(0.02)
+
+
+if __name__ == "__main__":
+    run_demo()
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation (BT + HFSM demo) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Lab — Minimal BT Framework (Navigation Executive Skeleton)</h2>
+    <div class="down-content">
+      <p>
+        In C++ robotics, BTs are commonly implemented with
+        <code>BehaviorTree.CPP</code>. Here we provide a minimal from-scratch
+        implementation to make the semantics explicit.
+      </p>
+
+      <p><strong>Chapter14_Lesson3.cpp</strong></p>
+      <pre><code class="language-cpp">// Chapter14_Lesson3.cpp
+// Autonomous Mobile Robots (AMR) — Chapter 14 Lesson 3
+// Behavior Trees / State Machines for Navigation
+//
+// This is a self-contained, from-scratch minimal BT implementation (no external libs).
+// It also contains a simple hierarchical finite-state machine (HFSM) for comparison.
+//
+// Build (example):
+//   g++ -std=c++17 -O2 Chapter14_Lesson3.cpp -o Chapter14_Lesson3
+// Run:
+//   ./Chapter14_Lesson3
+
+#include &lt;iostream&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+#include &lt;functional&gt;
+#include &lt;unordered_map&gt;
+#include &lt;variant&gt;
+#include &lt;chrono&gt;
+#include &lt;thread&gt;
+#include &lt;cmath&gt;
+
+enum class Status { SUCCESS, FAILURE, RUNNING };
+
+static const char* to_cstr(Status s) {
+  switch (s) {
+    case Status::SUCCESS: return "SUCCESS";
+    case Status::FAILURE: return "FAILURE";
+    default: return "RUNNING";
+  }
+}
+
+using Value = std::variant&lt;bool, int, double, std::string&gt;;
+using Blackboard = std::unordered_map&lt;std::string, Value&gt;;
+
+template &lt;typename T&gt;
+T bb_get(const Blackboard&amp; bb, const std::string&amp; key, const T&amp; defval) {
+  auto it = bb.find(key);
+  if (it == bb.end()) return defval;
+  if (auto p = std::get_if&lt;T&gt;(&amp;it-&gt;second)) return *p;
+  return defval;
+}
+
+template &lt;typename T&gt;
+void bb_set(Blackboard&amp; bb, const std::string&amp; key, const T&amp; v) {
+  bb[key] = v;
+}
+
+// -----------------------------
+// BT core
+// -----------------------------
+struct Node {
+  std::string name;
+  explicit Node(std::string n) : name(std::move(n)) {}
+  virtual ~Node() = default;
+  virtual Status tick(Blackboard&amp; bb) = 0;
+};
+
+struct Condition : Node {
+  std::function&lt;bool(const Blackboard&amp;)&gt; fn;
+  Condition(std::string n, std::function&lt;bool(const Blackboard&amp;)&gt; f)
+    : Node(std::move(n)), fn(std::move(f)) {}
+  Status tick(Blackboard&amp; bb) override {
+    (void)bb;
+    return fn(bb) ? Status::SUCCESS : Status::FAILURE;
+  }
+};
+
+struct Action : Node {
+  std::function&lt;std::string(Blackboard&amp;)&gt; fn;
+  Action(std::string n, std::function&lt;std::string(Blackboard&amp;)&gt; f)
+    : Node(std::move(n)), fn(std::move(f)) {}
+  Status tick(Blackboard&amp; bb) override {
+    std::string out = fn(bb);
+    for (auto&amp; c : out) c = static_cast&lt;char&gt;(std::tolower(c));
+    if (out == "success") return Status::SUCCESS;
+    if (out == "failure") return Status::FAILURE;
+    return Status::RUNNING;
+  }
+};
+
+struct Sequence : Node {
+  std::vector&lt;Node*&gt; children;
+  size_t i = 0; // memory
+  Sequence(std::string n, std::vector&lt;Node*&gt; ch)
+    : Node(std::move(n)), children(std::move(ch)) {}
+  Status tick(Blackboard&amp; bb) override {
+    while (i &lt; children.size()) {
+      Status s = children[i]-&gt;tick(bb);
+      if (s == Status::SUCCESS) { ++i; continue; }
+      if (s == Status::FAILURE) { i = 0; return Status::FAILURE; }
+      return Status::RUNNING;
+    }
+    i = 0;
+    return Status::SUCCESS;
+  }
+};
+
+struct Fallback : Node {
+  std::vector&lt;Node*&gt; children;
+  size_t i = 0; // memory
+  Fallback(std::string n, std::vector&lt;Node*&gt; ch)
+    : Node(std::move(n)), children(std::move(ch)) {}
+  Status tick(Blackboard&amp; bb) override {
+    while (i &lt; children.size()) {
+      Status s = children[i]-&gt;tick(bb);
+      if (s == Status::FAILURE) { ++i; continue; }
+      if (s == Status::SUCCESS) { i = 0; return Status::SUCCESS; }
+      return Status::RUNNING;
+    }
+    i = 0;
+    return Status::FAILURE;
+  }
+};
+
+struct RateLimiter : Node {
+  Node* child;
+  double dt;
+  std::chrono::steady_clock::time_point last;
+  Status last_status = Status::FAILURE;
+
+  RateLimiter(std::string n, Node* c, double dt_sec)
+    : Node(std::move(n)), child(c), dt(dt_sec), last(std::chrono::steady_clock::now()) {
+    last -= std::chrono::milliseconds(static_cast&lt;int&gt;(dt * 1000)); // force first tick
+  }
+
+  Status tick(Blackboard&amp; bb) override {
+    auto now = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration&lt;double&gt;(now - last).count();
+    if (elapsed &gt;= dt) {
+      last = now;
+      last_status = child-&gt;tick(bb);
+    }
+    return last_status;
+  }
+};
+
+// -----------------------------
+// Navigation primitives
+// -----------------------------
+static bool have_goal(const Blackboard&amp; bb) {
+  return bb_get&lt;bool&gt;(bb, "have_goal", false);
+}
+static bool localization_ok(const Blackboard&amp; bb) {
+  double P_trace = bb_get&lt;double&gt;(bb, "P_trace", 1e9);
+  double P_max   = bb_get&lt;double&gt;(bb, "P_trace_max", 2.0);
+  return P_trace &lt;= P_max;
+}
+static bool path_valid(const Blackboard&amp; bb) {
+  return bb_get&lt;bool&gt;(bb, "path_valid", false);
+}
+static bool goal_reached(const Blackboard&amp; bb) {
+  double d = bb_get&lt;double&gt;(bb, "dist_to_goal", 1e9);
+  double tol = bb_get&lt;double&gt;(bb, "goal_tol", 0.2);
+  return d &lt;= tol;
+}
+
+static std::string global_plan(Blackboard&amp; bb) {
+  if (!have_goal(bb)) return "failure";
+  if (!localization_ok(bb)) return "failure";
+  bb_set(bb, "path_valid", true);
+  int calls = bb_get&lt;int&gt;(bb, "planner_calls", 0);
+  bb_set(bb, "planner_calls", calls + 1);
+  return "success";
+}
+
+static std::string local_control(Blackboard&amp; bb) {
+  if (!path_valid(bb)) return "failure";
+  bool obs = bb_get&lt;bool&gt;(bb, "obstacle_blocking", false);
+  if (obs) return "running";
+
+  double d = bb_get&lt;double&gt;(bb, "dist_to_goal", 5.0);
+  double step = bb_get&lt;double&gt;(bb, "progress_per_tick", 0.2);
+  d = std::max(0.0, d - step);
+  bb_set(bb, "dist_to_goal", d);
+  return goal_reached(bb) ? "success" : "running";
+}
+
+static std::string recover_clear_costmap(Blackboard&amp; bb) {
+  bb_set(bb, "obstacle_blocking", false);
+  bb_set(bb, "path_valid", false);
+  int rec = bb_get&lt;int&gt;(bb, "recoveries", 0);
+  bb_set(bb, "recoveries", rec + 1);
+  return "success";
+}
+
+// -----------------------------
+// HFSM
+// -----------------------------
+enum class NavState { IDLE, PLAN, CONTROL, RECOVERY, DONE, FAIL };
+
+static const char* to_cstr(NavState s) {
+  switch (s) {
+    case NavState::IDLE: return "IDLE";
+    case NavState::PLAN: return "PLAN";
+    case NavState::CONTROL: return "CONTROL";
+    case NavState::RECOVERY: return "RECOVERY";
+    case NavState::DONE: return "DONE";
+    default: return "FAIL";
+  }
+}
+
+struct HFSM {
+  NavState st = NavState::IDLE;
+  int stall = 0;
+  int stall_max = 10;
+
+  NavState step(Blackboard&amp; bb) {
+    if (st == NavState::IDLE) {
+      st = (have_goal(bb) &amp;&amp; localization_ok(bb)) ? NavState::PLAN : NavState::FAIL;
+      return st;
+    }
+    if (st == NavState::PLAN) {
+      st = (global_plan(bb) == "success") ? NavState::CONTROL : NavState::FAIL;
+      return st;
+    }
+    if (st == NavState::CONTROL) {
+      if (goal_reached(bb)) { st = NavState::DONE; return st; }
+      std::string out = local_control(bb);
+      if (out == "failure") { st = NavState::PLAN; return st; }
+      bool obs = bb_get&lt;bool&gt;(bb, "obstacle_blocking", false);
+      if (obs) {
+        ++stall;
+        if (stall &gt;= stall_max) { st = NavState::RECOVERY; stall = 0; }
+      } else stall = 0;
+      return st;
+    }
+    if (st == NavState::RECOVERY) {
+      recover_clear_costmap(bb);
+      st = NavState::PLAN;
+      return st;
+    }
+    return st;
+  }
+};
+
+// -----------------------------
+// Build BT
+// -----------------------------
+Node* build_navigation_bt(std::vector&lt;std::unique_ptr&lt;Node&gt;&gt;&amp; arena) {
+  auto make = [&amp;](auto ptr) -&gt; Node* {
+    arena.emplace_back(std::move(ptr));
+    return arena.back().get();
+  };
+
+  Node* haveGoal = make(std::make_unique&lt;Condition&gt;("HaveGoal?", [](const Blackboard&amp; bb){ return have_goal(bb); }));
+  Node* locOK    = make(std::make_unique&lt;Condition&gt;("LocalizationOK?", [](const Blackboard&amp; bb){ return localization_ok(bb); }));
+  Node* pathOK   = make(std::make_unique&lt;Condition&gt;("PathValid?", [](const Blackboard&amp; bb){ return path_valid(bb); }));
+  Node* reached  = make(std::make_unique&lt;Condition&gt;("GoalReached?", [](const Blackboard&amp; bb){ return goal_reached(bb); }));
+
+  Node* planAct  = make(std::make_unique&lt;Action&gt;("GlobalPlan", [](Blackboard&amp; bb){ return global_plan(bb); }));
+  Node* planRate = make(std::make_unique&lt;RateLimiter&gt;("Replan@1Hz", planAct, 1.0));
+
+  Node* ctrlAct  = make(std::make_unique&lt;Action&gt;("LocalControl", [](Blackboard&amp; bb){ return local_control(bb); }));
+  Node* recAct   = make(std::make_unique&lt;Action&gt;("RecoveryClearCostmap", [](Blackboard&amp; bb){ return recover_clear_costmap(bb); }));
+
+  Node* driveSeq = make(std::make_unique&lt;Sequence&gt;("DriveToGoal", std::vector&lt;Node*&gt;{ pathOK, ctrlAct, reached }));
+  Node* driveOrRecover = make(std::make_unique&lt;Fallback&gt;("DriveOrRecover", std::vector&lt;Node*&gt;{ driveSeq, recAct }));
+
+  Node* root = make(std::make_unique&lt;Sequence&gt;("NavigateToGoal",
+    std::vector&lt;Node*&gt;{ haveGoal, locOK, planRate, driveOrRecover }));
+
+  return root;
+}
+
+int main() {
+  Blackboard bb;
+  bb_set(bb, "have_goal", true);
+  bb_set(bb, "dist_to_goal", 5.0);
+  bb_set(bb, "goal_tol", 0.2);
+  bb_set(bb, "P_trace", 0.8);
+  bb_set(bb, "P_trace_max", 2.0);
+  bb_set(bb, "progress_per_tick", 0.2);
+  bb_set(bb, "obstacle_blocking", false);
+  bb_set(bb, "path_valid", false);
+  bb_set(bb, "recoveries", 0);
+  bb_set(bb, "planner_calls", 0);
+
+  std::cout &lt;&lt; "=== Behavior Tree demo ===\n";
+  std::vector&lt;std::unique_ptr&lt;Node&gt;&gt; arena;
+  Node* bt = build_navigation_bt(arena);
+
+  for (int t = 0; t &lt; 60; ++t) {
+    if (t == 12) bb_set(bb, "obstacle_blocking", true);
+    if (t == 25) bb_set(bb, "obstacle_blocking", false);
+
+    Status s = bt-&gt;tick(bb);
+    std::cout &lt;&lt; "t=" &lt;&lt; (t&lt;10?"0":"") &lt;&lt; t
+              &lt;&lt; " status=" &lt;&lt; to_cstr(s)
+              &lt;&lt; " dist=" &lt;&lt; bb_get&lt;double&gt;(bb, "dist_to_goal", 0.0)
+              &lt;&lt; " path_valid=" &lt;&lt; (bb_get&lt;bool&gt;(bb, "path_valid", false) ? "true":"false")
+              &lt;&lt; " rec=" &lt;&lt; bb_get&lt;int&gt;(bb, "recoveries", 0)
+              &lt;&lt; "\n";
+    if (s == Status::SUCCESS) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  // Reset and run HFSM
+  bb_set(bb, "dist_to_goal", 5.0);
+  bb_set(bb, "path_valid", false);
+  bb_set(bb, "obstacle_blocking", false);
+  bb_set(bb, "recoveries", 0);
+  bb_set(bb, "planner_calls", 0);
+
+  std::cout &lt;&lt; "\n=== HFSM demo ===\n";
+  HFSM fsm;
+  for (int t = 0; t &lt; 60; ++t) {
+    if (t == 12) bb_set(bb, "obstacle_blocking", true);
+    if (t == 25) bb_set(bb, "obstacle_blocking", false);
+
+    NavState st = fsm.step(bb);
+    std::cout &lt;&lt; "t=" &lt;&lt; (t&lt;10?"0":"") &lt;&lt; t
+              &lt;&lt; " state=" &lt;&lt; to_cstr(st)
+              &lt;&lt; " dist=" &lt;&lt; bb_get&lt;double&gt;(bb, "dist_to_goal", 0.0)
+              &lt;&lt; " path_valid=" &lt;&lt; (bb_get&lt;bool&gt;(bb, "path_valid", false) ? "true":"false")
+              &lt;&lt; " rec=" &lt;&lt; bb_get&lt;int&gt;(bb, "recoveries", 0)
+              &lt;&lt; "\n";
+    if (st == NavState::DONE) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  return 0;
+}
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation (BT + HFSM demo) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Lab — Single-File BT + HFSM (Teaching Implementation)</h2>
+    <div class="down-content">
+      <p>
+        Java deployments often use explicit HFSMs; nevertheless, BTs can be
+        implemented cleanly and tested with unit tests. This single-file example
+        keeps all classes as static inner classes for portability.
+      </p>
+
+      <p><strong>Chapter14_Lesson3.java</strong></p>
+      <pre><code class="language-java">// Chapter14_Lesson3.java
+// Autonomous Mobile Robots (AMR) — Chapter 14 Lesson 3
+// Behavior Trees / State Machines for Navigation
+//
+// A single-file Java implementation (all classes as static inner classes).
+//
+// Compile:
+//   javac Chapter14_Lesson3.java
+// Run:
+//   java Chapter14_Lesson3
+
+import java.util.*;
+
+public class Chapter14_Lesson3 {
+
+  // -----------------------------
+  // Behavior Tree core
+  // -----------------------------
+  enum Status { SUCCESS, FAILURE, RUNNING }
+
+  interface Node {
+    Status tick(Map&lt;String, Object&gt; bb);
+    String name();
+  }
+
+  static final class Condition implements Node {
+    private final String name;
+    private final java.util.function.Predicate&lt;Map&lt;String,Object&gt;&gt; fn;
+    Condition(String name, java.util.function.Predicate&lt;Map&lt;String,Object&gt;&gt; fn) {
+      this.name = name; this.fn = fn;
+    }
+    public Status tick(Map&lt;String,Object&gt; bb) { return fn.test(bb) ? Status.SUCCESS : Status.FAILURE; }
+    public String name() { return name; }
+  }
+
+  static final class Action implements Node {
+    private final String name;
+    private final java.util.function.Function&lt;Map&lt;String,Object&gt;, String&gt; fn;
+    Action(String name, java.util.function.Function&lt;Map&lt;String,Object&gt;, String&gt; fn) {
+      this.name = name; this.fn = fn;
+    }
+    public Status tick(Map&lt;String,Object&gt; bb) {
+      String out = fn.apply(bb).toLowerCase(Locale.ROOT).trim();
+      if (out.equals("success")) return Status.SUCCESS;
+      if (out.equals("failure")) return Status.FAILURE;
+      return Status.RUNNING;
+    }
+    public String name() { return name; }
+  }
+
+  static final class Sequence implements Node {
+    private final String name;
+    private final List&lt;Node&gt; children;
+    private int i = 0; // memory
+    Sequence(String name, List&lt;Node&gt; children) { this.name = name; this.children = children; }
+    public Status tick(Map&lt;String,Object&gt; bb) {
+      while (i &lt; children.size()) {
+        Status s = children.get(i).tick(bb);
+        if (s == Status.SUCCESS) { i++; continue; }
+        if (s == Status.FAILURE) { i = 0; return Status.FAILURE; }
+        return Status.RUNNING;
+      }
+      i = 0;
+      return Status.SUCCESS;
+    }
+    public String name() { return name; }
+  }
+
+  static final class Fallback implements Node {
+    private final String name;
+    private final List&lt;Node&gt; children;
+    private int i = 0; // memory
+    Fallback(String name, List&lt;Node&gt; children) { this.name = name; this.children = children; }
+    public Status tick(Map&lt;String,Object&gt; bb) {
+      while (i &lt; children.size()) {
+        Status s = children.get(i).tick(bb);
+        if (s == Status.FAILURE) { i++; continue; }
+        if (s == Status.SUCCESS) { i = 0; return Status.SUCCESS; }
+        return Status.RUNNING;
+      }
+      i = 0;
+      return Status.FAILURE;
+    }
+    public String name() { return name; }
+  }
+
+  static final class RateLimiter implements Node {
+    private final String name;
+    private final Node child;
+    private final long dtMillis;
+    private long last = 0L;
+    private Status lastStatus = Status.FAILURE;
+    RateLimiter(String name, Node child, double dtSeconds) {
+      this.name = name; this.child = child; this.dtMillis = (long)(dtSeconds * 1000.0);
+      this.last = 0L;
+    }
+    public Status tick(Map&lt;String,Object&gt; bb) {
+      long now = System.currentTimeMillis();
+      if (now - last &gt;= dtMillis) {
+        last = now;
+        lastStatus = child.tick(bb);
+      }
+      return lastStatus;
+    }
+    public String name() { return name; }
+  }
+
+  // -----------------------------
+  // Navigation primitives
+  // -----------------------------
+  static boolean haveGoal(Map&lt;String,Object&gt; bb) { return (Boolean)bb.getOrDefault("have_goal", false); }
+
+  static boolean localizationOk(Map&lt;String,Object&gt; bb) {
+    double P = (Double)bb.getOrDefault("P_trace", 1e9);
+    double Pmax = (Double)bb.getOrDefault("P_trace_max", 2.0);
+    return P &lt;= Pmax;
+  }
+
+  static boolean pathValid(Map&lt;String,Object&gt; bb) { return (Boolean)bb.getOrDefault("path_valid", false); }
+
+  static boolean goalReached(Map&lt;String,Object&gt; bb) {
+    double d = (Double)bb.getOrDefault("dist_to_goal", 1e9);
+    double tol = (Double)bb.getOrDefault("goal_tol", 0.2);
+    return d &lt;= tol;
+  }
+
+  static String globalPlan(Map&lt;String,Object&gt; bb) {
+    if (!haveGoal(bb)) return "failure";
+    if (!localizationOk(bb)) return "failure";
+    bb.put("path_valid", true);
+    int calls = (Integer)bb.getOrDefault("planner_calls", 0);
+    bb.put("planner_calls", calls + 1);
+    return "success";
+  }
+
+  static String localControl(Map&lt;String,Object&gt; bb) {
+    if (!pathValid(bb)) return "failure";
+    boolean obs = (Boolean)bb.getOrDefault("obstacle_blocking", false);
+    if (obs) return "running";
+
+    double d = (Double)bb.getOrDefault("dist_to_goal", 5.0);
+    double step = (Double)bb.getOrDefault("progress_per_tick", 0.2);
+    d = Math.max(0.0, d - step);
+    bb.put("dist_to_goal", d);
+    return goalReached(bb) ? "success" : "running";
+  }
+
+  static String recoverClearCostmap(Map&lt;String,Object&gt; bb) {
+    bb.put("obstacle_blocking", false);
+    bb.put("path_valid", false);
+    int rec = (Integer)bb.getOrDefault("recoveries", 0);
+    bb.put("recoveries", rec + 1);
+    return "success";
+  }
+
+  static Node buildNavigationBT() {
+    Node haveGoal = new Condition("HaveGoal?", Chapter14_Lesson3::haveGoal);
+    Node locOK = new Condition("LocalizationOK?", Chapter14_Lesson3::localizationOk);
+    Node pathOK = new Condition("PathValid?", Chapter14_Lesson3::pathValid);
+    Node reached = new Condition("GoalReached?", Chapter14_Lesson3::goalReached);
+
+    Node planAct = new Action("GlobalPlan", Chapter14_Lesson3::globalPlan);
+    Node planRate = new RateLimiter("Replan@1Hz", planAct, 1.0);
+
+    Node ctrlAct = new Action("LocalControl", Chapter14_Lesson3::localControl);
+    Node recAct  = new Action("RecoveryClearCostmap", Chapter14_Lesson3::recoverClearCostmap);
+
+    Node driveSeq = new Sequence("DriveToGoal", Arrays.asList(pathOK, ctrlAct, reached));
+    Node driveOrRecover = new Fallback("DriveOrRecover", Arrays.asList(driveSeq, recAct));
+
+    return new Sequence("NavigateToGoal", Arrays.asList(haveGoal, locOK, planRate, driveOrRecover));
+  }
+
+  // -----------------------------
+  // HFSM
+  // -----------------------------
+  enum NavState { IDLE, PLAN, CONTROL, RECOVERY, DONE, FAIL }
+
+  static final class HFSM {
+    NavState st = NavState.IDLE;
+    int stall = 0;
+    int stallMax = 10;
+
+    NavState step(Map&lt;String,Object&gt; bb) {
+      switch (st) {
+        case IDLE:
+          st = (haveGoal(bb) &amp;&amp; localizationOk(bb)) ? NavState.PLAN : NavState.FAIL;
+          return st;
+        case PLAN:
+          st = globalPlan(bb).equals("success") ? NavState.CONTROL : NavState.FAIL;
+          return st;
+        case CONTROL:
+          if (goalReached(bb)) { st = NavState.DONE; return st; }
+          String out = localControl(bb);
+          if (out.equals("failure")) { st = NavState.PLAN; return st; }
+          boolean obs = (Boolean)bb.getOrDefault("obstacle_blocking", false);
+          if (obs) {
+            stall++;
+            if (stall &gt;= stallMax) { stall = 0; st = NavState.RECOVERY; }
+          } else stall = 0;
+          return st;
+        case RECOVERY:
+          recoverClearCostmap(bb);
+          st = NavState.PLAN;
+          return st;
+        default:
+          return st;
+      }
+    }
+  }
+
+  // -----------------------------
+  // Demo
+  // -----------------------------
+  public static void main(String[] args) throws Exception {
+    Map&lt;String,Object&gt; bb = new HashMap&lt;&gt;();
+    bb.put("have_goal", true);
+    bb.put("dist_to_goal", 5.0);
+    bb.put("goal_tol", 0.2);
+    bb.put("P_trace", 0.8);
+    bb.put("P_trace_max", 2.0);
+    bb.put("progress_per_tick", 0.2);
+    bb.put("obstacle_blocking", false);
+    bb.put("path_valid", false);
+    bb.put("recoveries", 0);
+    bb.put("planner_calls", 0);
+
+    Node bt = buildNavigationBT();
+    System.out.println("=== Behavior Tree demo ===");
+    for (int t = 0; t &lt; 60; t++) {
+      if (t == 12) bb.put("obstacle_blocking", true);
+      if (t == 25) bb.put("obstacle_blocking", false);
+
+      Status s = bt.tick(bb);
+      System.out.printf(Locale.ROOT,
+        "t=%02d status=%-7s dist=%.2f path_valid=%s rec=%d%n",
+        t, s.name(),
+        (Double)bb.get("dist_to_goal"),
+        bb.get("path_valid"),
+        (Integer)bb.get("recoveries")
+      );
+      if (s == Status.SUCCESS) break;
+      Thread.sleep(20);
+    }
+
+    // reset and run HFSM
+    bb.put("dist_to_goal", 5.0);
+    bb.put("path_valid", false);
+    bb.put("obstacle_blocking", false);
+    bb.put("recoveries", 0);
+    bb.put("planner_calls", 0);
+
+    HFSM fsm = new HFSM();
+    System.out.println("\n=== HFSM demo ===");
+    for (int t = 0; t &lt; 60; t++) {
+      if (t == 12) bb.put("obstacle_blocking", true);
+      if (t == 25) bb.put("obstacle_blocking", false);
+
+      NavState st = fsm.step(bb);
+      System.out.printf(Locale.ROOT,
+        "t=%02d state=%-9s dist=%.2f path_valid=%s rec=%d%n",
+        t, st.name(),
+        (Double)bb.get("dist_to_goal"),
+        bb.get("path_valid"),
+        (Integer)bb.get("recoveries")
+      );
+      if (st == NavState.DONE) break;
+      Thread.sleep(20);
+    }
+  }
+}
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation (HFSM + Stateflow skeleton) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      10. MATLAB/Simulink Lab — HFSM Pattern and Stateflow-Oriented Skeleton
+    </h2>
+    <div class="down-content">
+      <p>
+        In Simulink-based AMR prototyping, executives are frequently encoded as
+        HFSMs using <strong>Stateflow</strong>. The MATLAB file below (i)
+        implements an HFSM in pure MATLAB and (ii) optionally builds a Simulink
+        model shell and a placeholder Stateflow chart if available.
+      </p>
+
+      <p><strong>Chapter14_Lesson3.m</strong></p>
+      <pre><code class="language-matlab">% Chapter14_Lesson3.m
+% Autonomous Mobile Robots (AMR) — Chapter 14 Lesson 3
+% Behavior Trees / State Machines for Navigation
+%
+% This file provides:
+% 1) A hierarchical finite-state machine (HFSM) navigation controller in MATLAB
+% 2) (Optional) Programmatic creation of a simple Simulink model shell and
+%    a placeholder Stateflow chart (if Stateflow is available on your installation).
+%
+% Note: The BT implementation is demonstrated in other languages; MATLAB here
+% focuses on HFSM/Stateflow patterns that are common for embedded navigation logic.
+
+function Chapter14_Lesson3()
+    % Blackboard-like struct
+    bb.have_goal = true;
+    bb.dist_to_goal = 5.0;
+    bb.goal_tol = 0.2;
+    bb.P_trace = 0.8;
+    bb.P_trace_max = 2.0;
+    bb.progress_per_tick = 0.2;
+    bb.obstacle_blocking = false;
+    bb.path_valid = false;
+    bb.recoveries = 0;
+    bb.planner_calls = 0;
+
+    fsm.state = NavState.IDLE;
+    fsm.stall = 0;
+    fsm.stall_max = 10;
+
+    fprintf('=== HFSM demo (MATLAB) ===\n');
+    for t = 0:59
+        if t == 12
+            bb.obstacle_blocking = true;
+        end
+        if t == 25
+            bb.obstacle_blocking = false;
+        end
+
+        [fsm, bb] = fsm_step(fsm, bb);
+
+        fprintf('t=%02d state=%-9s dist=%.2f path_valid=%d rec=%d\n', ...
+            t, char(fsm.state), bb.dist_to_goal, bb.path_valid, bb.recoveries);
+
+        if fsm.state == NavState.DONE
+            break;
+        end
+        pause(0.02);
+    end
+
+    % Optional: generate a Simulink/Stateflow skeleton
+    % Uncomment the line below if you want to auto-create a model.
+    % build_simulink_stateflow_skeleton();
+end
+
+% -----------------------------
+% State definitions
+% -----------------------------
+classdef NavState
+   enumeration
+      IDLE, PLAN, CONTROL, RECOVERY, DONE, FAIL
+   end
+end
+
+% -----------------------------
+% Guard conditions
+% -----------------------------
+function ok = have_goal(bb)
+    ok = isfield(bb,'have_goal') &amp;&amp; bb.have_goal;
+end
+
+function ok = localization_ok(bb)
+    ok = bb.P_trace &lt;= bb.P_trace_max;
+end
+
+function ok = path_valid(bb)
+    ok = bb.path_valid;
+end
+
+function ok = goal_reached(bb)
+    ok = bb.dist_to_goal &lt;= bb.goal_tol;
+end
+
+% -----------------------------
+% Actions
+% -----------------------------
+function [bb, out] = act_global_plan(bb)
+    if ~have_goal(bb) || ~localization_ok(bb)
+        out = "failure"; return;
+    end
+    bb.path_valid = true;
+    bb.planner_calls = bb.planner_calls + 1;
+    out = "success";
+end
+
+function [bb, out] = act_local_control(bb)
+    if ~path_valid(bb)
+        out = "failure"; return;
+    end
+    if bb.obstacle_blocking
+        out = "running"; return;
+    end
+    bb.dist_to_goal = max(0.0, bb.dist_to_goal - bb.progress_per_tick);
+    out = "running";
+    if goal_reached(bb), out = "success"; end
+end
+
+function [bb, out] = act_recovery_clear_costmap(bb)
+    bb.obstacle_blocking = false;
+    bb.path_valid = false;
+    bb.recoveries = bb.recoveries + 1;
+    out = "success";
+end
+
+% -----------------------------
+% HFSM step
+% -----------------------------
+function [fsm, bb] = fsm_step(fsm, bb)
+    switch fsm.state
+        case NavState.IDLE
+            if have_goal(bb) &amp;&amp; localization_ok(bb)
+                fsm.state = NavState.PLAN;
+            else
+                fsm.state = NavState.FAIL;
+            end
+
+        case NavState.PLAN
+            [bb, out] = act_global_plan(bb);
+            if out == "success"
+                fsm.state = NavState.CONTROL;
+            else
+                fsm.state = NavState.FAIL;
+            end
+
+        case NavState.CONTROL
+            if goal_reached(bb)
+                fsm.state = NavState.DONE;
+                return;
+            end
+            [bb, out] = act_local_control(bb);
+            if out == "failure"
+                fsm.state = NavState.PLAN;
+                return;
+            end
+            if bb.obstacle_blocking
+                fsm.stall = fsm.stall + 1;
+                if fsm.stall &gt;= fsm.stall_max
+                    fsm.stall = 0;
+                    fsm.state = NavState.RECOVERY;
+                end
+            else
+                fsm.stall = 0;
+            end
+
+        case NavState.RECOVERY
+            [bb, ~] = act_recovery_clear_costmap(bb);
+            fsm.state = NavState.PLAN;
+
+        otherwise
+            % DONE or FAIL -&gt; no-op
+    end
+end
+
+% -----------------------------
+% Optional Simulink/Stateflow skeleton builder
+% -----------------------------
+function build_simulink_stateflow_skeleton()
+    % This creates a minimal Simulink model and attempts to add a Stateflow chart.
+    % If Stateflow isn't licensed/installed, this will error; keep it optional.
+    mdl = 'Chapter14_Lesson3_Simulink';
+    if bdIsLoaded(mdl)
+        close_system(mdl, 0);
+    end
+    if exist([mdl '.slx'],'file')
+        delete([mdl '.slx']);
+    end
+    new_system(mdl);
+    open_system(mdl);
+
+    add_block('simulink/Sources/Constant', [mdl '/have_goal'], 'Value', '1');
+    add_block('simulink/Sources/Constant', [mdl '/P_trace'], 'Value', '0.8');
+    add_block('simulink/Sources/Constant', [mdl '/P_trace_max'], 'Value', '2.0');
+    add_block('simulink/Sources/Constant', [mdl '/dist_to_goal'], 'Value', '5.0');
+    add_block('simulink/Sources/Constant', [mdl '/goal_tol'], 'Value', '0.2');
+
+    % MATLAB Function placeholder (for HFSM logic)
+    blk = add_block('simulink/User-Defined Functions/MATLAB Function', [mdl '/HFSM_Controller']);
+    set_param(blk, 'Position', [300 80 500 180]);
+
+    % Try adding Stateflow chart if available
+    try
+        rt = sfroot;
+        m = rt.find('-isa','Simulink.BlockDiagram','Name',mdl);
+        ch = Stateflow.Chart(m);
+        ch.Name = 'NavLogic';
+        % A real implementation would add states/transitions here.
+        disp('Stateflow chart created: NavLogic (populate states/transitions manually).');
+    catch ME
+        warning('Stateflow not available or error occurred: %s', ME.message);
+    end
+
+    save_system(mdl);
+    disp(['Saved model: ' mdl '.slx']);
+end
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation (Notebook) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Lab — Prototyping BT Semantics</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is useful for quickly prototyping executive semantics and
+        validating expected-time equations symbolically. The downloadable
+        notebook encodes BT nodes as associations with tick functions and runs a
+        small simulation.
+      </p>
+
+      <p><strong>Chapter14_Lesson3.nb</strong></p>
+      <pre><code class="language-mathematica">(* Chapter14_Lesson3.nb
+   Autonomous Mobile Robots (AMR) — Chapter 14 Lesson 3
+   Behavior Trees / State Machines for Navigation
+
+   This is a plain-text Wolfram Notebook expression (Mathematica can open .nb).
+*)
+
+Notebook[{
+  Cell["AMR — Chapter 14 Lesson 3: Behavior Trees / State Machines for Navigation", "Title"],
+
+  Cell["A minimal Behavior Tree model in Wolfram Language", "Section"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    (* Status values *)
+    Status /: Format[Status[s_]] := s;
+    statuses = {"SUCCESS", "FAILURE", "RUNNING"};
+
+    (* Blackboard: Association *)
+    bb0 = &lt;|
+      "haveGoal" -&gt; True,
+      "PTrace" -&gt; 0.8,
+      "PTraceMax" -&gt; 2.0,
+      "dist" -&gt; 5.0,
+      "tol" -&gt; 0.2,
+      "pathValid" -&gt; False,
+      "obstacle" -&gt; False,
+      "progress" -&gt; 0.2,
+      "recoveries" -&gt; 0,
+      "plannerCalls" -&gt; 0
+    |&gt;;
+
+    haveGoalQ[bb_] := TrueQ[bb["haveGoal"]];
+    locOKQ[bb_] := bb["PTrace"] &lt;= bb["PTraceMax"];
+    goalReachedQ[bb_] := bb["dist"] &lt;= bb["tol"];
+    pathValidQ[bb_] := TrueQ[bb["pathValid"]];
+
+    globalPlan[bb_] := Module[{bb2 = bb},
+      If[!haveGoalQ[bb2] || !locOKQ[bb2], Return[{bb2, "FAILURE"}]];
+      bb2["pathValid"] = True;
+      bb2["plannerCalls"] = bb2["plannerCalls"] + 1;
+      {bb2, "SUCCESS"}
+    ];
+
+    localControl[bb_] := Module[{bb2 = bb, d},
+      If[!pathValidQ[bb2], Return[{bb2, "FAILURE"}]];
+      If[TrueQ[bb2["obstacle"]], Return[{bb2, "RUNNING"}]];
+      d = Max[0.0, bb2["dist"] - bb2["progress"]];
+      bb2["dist"] = d;
+      If[goalReachedQ[bb2], {bb2, "SUCCESS"}, {bb2, "RUNNING"}]
+    ];
+
+    recoverClear[bb_] := Module[{bb2 = bb},
+      bb2["obstacle"] = False;
+      bb2["pathValid"] = False;
+      bb2["recoveries"] = bb2["recoveries"] + 1;
+      {bb2, "SUCCESS"}
+    ];
+
+    (* BT node constructors: represent a node by an association with a tick function *)
+    ConditionNode[name_, pred_] := &lt;|
+      "name" -&gt; name,
+      "tick" -&gt; Function[{bb}, If[pred[bb], {bb, "SUCCESS"}, {bb, "FAILURE"}]]
+    |&gt;;
+
+    ActionNode[name_, act_] := &lt;|
+      "name" -&gt; name,
+      "tick" -&gt; Function[{bb}, act[bb]]
+    |&gt;;
+
+    SequenceNode[name_, children_] := Module[{i = 1},
+      &lt;|
+        "name" -&gt; name,
+        "tick" -&gt; Function[{bb},
+          Module[{bb2 = bb, s},
+            While[i &lt;= Length[children],
+              {bb2, s} = children[[i]]["tick"][bb2];
+              If[s === "SUCCESS", i++, If[s === "FAILURE", i = 1; Return[{bb2, "FAILURE"}], Return[{bb2, "RUNNING"}]]]
+            ];
+            i = 1; {bb2, "SUCCESS"}
+          ]
+        ]
+      |&gt;
+    ];
+
+    FallbackNode[name_, children_] := Module[{i = 1},
+      &lt;|
+        "name" -&gt; name,
+        "tick" -&gt; Function[{bb},
+          Module[{bb2 = bb, s},
+            While[i &lt;= Length[children],
+              {bb2, s} = children[[i]]["tick"][bb2];
+              If[s === "FAILURE", i++, If[s === "SUCCESS", i = 1; Return[{bb2, "SUCCESS"}], Return[{bb2, "RUNNING"}]]]
+            ];
+            i = 1; {bb2, "FAILURE"}
+          ]
+        ]
+      |&gt;
+    ];
+
+    (* Build a navigation BT *)
+    navBT = SequenceNode["NavigateToGoal", {
+      ConditionNode["HaveGoal?", haveGoalQ],
+      ConditionNode["LocalizationOK?", locOKQ],
+      ActionNode["GlobalPlan", globalPlan],
+      FallbackNode["DriveOrRecover", {
+        SequenceNode["DriveToGoal", {
+          ConditionNode["PathValid?", pathValidQ],
+          ActionNode["LocalControl", localControl],
+          ConditionNode["GoalReached?", goalReachedQ]
+        }],
+        ActionNode["RecoveryClear", recoverClear]
+      }]
+    }];
+
+    (* Run a small simulation *)
+    bb = bb0;
+    Table[
+      If[t == 12, bb["obstacle"] = True];
+      If[t == 25, bb["obstacle"] = False];
+      {bb, s} = navBT["tick"][bb];
+      {t, s, bb["dist"], bb["pathValid"], bb["recoveries"]}
+    , {t, 0, 40}]
+  ], "Input"],
+
+  Cell["The table shows (t, status, distance-to-goal, pathValid, recoveries).", "Text"]
+},
+WindowSize -&gt; {1000, 700},
+StyleDefinitions -&gt; "Default.nb"
+]
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Sequence Correctness):</strong>
+        Consider a Sequence with children <strong>\( n_1,\dots,n_M \)</strong>.
+        Prove that if all children are memoryless and return either S or F
+        (never R), then the Sequence returns S if and only if all children
+        return S.
+      </p>
+      <p>
+        <strong>Solution:</strong> Under the assumption “never R,” the Sequence
+        ticks <strong>\( n_1 \)</strong>. If it returns F, the Sequence returns
+        F immediately. Otherwise it proceeds to <strong>\( n_2 \)</strong>, and
+        so on. If any child returns F, the overall output is F. If no child
+        returns F, all returned S and the Sequence returns S. Conversely, if all
+        children return S, the Sequence reaches the end and returns S. This is a
+        direct induction on <strong>\( M \)</strong>: base
+        <strong>\( M=1 \)</strong> is trivial; inductive step appends
+        <strong>\( n_{M+1} \)</strong> and applies the same reasoning.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Fallback Correctness):</strong>
+        For a Fallback (selector) with children
+        <strong>\( n_1,\dots,n_M \)</strong> and no RUNNING outcomes, prove that
+        it returns F if and only if all children return F.
+      </p>
+      <p>
+        <strong>Solution:</strong> The Fallback returns S immediately when it
+        encounters a child returning S. Therefore it can return F only if every
+        child returned F. Conversely, if every child returns F, the selector
+        exhausts all children and returns F. QED.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Determinism of HFSM Transitions):</strong>
+        Let a mode <strong>\( s \)</strong> have two outgoing transitions with
+        guards <strong>\( g_1(\mathbf{o},\mathbf{x}) \)</strong> and
+        <strong>\( g_2(\mathbf{o},\mathbf{x}) \)</strong>. Show that if
+        <strong
+          >\( g_1(\mathbf{o},\mathbf{x}) + g_2(\mathbf{o},\mathbf{x}) \le 1
+          \)</strong
+        >
+        for all <strong>\( (\mathbf{o},\mathbf{x}) \)</strong>, then the next
+        state is well-defined (unique).
+      </p>
+      <p>
+        <strong>Solution:</strong> At any tick, either both are false (no
+        transition taken or default transition), or exactly one is true,
+        selecting a unique edge. The inequality rules out the case where both
+        are simultaneously enabled.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Expected Ticks to Completion):</strong>
+        Using the model in Section 5, solve for <strong>\( E_P \)</strong> and
+        <strong>\( E_C \)</strong> explicitly.
+      </p>
+      <p>
+        <strong>Solution:</strong> From
+        <strong>\( E_P = 1 + pE_C + (1-p)E_P \)</strong>, rearrange to
+        <strong
+          >\( pE_P = 1 + pE_C \Rightarrow E_P = \frac{1}{p} + E_C \)</strong
+        >. Substitute into
+        <strong>\( E_C = 1 + q(1-r)E_C + (1-q)E_P \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ E_C(1 - q(1-r)) = 1 + (1-q)\left(\frac{1}{p} + E_C\right) \]
+      </h4>
+      <p>
+        Thus
+        <strong>\( E_C(1 - q + qr) = 1 + \frac{1-q}{p} + (1-q)E_C \)</strong>,
+        so
+        <strong
+          >\( E_C(qr) = 1 + \frac{1-q}{p} \Rightarrow E_C = \frac{1}{qr} +
+          \frac{1-q}{pqr} \)</strong
+        >. Finally, <strong>\( E_P = \frac{1}{p} + E_C \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Tick-Rate Requirement):</strong>
+        Suppose a hazard can emerge at any time and must be reacted to within
+        <strong>\( T_{\text{react}} \)</strong>. If the executive only changes
+        commands on tick boundaries and worst-case detection delay is one tick,
+        derive a sufficient condition on tick period
+        <strong>\( \Delta t_{\text{tick}} \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Worst-case: hazard appears immediately after
+        a tick. It will be detected at the next tick (delay
+        <strong>\( \Delta t_{\text{tick}} \)</strong>) and reacted to in that
+        tick update. To guarantee reaction within
+        <strong>\( T_{\text{react}} \)</strong>, require
+        <strong>\( \Delta t_{\text{tick}} \le T_{\text{react}} \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        We built a university-level foundation for navigation executives as
+        discrete decision systems. HFSMs were modeled as deterministic guarded
+        transition systems; BTs were formalized as tick maps returning
+        SUCCESS/FAILURE/RUNNING with compositional Sequence/Fallback semantics.
+        We proved core correctness properties for these compositions, introduced
+        safety invariants and a progress certificate based on descent of
+        distance-to-goal, and showed how tick rate constraints connect directly
+        to real-time safety margins. The provided implementations illustrate how
+        the same navigation policy can be encoded as either a BT or an HFSM.
+      </p>
+      <p>
+        Next lesson (Lesson 4) will develop recovery behaviors and fault
+        handling systematically and connect them to monitoring signals and
+        costmap operations.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Marzinotto, A., Colledanchise, M., Smith, C., &amp; Ögren, P. (2014).
+        Towards a Unified Behavior Trees Framework for Robot Control.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 5420–5427.
+      </li>
+      <li>
+        Colledanchise, M., &amp; Ögren, P. (2018).
+        <em>Behavior Trees in Robotics and AI: An Introduction</em>. CRC Press.
+      </li>
+      <li>
+        Harel, D. (1987). Statecharts: A Visual Formalism for Complex Systems.
+        <em>Science of Computer Programming</em>, 8(3), 231–274.
+      </li>
+      <li>
+        Alur, R., Courcoubetis, C., Henzinger, T.A., &amp; Ho, P.-H. (1993).
+        Hybrid Automata: An Algorithmic Approach to the Specification and
+        Verification of Hybrid Systems.
+        <em>Hybrid Systems</em> (LNCS 736), 209–229.
+      </li>
+      <li>
+        Branicky, M.S. (1998). Multiple Lyapunov Functions and Other Analysis
+        Tools for Switched and Hybrid Systems.
+        <em>IEEE Transactions on Automatic Control</em>, 43(4), 475–482.
+      </li>
+      <li>
+        Kemeny, J.G., &amp; Snell, J.L. (1960).
+        <em>Finite Markov Chains</em>. Van Nostrand.
+      </li>
+      <li>
+        LaValle, S.M. (2006).
+        <em>Planning Algorithms</em>. Cambridge University Press. (Background
+        reference for planning modules; not re-taught here.)
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter14/Lesson2.html">
+          Lesson 2: Costmaps and Inflation Concepts
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson4.html">
+          Lesson 4: Recovery Behaviors and Fault Handling
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

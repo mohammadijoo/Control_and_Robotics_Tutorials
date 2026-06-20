@@ -1,0 +1,2044 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: Reinforcement Learning for Robotics - Lesson 5: Safety-Constrained RL (concepts, not CBF control) | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: Reinforcement Learning for Robotics</h1>
+    <h3>
+      <strong
+        >Lesson 5: Safety-Constrained RL (Concepts, not CBF Control)</strong
+      >
+    </h3>
+    <p>
+      This lesson develops the theory of reinforcement learning with explicit
+      safety constraints for robotic control. We formalize constrained Markov
+      decision processes (CMDPs), derive Lagrangian and primal–dual update
+      rules, discuss safe exploration strategies and risk-sensitive objectives,
+      and show how these ideas map to multi-language implementations (Python,
+      C++, Java, MATLAB/Simulink, and Wolfram Mathematica) in a robotics
+      context.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Motivation and Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Motivation and Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In robotics, an RL policy that maximizes expected return but
+        occasionally violates physical limits (joint torque bounds, collision
+        distances, thermal limits, battery constraints, etc.) is unacceptable.
+        We therefore replace the unconstrained optimization objective
+        <strong>\( \max_{\pi} J_r(\pi) \)</strong> with a constrained problem
+        that enforces explicit <em>safety signals</em>. Typical constraint costs
+        encode:
+      </p>
+      <ul>
+        <li>Collisions or near-collisions with the environment or self.</li>
+        <li>Violations of torque/velocity/acceleration bounds.</li>
+        <li>Thermal or power usage exceeding safe operating regions.</li>
+      </ul>
+      <p>
+        We assume students already understand continuous-control MDPs and policy
+        gradient methods from earlier lessons. Here we add a set of
+        <em>cost signals</em> and thresholds. At a high level, the safety-aware
+        RL loop in robotics looks like:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Robot + environment"] --> B["Specify reward r(s,a)"]
+  A --> C["Specify safety costs c_i(s,a) and limits d_i"]
+  B --> D["Formulate CMDP"]
+  C --> D
+  D --> E["Choose safe RL algorithm (Lagrangian, primal-dual, risk-sensitive)"]
+  E --> F["Train policy with safety layer or safe exploration"]
+  F --> G["Validate safety on sim and hardware"]
+  G --> H["Deploy with monitoring and fallbacks"]
+        </pre>
+      </div>
+      <p>
+        The rest of the lesson makes this pipeline mathematically precise, and
+        shows how to implement core building blocks in software.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Constrained Markov Decision Processes (CMDPs) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Constrained Markov Decision Processes (CMDPs)</h2>
+    <div class="down-content">
+      <p>
+        A constrained Markov decision process augments a standard MDP with
+        <em>m</em> constraint cost signals and corresponding limits. Formally,
+        for continuous-control robotics we consider
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{M}_c =
+        (\mathcal{S},\mathcal{A},P,r,\{c_i\}_{i=1}^m,\gamma,\mu), \]
+      </h4>
+      <p>
+        where \( \mathcal{S} \) is the state space (joint angles, velocities,
+        contact indicators, etc.), \( \mathcal{A} \) the action space (torques,
+        velocities), \( P \) the transition kernel, \(
+        r:\mathcal{S}\times\mathcal{A}\to\mathbb{R} \) the scalar reward, \(
+        c_i:\mathcal{S}\times\mathcal{A}\to\mathbb{R}_+ \) constraint costs, \(
+        \gamma\in[0,1) \) a discount factor, and \( \mu \) an initial state
+        distribution.
+      </p>
+      <p>
+        For a stationary policy \( \pi(a\mid s) \), the usual discounted return
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ J_r(\pi) = \mathbb{E}_{\pi}\bigg[\sum_{t=0}^{\infty} \gamma^t
+        r(s_t,a_t)\bigg], \]
+      </h4>
+      <p>and the <em>constraint returns</em> are</p>
+      <h4 class="mathJax">
+        \[ J_{c_i}(\pi) = \mathbb{E}_{\pi}\bigg[\sum_{t=0}^{\infty} \gamma^t
+        c_i(s_t,a_t)\bigg], \quad i=1,\dots,m. \]
+      </h4>
+      <p>A safety-constrained RL problem is the CMDP optimization</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \max_{\pi} \quad & J_r(\pi) \\ \text{s.t.} \quad &
+        J_{c_i}(\pi) \leq d_i,\quad i=1,\dots,m, \end{aligned} \]
+      </h4>
+      <p>
+        where each \( d_i \) is a design parameter expressing the maximum
+        allowable <em>discounted</em> frequency or magnitude of violations. For
+        example, \( c_1 \) could be an indicator of collision events, so \(
+        J_{c_1}(\pi) \) bounds the discounted collision probability.
+      </p>
+      <p>
+        In finite CMDPs one can equivalently optimize over
+        <em>occupancy measures</em> \( d_{\pi}(s,a) \) which satisfy linear
+        balance constraints. Let
+      </p>
+      <h4 class="mathJax">
+        \[ d_{\pi}(s,a) = (1-\gamma) \sum_{t=0}^{\infty} \gamma^t
+        \mathbb{P}_{\pi}(s_t=s,a_t=a), \]
+      </h4>
+      <p>then we can write</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} J_r(\pi) &= \frac{1}{1-\gamma} \sum_{s,a}
+        d_{\pi}(s,a)\,r(s,a), \\ J_{c_i}(\pi) &= \frac{1}{1-\gamma} \sum_{s,a}
+        d_{\pi}(s,a)\,c_i(s,a). \end{aligned} \]
+      </h4>
+      <p>
+        This makes the CMDP optimization a linear program in \( d_{\pi} \). Deep
+        RL algorithms can be viewed as approximate stochastic methods for this
+        LP, but implemented in policy parameter space.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Lagrangian Formulation and Primal–Dual Policy Gradient -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Lagrangian Formulation and Primal–Dual Policy Gradient</h2>
+    <div class="down-content">
+      <p>
+        A standard approach to solving CMDPs is to form the Lagrangian by
+        relaxing the inequality constraints with nonnegative multipliers \(
+        \lambda_i \geq 0 \). Define
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(\pi,\boldsymbol{\lambda}) = J_r(\pi) - \sum_{i=1}^m
+        \lambda_i \big(J_{c_i}(\pi) - d_i\big), \quad \lambda_i \geq 0. \]
+      </h4>
+      <p>
+        The constrained problem is equivalent (under standard CMDP regularity
+        assumptions) to the saddle-point problem
+      </p>
+      <h4 class="mathJax">
+        \[ \max_{\pi} \min_{\boldsymbol{\lambda} \geq \mathbf{0}}
+        \mathcal{L}(\pi,\boldsymbol{\lambda}). \]
+      </h4>
+      <p>
+        We parameterize policies \( \pi_{\theta} \) with parameters \( \theta
+        \in \mathbb{R}^d \) (e.g., a neural network policy). Let the
+        <em>reward return</em> from time \( t \) be
+      </p>
+      <h4 class="mathJax">
+        \[ G_t^r = \sum_{k=t}^{\infty} \gamma^{k-t} r(s_k,a_k), \]
+      </h4>
+      <p>
+        and similarly the constraint returns
+        <strong>\( G_t^{c_i} \)</strong>. Using the log-derivative trick, the
+        reward policy gradient is
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} J_r(\pi_{\theta}) = \mathbb{E}_{\pi_{\theta}}\bigg[
+        \sum_{t=0}^{\infty} \nabla_{\theta} \log \pi_{\theta}(a_t \mid s_t)\,
+        G_t^r \bigg]. \]
+      </h4>
+      <p>Exactly the same derivation shows</p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} J_{c_i}(\pi_{\theta}) =
+        \mathbb{E}_{\pi_{\theta}}\bigg[ \sum_{t=0}^{\infty} \nabla_{\theta} \log
+        \pi_{\theta}(a_t \mid s_t)\, G_t^{c_i} \bigg]. \]
+      </h4>
+      <p>Therefore the Lagrangian gradient with respect to \( \theta \) is</p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} \mathcal{L}(\pi_{\theta},\boldsymbol{\lambda}) =
+        \nabla_{\theta} J_r(\pi_{\theta}) - \sum_{i=1}^m \lambda_i
+        \nabla_{\theta} J_{c_i}(\pi_{\theta}). \]
+      </h4>
+      <p>
+        In practice we approximate these expectations by Monte Carlo estimates
+        from rollouts. For a batch of trajectories indexed by
+        <strong>\( b \)</strong>, an unbiased estimator is
+      </p>
+      <h4 class="mathJax">
+        \[ \widehat{\nabla_{\theta} \mathcal{L}} = \frac{1}{B} \sum_{b=1}^B
+        \sum_{t=0}^{T_b-1} \nabla_{\theta}\log\pi_{\theta}(a_t^{(b)} \mid
+        s_t^{(b)}) \bigg( \hat{G}_{t}^{r,(b)} - \sum_{i=1}^m \lambda_i
+        \hat{G}_{t}^{c_i,(b)} \bigg), \]
+      </h4>
+      <p>where \( \hat{G} \) are possibly baseline-adjusted returns.</p>
+      <p>
+        <strong>Primal–dual updates.</strong> A simple stochastic primal–dual
+        algorithm alternates between:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \theta_{k+1} &= \theta_k + \eta_{\theta}\,
+        \widehat{\nabla_{\theta}
+        \mathcal{L}(\pi_{\theta_k},\boldsymbol{\lambda}_k)}, \\ \lambda_{i,k+1}
+        &= \Big[\lambda_{i,k} + \eta_{\lambda}\,
+        \big(\widehat{J_{c_i}(\pi_{\theta_k})} - d_i\big)\Big]_+, \quad
+        i=1,\dots,m, \end{aligned} \]
+      </h4>
+      <p>
+        where \( [x]_+ = \max(x,0) \). The multiplier update is a stochastic
+        gradient <em>ascent</em> step on the dual, pushing \( \lambda_i \)
+        upward whenever the corresponding constraint is violated on average.
+      </p>
+      <p>
+        Under suitable assumptions (bounded gradients, diminishing step sizes,
+        CMDP convexity in occupancy-measure space), one can show that these
+        updates converge to a saddle point \( (\pi^{\star},
+        \boldsymbol{\lambda}^{\star}) \), and that \( \pi^{\star} \) satisfies
+        the constraints and is optimal among safe policies. In practice, deep
+        neural parameterizations and finite data break convexity, but the same
+        updates are widely used and successful in robotics.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Safe Exploration via Baseline Policies and Mixtures -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Safe Exploration via Baseline Policies and Mixtures</h2>
+    <div class="down-content">
+      <p>
+        A core difficulty in robotic safety is <em>exploration</em>: naive RL
+        may try obviously unsafe actions before learning they are bad. A common
+        strategy is to start from a known safe baseline policy \(
+        \pi_{\text{safe}} \) (for example a hand-designed controller) and
+        interpolate toward a learned policy \( \pi_{\theta} \).
+      </p>
+      <p>Consider the mixed policy</p>
+      <h4 class="mathJax">
+        \[ \pi_{\alpha}(a \mid s) = (1-\alpha)\,\pi_{\text{safe}}(a\mid s) +
+        \alpha\,\pi_{\theta}(a\mid s), \quad \alpha \in [0,1]. \]
+      </h4>
+      <p>
+        Assuming we randomly choose at the beginning of each episode whether to
+        follow \( \pi_{\text{safe}} \) or \( \pi_{\theta} \) with probabilities
+        \( 1-\alpha \) and \( \alpha \), linearity of expectation yields
+      </p>
+      <h4 class="mathJax">
+        \[ J_c(\pi_{\alpha}) = (1-\alpha)\,J_c(\pi_{\text{safe}}) +
+        \alpha\,J_c(\pi_{\theta}) \]
+      </h4>
+      <p>
+        for any constraint cost \( c \). Suppose \( \pi_{\text{safe}} \) is
+        strictly safe:
+        <strong>\( J_c(\pi_{\text{safe}}) \leq d - \delta \)</strong> for some
+        margin \( \delta &gt; 0 \). If the unconstrained learner proposes a
+        policy \( \pi_{\theta} \) with
+        <strong>\( J_c(\pi_{\theta}) &gt; d \)</strong>, we can still ensure the
+        mixture is safe by choosing \( \alpha \) small enough.
+      </p>
+      <p>
+        Requiring \( J_c(\pi_{\alpha}) \leq d \) and solving for \( \alpha \)
+        gives:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} (1-\alpha)J_c(\pi_{\text{safe}}) + \alpha
+        J_c(\pi_{\theta}) &\leq d \\ \alpha \big(J_c(\pi_{\theta}) -
+        J_c(\pi_{\text{safe}})\big) &\leq d - J_c(\pi_{\text{safe}}),
+        \end{aligned} \]
+      </h4>
+      <p>so whenever</p>
+      <h4 class="mathJax">
+        \[ \alpha \leq \frac{d - J_c(\pi_{\text{safe}})} {J_c(\pi_{\theta}) -
+        J_c(\pi_{\text{safe}})}, \]
+      </h4>
+      <p>
+        the mixed policy is safe. This simple convex-combination argument
+        underlies many <em>shields</em> and <em>backup policies</em> in safe RL:
+        a safety layer can dynamically reduce \( \alpha \) or switch back to the
+        baseline when estimated constraint values become too large.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Baseline safe policy pi_safe"] --> M["Proposed RL policy pi_theta"]
+  S --> C["Mix policies pi_alpha with alpha in [0,1]"]
+  M --> C
+  C --> E["Estimate constraint return J_c(pi_alpha)"]
+  E --> D1{"Is J_c(pi_alpha) &lt;= d?"}
+  D1 -->|yes| USE["Execute mixed policy on robot"]
+  D1 -->|no| BACK["Reduce alpha or fall back to pi_safe"]
+        </pre>
+      </div>
+      <p>
+        In robotics, \( \pi_{\text{safe}} \) might be a low-gain impedance
+        controller that keeps the arm away from obstacles, while \( \pi_{\theta}
+        \) is a high-performance learned manipulator policy. The mixture allows
+        gradual, guaranteed-safe performance improvements.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Risk-Sensitive Objectives and Chance Constraints -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Risk-Sensitive Objectives and Chance Constraints</h2>
+    <div class="down-content">
+      <p>
+        CMDPs constrain <em>expected</em> constraint returns. But in robotics it
+        is often more natural to constrain the <em>probability</em> of rare but
+        catastrophic failures, or to control a coherent risk measure of a random
+        cost functional. Let \( Z \) denote the total episodic safety cost
+        (e.g., sum of collision penalties).
+      </p>
+      <p>
+        A <strong>chance constraint</strong> limits the probability of large
+        costs:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbb{P}_{\pi}\big(Z &gt; \bar{c}\big) \leq \delta, \]
+      </h4>
+      <p>
+        where \( \bar{c} \) is an unacceptable cost level and \( \delta \) a
+        small probability. This is challenging to handle directly, but upper
+        bounds (e.g., Markov or Chernoff bounds) can convert it into CMDP-like
+        expectations.
+      </p>
+      <p>
+        A more refined approach uses the
+        <strong>Conditional Value at Risk</strong>
+        (CVaR), which looks at the tail of the cost distribution. For confidence
+        level \( \alpha\in(0,1) \), the CVaR of \( Z \) is
+      </p>
+      <h4 class="mathJax">
+        \[ \text{CVaR}_{\alpha}(Z) = \inf_{\eta \in \mathbb{R}} \bigg\{\eta +
+        \frac{1}{1-\alpha} \mathbb{E}\big[(Z-\eta)_+\big]\bigg\}. \]
+      </h4>
+      <p>
+        Here \( (x)_+ = \max(x,0) \). A risk-sensitive safe RL problem is then
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \min_{\pi} \quad & \text{CVaR}_{\alpha}(Z_{\pi}) \\
+        \text{s.t.} \quad & J_r(\pi) \geq \rho, \end{aligned} \]
+      </h4>
+      <p>
+        or equivalently maximize return subject to
+        <strong>\( \text{CVaR}_{\alpha}(Z_{\pi}) \leq \bar{z} \)</strong>. Using
+        the infimum representation, one can introduce an auxiliary variable \(
+        \eta \) and perform stochastic gradient descent over \( (\theta,\eta) \)
+        with unbiased gradient estimators derived from samples of \( Z \).
+      </p>
+      <p>
+        For robotics, risk-sensitive formulations reduce the frequency of
+        catastrophic failures (e.g., dropping objects, hitting humans) even if
+        the expected cost is already small. They complement CMDP-style
+        constraints and can be combined with Lagrangian methods.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Lab — Primal–Dual Constrained Policy Gradient -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Lab — Primal–Dual Constrained Policy Gradient</h2>
+    <div class="down-content">
+      <p>
+        We sketch a minimal Python implementation of a primal–dual constrained
+        policy gradient for a simple continuous robot (e.g., a 1D position
+        control task). We assume familiarity with <code>PyTorch</code> and
+        <code>gymnasium</code> from earlier labs. The constraint cost here could
+        be, for example, a penalty whenever the robot's position leaves a safe
+        interval.
+      </p>
+      <pre><code class="language-python">
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import gymnasium as gym
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+env = gym.make("Pendulum-v1")  # stand-in for a torque-limited joint
+obs_dim = env.observation_space.shape[0]
+act_dim = env.action_space.shape[0]
+
+# --- Actor-Critic with separate value heads for reward and constraint ---
+
+class ActorCritic(nn.Module):
+    def __init__(self, obs_dim, act_dim):
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Linear(obs_dim, 64), nn.Tanh(),
+            nn.Linear(64, 64), nn.Tanh(),
+        )
+        self.mu_head = nn.Linear(64, act_dim)
+        self.log_std = nn.Parameter(torch.zeros(act_dim))
+
+        self.v_r = nn.Linear(64, 1)   # reward value
+        self.v_c = nn.Linear(64, 1)   # constraint value
+
+    def forward(self, obs):
+        x = self.body(obs)
+        mu = self.mu_head(x)
+        std = self.log_std.exp()
+        v_r = self.v_r(x)
+        v_c = self.v_c(x)
+        return mu, std, v_r, v_c
+
+    def act(self, obs):
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+        mu, std, _, _ = self.forward(obs_t)
+        dist = torch.distributions.Normal(mu, std)
+        a = dist.sample()
+        logp = dist.log_prob(a).sum(-1)
+        return a.cpu().numpy(), logp
+
+net = ActorCritic(obs_dim, act_dim).to(device)
+optimizer = optim.Adam(net.parameters(), lr=3e-4)
+
+lambda_c = torch.tensor(0.0, device=device, requires_grad=False)
+lambda_lr = 1e-2
+gamma = 0.99
+cost_limit = 1.0
+
+def compute_returns(rewards, costs, gamma):
+    G_r, G_c = [], []
+    g_r = 0.0
+    g_c = 0.0
+    for r, c in zip(reversed(rewards), reversed(costs)):
+        g_r = r + gamma * g_r
+        g_c = c + gamma * g_c
+        G_r.append(g_r)
+        G_c.append(g_c)
+    G_r.reverse()
+    G_c.reverse()
+    return torch.tensor(G_r, dtype=torch.float32, device=device), \
+           torch.tensor(G_c, dtype=torch.float32, device=device)
+
+for epoch in range(1000):
+    logps = []
+    G_r_list = []
+    G_c_list = []
+    v_r_list = []
+    v_c_list = []
+    episode_returns = []
+    episode_costs = []
+
+    for _ in range(10):  # batch of episodes
+        obs, _ = env.reset()
+        done = False
+        rewards = []
+        costs = []
+        logp_traj = []
+        vals_r = []
+        vals_c = []
+        while not done:
+            # define simple safety cost: penalty if position outside safe band
+            x = obs[0]
+            cost = 1.0 if abs(x) &gt; 1.0 else 0.0
+
+            action, logp = net.act(obs)
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+
+            with torch.no_grad():
+                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+                _, _, v_r, v_c = net(obs_t.unsqueeze(0))
+            vals_r.append(v_r.squeeze(0))
+            vals_c.append(v_c.squeeze(0))
+
+            rewards.append(float(reward))
+            costs.append(float(cost))
+            logp_traj.append(logp)
+            obs = next_obs
+
+        G_r, G_c = compute_returns(rewards, costs, gamma)
+        logps.append(torch.stack(logp_traj))
+        G_r_list.append(G_r)
+        G_c_list.append(G_c)
+        v_r_list.append(torch.stack(vals_r))
+        v_c_list.append(torch.stack(vals_c))
+        episode_returns.append(sum(rewards))
+        episode_costs.append(sum(costs))
+
+    logps = torch.cat(logps)
+    G_r_list = torch.cat(G_r_list)
+    G_c_list = torch.cat(G_c_list)
+    v_r_list = torch.cat(v_r_list)
+    v_c_list = torch.cat(v_c_list)
+
+    # Advantage estimates (simple baseline)
+    adv_r = G_r_list - v_r_list.detach()
+    adv_c = G_c_list - v_c_list.detach()
+
+    # Policy loss: maximize L = E[adv_r - lambda_c * adv_c]
+    # (gradient ascent &rarr; minimize negative)
+    loss_policy = -(logps * (adv_r - lambda_c * adv_c)).mean()
+
+    # Value losses
+    loss_v_r = 0.5 * (G_r_list - v_r_list).pow(2).mean()
+    loss_v_c = 0.5 * (G_c_list - v_c_list).pow(2).mean()
+
+    loss = loss_policy + loss_v_r + loss_v_c
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # Dual update: push lambda_c up when cost exceeds limit
+    avg_episode_cost = sum(episode_costs) / len(episode_costs)
+    lambda_c = torch.clamp(lambda_c + lambda_lr *
+                           (avg_episode_cost - cost_limit), min=0.0)
+
+    print(f"Epoch {epoch}, return {sum(episode_returns)/len(episode_returns):.2f}, "
+          f"avg cost {avg_episode_cost:.2f}, lambda {lambda_c.item():.3f}")
+      </code></pre>
+      <p>
+        In a realistic robotic setup, <code>cost</code> would be computed from
+        distances to obstacles (via a geometry library or a simulator like
+        MuJoCo), and the environment would be a high-dimensional manipulator or
+        mobile robot task. The same primal–dual updates apply.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Skeleton — Safe Actor-Critic in a ROS2 Node -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Skeleton — Safe Actor-Critic in a ROS2 Node</h2>
+    <div class="down-content">
+      <p>
+        In C++ one typically integrates safe RL with ROS2 for real robots. Below
+        is a highly simplified skeleton illustrating how one might structure an
+        actor-critic with a Lagrange multiplier in C++ using <code>Eigen</code>
+        for linear algebra. The robot dynamics and simulator interface would be
+        provided by ROS2 and physics engines (e.g., Gazebo, Isaac Sim, Drake).
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;Eigen/Dense&gt;
+#include &lt;random&gt;
+
+using Eigen::VectorXd;
+using Eigen::MatrixXd;
+
+class SafeActorCritic {
+public:
+    SafeActorCritic(int obs_dim, int act_dim)
+    : obs_dim_(obs_dim), act_dim_(act_dim),
+      lambda_c_(0.0), lambda_lr_(1e-3)
+    {
+        // Initialize parameters (e.g., small random values)
+        theta_ = VectorXd::Zero(num_params());
+        w_r_ = VectorXd::Zero(num_value_params());
+        w_c_ = VectorXd::Zero(num_value_params());
+    }
+
+    VectorXd act(const VectorXd &obs, double &logp_out) {
+        // Gaussian policy: a = mu_theta(obs) + sigma * noise
+        VectorXd phi = feature_actor(obs);
+        VectorXd mu = W_policy_ * phi;
+        double sigma = 0.1;  // fixed std for illustration
+
+        VectorXd noise = VectorXd::NullaryExpr(act_dim_, [&](){
+            return normal_(rng_);
+        });
+        VectorXd a = mu + sigma * noise;
+
+        double logp = -0.5 * (noise.squaredNorm()
+                     + act_dim_ * std::log(2.0 * M_PI * sigma * sigma));
+        logp_out = logp;
+        return a;
+    }
+
+    void update_batch(const std::vector&lt;VectorXd&gt; &obs_traj,
+                      const std::vector&lt;VectorXd&gt; &act_traj,
+                      const std::vector&lt;double&gt; &rew_traj,
+                      const std::vector&lt;double&gt; &cost_traj,
+                      double gamma)
+    {
+        // Compute discounted returns G_r, G_c
+        int T = static_cast&lt;int&gt;(rew_traj.size());
+        std::vector&lt;double&gt; G_r(T), G_c(T);
+        double g_r = 0.0, g_c = 0.0;
+        for (int t = T - 1; t &gt;= 0; --t) {
+            g_r = rew_traj[t] + gamma * g_r;
+            g_c = cost_traj[t] + gamma * g_c;
+            G_r[t] = g_r;
+            G_c[t] = g_c;
+        }
+
+        // Simple gradient estimates (omitting baselines for brevity)
+        VectorXd grad_theta = VectorXd::Zero(theta_.size());
+        double avg_cost = 0.0;
+        for (int t = 0; t &lt; T; ++t) {
+            VectorXd phi = feature_actor(obs_traj[t]);
+            VectorXd mu = W_policy_ * phi;
+            // score function grad wrt theta (here compressed as grad_mu)
+            VectorXd grad_mu = phi;  // for linear policy mu = W * phi
+            VectorXd a = act_traj[t];
+            VectorXd diff = a - mu;
+            double sigma = 0.1;
+
+            double factor = (G_r[t] - lambda_c_ * G_c[t]) / (sigma * sigma);
+            grad_theta += factor * kron(diff, grad_mu); // kron product
+
+            avg_cost += cost_traj[t];
+        }
+        avg_cost /= static_cast&lt;double&gt;(T);
+
+        // Gradient ascent on theta
+        theta_ += 1e-3 * grad_theta;
+
+        // Dual update
+        lambda_c_ = std::max(0.0, lambda_c_ + lambda_lr_ *
+                                       (avg_cost - cost_limit_));
+    }
+
+private:
+    int obs_dim_, act_dim_;
+    VectorXd theta_, w_r_, w_c_;
+    MatrixXd W_policy_;
+    double lambda_c_;
+    double lambda_lr_;
+    double cost_limit_ = 1.0;
+
+    std::mt19937 rng_{std::random_device{}()};
+    std::normal_distribution&lt;double&gt; normal_{0.0, 1.0};
+
+    int num_params() const { return obs_dim_ * act_dim_; }
+    int num_value_params() const { return obs_dim_; }
+
+    VectorXd feature_actor(const VectorXd &obs) const {
+        // e.g., identity features
+        return obs;
+    }
+
+    VectorXd kron(const VectorXd &a, const VectorXd &b) const {
+        VectorXd out(a.size() * b.size());
+        int k = 0;
+        for (int i = 0; i &lt; a.size(); ++i) {
+            for (int j = 0; j &lt; b.size(); ++j) {
+                out(k++) = a(i) * b(j);
+            }
+        }
+        return out;
+    }
+};
+      </code></pre>
+      <p>
+        In a ROS2 node, one would wrap <code>SafeActorCritic</code> inside a
+        <code>rclcpp::Node</code>, subscribe to joint state topics, publish
+        control commands, and periodically run <code>update_batch</code> based
+        on experience buffers collected in simulation or on hardware.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Skeleton — Safe RL Agent Interface -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Skeleton — Safe RL Agent Interface</h2>
+    <div class="down-content">
+      <p>
+        In Java, safe RL can be implemented using libraries like
+        <code>ND4J</code> and <code>RL4J</code> (part of DeepLearning4J), or
+        custom environments interfaced to robotics middleware (e.g., ROSJava).
+        The following skeleton illustrates a constrained agent interface.
+      </p>
+      <pre><code class="language-java">
+public interface SafeEnvironment {
+    double[] reset();
+    StepResult step(double[] action);
+    int getObservationDim();
+    int getActionDim();
+    // StepResult contains obs, reward, done, constraintCost
+}
+
+public class SafeRLAgent {
+    private int obsDim;
+    private int actDim;
+    private double lambdaC = 0.0;
+    private double lambdaLr = 1e-2;
+    private double costLimit = 1.0;
+
+    // Parameters of policy and value functions would live here
+    // (e.g., INDArray weights if using ND4J).
+
+    public SafeRLAgent(int obsDim, int actDim) {
+        this.obsDim = obsDim;
+        this.actDim = actDim;
+    }
+
+    public double[] act(double[] obs) {
+        // Sample from Gaussian policy (stochastic exploration).
+        double[] mu = policyMean(obs);
+        double[] std = policyStd(obs);
+        double[] action = new double[actDim];
+        for (int i = 0; i &lt; actDim; i++) {
+            action[i] = mu[i] + std[i] * randomNormal();
+        }
+        return action;
+    }
+
+    public void updateOnTrajectory(List&lt;double[]&gt; obsTraj,
+                                   List&lt;double[]&gt; actTraj,
+                                   List&lt;Double&gt; rewTraj,
+                                   List&lt;Double&gt; costTraj,
+                                   double gamma)
+    {
+        int T = rewTraj.size();
+        double[] G_r = new double[T];
+        double[] G_c = new double[T];
+        double gR = 0.0, gC = 0.0;
+        for (int t = T - 1; t &gt;= 0; t--) {
+            gR = rewTraj.get(t) + gamma * gR;
+            gC = costTraj.get(t) + gamma * gC;
+            G_r[t] = gR;
+            G_c[t] = gC;
+        }
+
+        // Compute gradients and update policy parameters here.
+        // For brevity we omit ND4J tensor operations.
+
+        double avgCost = 0.0;
+        for (double c : costTraj) {
+            avgCost += c;
+        }
+        avgCost /= (double) T;
+
+        // Dual update
+        lambdaC = Math.max(0.0, lambdaC + lambdaLr * (avgCost - costLimit));
+    }
+
+    private double[] policyMean(double[] obs) {
+        // Placeholder linear policy
+        double[] mu = new double[actDim];
+        for (int i = 0; i &lt; actDim; i++) {
+            mu[i] = 0.0;
+        }
+        return mu;
+    }
+
+    private double[] policyStd(double[] obs) {
+        double[] std = new double[actDim];
+        for (int i = 0; i &lt; actDim; i++) {
+            std[i] = 0.2; // fixed std
+        }
+        return std;
+    }
+
+    private double randomNormal() {
+        return new java.util.Random().nextGaussian();
+    }
+}
+      </code></pre>
+      <p>
+        A concrete implementation would add neural-network policy/value
+        functions, replay buffers, and integration with a robotic simulator or
+        real-time control loop.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink — Safe Q-Learning Prototype -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB/Simulink — Safe Q-Learning Prototype</h2>
+    <div class="down-content">
+      <p>
+        MATLAB provides both Reinforcement Learning Toolbox and Robotics System
+        Toolbox, making it natural to prototype safety-constrained algorithms.
+        The following script shows a discrete safe Q-learning prototype where a
+        constraint cost is added and a Lagrange multiplier penalizes unsafe
+        behavior. In Simulink, the same logic can be embedded in an RL Agent
+        block connected to a manipulator model.
+      </p>
+      <pre><code class="language-matlab">
+gamma = 0.99;
+alpha = 0.1;      % Q-learning step size
+lambda_lr = 1e-2;
+lambda_c = 0.0;
+cost_limit = 0.5;
+
+nStates = 20;
+nActions = 3;
+
+Q_r = zeros(nStates, nActions);  % reward Q
+Q_c = zeros(nStates, nActions);  % constraint Q
+
+env = MySafeRobotEnv();  % user-defined MATLAB class
+
+for episode = 1:1000
+    s = reset(env);  % state index
+    done = false;
+    ep_cost = 0.0;
+
+    while ~done
+        % epsilon-greedy action selection
+        if rand() &lt; 0.1
+            a = randi(nActions);
+        else
+            [~, a] = max(Q_r(s,:) - lambda_c * Q_c(s,:));
+        end
+
+        [s_next, r, c, done] = step(env, a);
+        ep_cost = ep_cost + c;
+
+        % standard Q-learning updates
+        best_next = max(Q_r(s_next,:) - lambda_c * Q_c(s_next,:));
+
+        td_target_r = r + gamma * best_next;
+        td_error_r = td_target_r - Q_r(s,a);
+        Q_r(s,a) = Q_r(s,a) + alpha * td_error_r;
+
+        td_target_c = c + gamma * max(Q_c(s_next,:));
+        td_error_c = td_target_c - Q_c(s,a);
+        Q_c(s,a) = Q_c(s,a) + alpha * td_error_c;
+
+        s = s_next;
+    end
+
+    % Dual variable update at end of episode
+    lambda_c = max(0.0, lambda_c + lambda_lr * (ep_cost - cost_limit));
+
+    fprintf("Episode %d, cost %.3f, lambda %.3f\n", ...
+            episode, ep_cost, lambda_c);
+end
+      </code></pre>
+      <p>
+        In Simulink, the environment <code>MySafeRobotEnv</code> would wrap a
+        joint-space manipulator model. The constraint signal <code>c</code> can
+        be derived from joint limit violations or minimum distance to obstacles,
+        implemented via blocks from Robotics System Toolbox.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica — Solving a Tiny CMDP by Linear Programming -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica — Solving a Tiny CMDP by Linear Programming</h2>
+    <div class="down-content">
+      <p>
+        For small finite CMDPs, safety-constrained RL reduces to a linear
+        program in the occupancy measures. Wolfram Mathematica is well suited
+        for such symbolic and numeric optimization. The code below solves a toy
+        CMDP with two states and two actions.
+      </p>
+      <pre><code class="language-mathematica">
+(* States and actions *)
+states = {1, 2};
+actions = {1, 2};
+gamma = 0.9;
+
+(* Reward and cost tables r(s,a), c(s,a) *)
+r[1,1] = 1;  r[1,2] = 0;
+r[2,1] = 0;  r[2,2] = 2;
+
+c[1,1] = 0;  c[1,2] = 1;
+c[2,1] = 1;  c[2,2] = 0;
+
+(* Transition probabilities P(s'|s,a) *)
+P[1,1,1] = 0.7; P[2,1,1] = 0.3;
+P[1,1,2] = 0.2; P[2,1,2] = 0.8;
+P[1,2,1] = 0.4; P[2,2,1] = 0.6;
+P[1,2,2] = 0.9; P[2,2,2] = 0.1;
+
+(* Decision variables: discounted occupancy measures d[s,a] *)
+vars = Flatten@Table[d[s,a], {s,states}, {a,actions}];
+
+(* Initial distribution mu(s) *)
+mu[1] = 1; mu[2] = 0;
+
+(* Balance constraints:
+   sum_a d[s,a] = (1 - gamma) * mu(s) +
+   gamma * sum_{s',a'} d[s',a'] P(s|s',a') *)
+balanceConstraints =
+  Table[
+    Sum[d[s,a], {a,actions}] == (1 - gamma) * mu[s] +
+      gamma * Sum[d[s2,a2] * P[s,s2,a2],
+                  {s2,states}, {a2,actions}],
+    {s,states}
+  ];
+
+(* Nonnegativity *)
+nonneg = Thread[vars &gt;= 0];
+
+(* Cost constraint: J_c(d) &lt;= d_max *)
+dMax = 0.5;
+Jc = 1/(1 - gamma) * Sum[d[s,a] * c[s,a],
+                         {s,states}, {a,actions}];
+costConstraint = Jc &lt;= dMax;
+
+(* Objective: maximize discounted reward *)
+Jr = 1/(1 - gamma) * Sum[d[s,a] * r[s,a],
+                         {s,states}, {a,actions}];
+
+sol = NMaximize[
+   {Jr, Join[balanceConstraints, nonneg, {costConstraint}]},
+   vars
+];
+
+sol
+      </code></pre>
+      <p>
+        The resulting optimal occupancy measures define an optimal safe policy.
+        This explicit LP formulation is intractable for large robotic systems,
+        but it is extremely useful for theoretical analysis and for validating
+        approximate RL algorithms on tiny benchmarks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Occupancy-Measure LP for CMDPs):</strong>
+        Consider a finite CMDP with state set \( \mathcal{S} \), action set \(
+        \mathcal{A} \), transition kernel \( P \), reward \( r \), single
+        constraint cost \( c \), discount \( \gamma\in[0,1) \), and initial
+        distribution \( \mu \). Show that the constrained problem
+      </p>
+      <h4 class="mathJax">
+        \[ \max_{\pi} J_r(\pi) \quad \text{s.t.}\quad J_c(\pi) \leq d \]
+      </h4>
+      <p>
+        can be written as a linear program over discounted occupancy measures \(
+        d(s,a) \).
+      </p>
+      <p>
+        <strong>Solution:</strong> For a stationary policy \( \pi \), define
+        discounted occupancy measures
+      </p>
+      <h4 class="mathJax">
+        \[ d(s,a) = (1-\gamma) \sum_{t=0}^{\infty} \gamma^t
+        \mathbb{P}_{\pi}(s_t=s,a_t=a). \]
+      </h4>
+      <p>
+        It follows that \( d(s,a) \geq 0 \) and the state marginals satisfy the
+        <em>balance equations</em>
+      </p>
+      <h4 class="mathJax">
+        \[ \sum_{a} d(s,a) = (1-\gamma)\mu(s) + \gamma \sum_{s',a'} d(s',a')
+        P(s\mid s',a'). \]
+      </h4>
+      <p>Using the definition of \( d \), we obtain</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} J_r(\pi) &= \mathbb{E}_{\pi}\bigg[
+        \sum_{t=0}^{\infty} \gamma^t r(s_t,a_t)\bigg] = \frac{1}{1-\gamma}
+        \sum_{s,a} d(s,a)\,r(s,a), \\ J_c(\pi) &= \frac{1}{1-\gamma} \sum_{s,a}
+        d(s,a)\,c(s,a). \end{aligned} \]
+      </h4>
+      <p>Thus the CMDP is equivalent to</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \max_{d} \quad & \sum_{s,a} d(s,a)\,r(s,a) \\
+        \text{s.t.}\quad & \sum_{a} d(s,a) = (1-\gamma)\mu(s) + \gamma
+        \sum_{s',a'} d(s',a') P(s\mid s',a'),\quad \forall s, \\ & \sum_{s,a}
+        d(s,a)\,c(s,a) \leq (1-\gamma)d, \\ & d(s,a) \geq 0,\quad \forall s,a,
+        \end{aligned} \]
+      </h4>
+      <p>which is a linear program in the variables \( d(s,a) \).</p>
+
+      <p>
+        <strong
+          >Problem 2 (Unbiased Gradient Estimator for Constraint
+          Returns):</strong
+        >
+        Let \( J_c(\pi_{\theta}) \) be the discounted constraint return for a
+        differentiable policy \( \pi_{\theta} \). Show that
+      </p>
+      <h4 class="mathJax">
+        \[ \widehat{\nabla_{\theta} J_c} = \sum_{t=0}^{T-1} \nabla_{\theta}
+        \log\pi_{\theta}(a_t\mid s_t)\, \hat{G}_t^c \]
+      </h4>
+      <p>
+        is an unbiased estimator of \( \nabla_{\theta} J_c(\pi_{\theta}) \) when
+        \( \hat{G}_t^c \) is the Monte Carlo return
+        <strong>\( \sum_{k=t}^{\infty} \gamma^{k-t} c(s_k,a_k) \)</strong>.
+      </p>
+      <p><strong>Solution:</strong> Starting from</p>
+      <h4 class="mathJax">
+        \[ J_c(\pi_{\theta}) = \sum_{\tau} p_{\theta}(\tau)
+        \bigg(\sum_{t=0}^{\infty} \gamma^t c(s_t,a_t)\bigg), \]
+      </h4>
+      <p>
+        where \( \tau \) is a trajectory and \( p_{\theta}(\tau) \) its
+        probability, differentiate under the sum:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \nabla_{\theta} J_c(\pi_{\theta}) &= \sum_{\tau}
+        \nabla_{\theta} p_{\theta}(\tau) \sum_{t=0}^{\infty} \gamma^t c(s_t,a_t)
+        \\ &= \sum_{\tau} p_{\theta}(\tau) \nabla_{\theta} \log p_{\theta}(\tau)
+        \sum_{t=0}^{\infty} \gamma^t c(s_t,a_t). \end{aligned} \]
+      </h4>
+      <p>
+        Since
+        <strong
+          >\( \log p_{\theta}(\tau) = \sum_{t} \log\pi_{\theta}(a_t\mid s_t)
+          \)</strong
+        >,
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} \log p_{\theta}(\tau) = \sum_{t=0}^{\infty}
+        \nabla_{\theta}\log\pi_{\theta}(a_t\mid s_t). \]
+      </h4>
+      <p>Reordering sums and using the definition of \( G_t^c \) yields</p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} J_c(\pi_{\theta}) = \mathbb{E}_{\pi_{\theta}}\bigg[
+        \sum_{t=0}^{\infty} \nabla_{\theta}\log\pi_{\theta}(a_t\mid s_t)\,
+        G_t^c\bigg], \]
+      </h4>
+      <p>
+        so replacing the expectation with a finite-sample average over
+        trajectories gives an unbiased estimator.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Mixture Safety Bound):</strong> Let \(
+        \pi_{\text{safe}} \) and \( \pi_{\theta} \) be policies with constraint
+        returns \( J_c(\pi_{\text{safe}}) \) and \( J_c(\pi_{\theta}) \). Assume
+        <strong>\( J_c(\pi_{\text{safe}}) \leq d \)</strong> and
+        <strong>\( J_c(\pi_{\theta}) &gt; d \)</strong>. Derive the maximal
+        mixing coefficient \( \alpha_{\max} \) such that \( \pi_{\alpha} =
+        (1-\alpha)\pi_{\text{safe}} + \alpha \pi_{\theta} \) still satisfies \(
+        J_c(\pi_{\alpha}) \leq d \).
+      </p>
+      <p><strong>Solution:</strong> From Section 4 we have</p>
+      <h4 class="mathJax">
+        \[ J_c(\pi_{\alpha}) = (1-\alpha)\,J_c(\pi_{\text{safe}}) +
+        \alpha\,J_c(\pi_{\theta}). \]
+      </h4>
+      <p>Requiring \( J_c(\pi_{\alpha}) \leq d \) gives</p>
+      <h4 class="mathJax">
+        \[ (1-\alpha)\,J_c(\pi_{\text{safe}}) + \alpha\,J_c(\pi_{\theta}) \leq
+        d. \]
+      </h4>
+      <p>Rearranging,</p>
+      <h4 class="mathJax">
+        \[ \alpha \big(J_c(\pi_{\theta}) - J_c(\pi_{\text{safe}})\big) \leq d -
+        J_c(\pi_{\text{safe}}). \]
+      </h4>
+      <p>
+        Since \( J_c(\pi_{\theta}) &gt; J_c(\pi_{\text{safe}}) \), the
+        denominator is positive and
+      </p>
+      <h4 class="mathJax">
+        \[ \alpha \leq \frac{d - J_c(\pi_{\text{safe}})} {J_c(\pi_{\theta}) -
+        J_c(\pi_{\text{safe}})} \equiv \alpha_{\max}. \]
+      </h4>
+      <p>Any \( \alpha \in [0,\alpha_{\max}] \) yields a safe mixture.</p>
+
+      <p>
+        <strong>Problem 4 (CVaR Representation):</strong> Let \( Z \) be an
+        integrable random variable. Show that the CVaR representation
+      </p>
+      <h4 class="mathJax">
+        \[ \text{CVaR}_{\alpha}(Z) = \inf_{\eta \in \mathbb{R}} \bigg\{\eta +
+        \frac{1}{1-\alpha} \mathbb{E}\big[(Z-\eta)_+\big]\bigg\} \]
+      </h4>
+      <p>is convex in \( Z \). Why is this property important for safe RL?</p>
+      <p>
+        <strong>Solution:</strong> For any fixed \( \eta \), the mapping \( Z
+        \mapsto \mathbb{E}[(Z-\eta)_+] \) is convex because \( x \mapsto
+        (x-\eta)_+ \) is convex and expectation preserves convexity. The scaled
+        and shifted version
+      </p>
+      <h4 class="mathJax">
+        \[ Z \mapsto \eta + \frac{1}{1-\alpha} \mathbb{E}\big[(Z-\eta)_+\big] \]
+      </h4>
+      <p>
+        is therefore convex for each \( \eta \). The infimum over a family of
+        convex functions is also convex, so \( \text{CVaR}_{\alpha}(Z) \) is
+        convex in \( Z \). For safe RL, convexity allows one to apply
+        stochastic-gradient and primal–dual methods with convergence guarantees
+        in risk-sensitive optimization problems.
+      </p>
+
+      <p>
+        <strong>Problem 5 (KKT Conditions for CMDP Lagrangian):</strong>
+        Consider the CMDP Lagrangian
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(\pi,\lambda) = J_r(\pi) - \lambda \big(J_c(\pi) -
+        d\big),\quad \lambda \geq 0. \]
+      </h4>
+      <p>
+        Assuming strong duality and convexity in occupancy-measure space,
+        express the Karush–Kuhn–Tucker (KKT) conditions at an optimal pair \(
+        (\pi^{\star},\lambda^{\star}) \) and interpret them in terms of safety.
+      </p>
+      <p><strong>Solution:</strong> The KKT conditions are:</p>
+      <ul>
+        <li>
+          <em>Primal feasibility:</em>
+          <strong>\( J_c(\pi^{\star}) \leq d \)</strong>.
+        </li>
+        <li>
+          <em>Dual feasibility:</em>
+          <strong>\( \lambda^{\star} \geq 0 \)</strong>.
+        </li>
+        <li>
+          <em>Complementary slackness:</em>
+          <strong
+            >\( \lambda^{\star}\big(J_c(\pi^{\star}) - d\big) = 0 \)</strong
+          >.
+        </li>
+        <li>
+          <em>Stationarity:</em>
+          <strong
+            >\( \nabla_{\pi} \mathcal{L}(\pi^{\star},\lambda^{\star}) = 0
+            \)</strong
+          >
+          in the feasible policy manifold.
+        </li>
+      </ul>
+      <p>
+        Complementary slackness implies that if the constraint is inactive
+        (<strong>\( J_c(\pi^{\star}) &lt; d \)</strong>), then
+        <strong>\( \lambda^{\star} = 0 \)</strong>, so the solution coincides
+        with the unconstrained optimum. If the constraint is active (<strong
+          >\( J_c(\pi^{\star}) = d \)</strong
+        >), then <strong>\( \lambda^{\star} &gt; 0 \)</strong>, meaning the dual
+        variable acts as a penalty weight enforcing safety at the optimum.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we formalized safety-constrained reinforcement learning
+        for robotic systems via constrained Markov decision processes. We
+        expressed CMDPs as linear programs over occupancy measures, derived
+        Lagrangian and primal–dual policy gradient updates that incorporate
+        constraint costs, and analyzed safe exploration strategies based on
+        mixtures with baseline policies. We also introduced risk-sensitive
+        objectives such as CVaR and chance constraints, which better capture
+        rare catastrophic events than expectations alone. Multi-language code
+        sketches in Python, C++, Java, MATLAB/Simulink, and Wolfram Mathematica
+        illustrated how theoretical ideas map into practical implementations
+        suitable for real robots. These tools provide the foundation for
+        safety-aware RL in advanced robotic manipulation and locomotion tasks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Altman, E. (1999). <em>Constrained Markov Decision Processes</em>.
+        Chapman &amp; Hall/CRC.
+      </li>
+      <li>
+        Borkar, V. S. (2005). An actor-critic algorithm for constrained Markov
+        decision processes. <em>Systems &amp; Control Letters</em>, 54(3),
+        207–213.
+      </li>
+      <li>
+        Achiam, J., Held, D., Tamar, A., &amp; Abbeel, P. (2017). Constrained
+        policy optimization. In
+        <em
+          >Proceedings of the 34th International Conference on Machine Learning
+          (ICML)</em
+        >, 22–31.
+      </li>
+      <li>
+        Chow, Y., Tamar, A., Mannor, S., &amp; Pavone, M. (2015). Risk-sensitive
+        and robust decision-making: A CVaR optimization approach. In
+        <em>Advances in Neural Information Processing Systems (NeurIPS)</em>,
+        1522–1530.
+      </li>
+      <li>
+        Tamar, A., Glassner, Y., &amp; Mannor, S. (2015). Policy gradients with
+        variance related risk criteria. In
+        <em
+          >Proceedings of the 32nd International Conference on Machine Learning
+          (ICML)</em
+        >, 1462–1471.
+      </li>
+      <li>
+        Garc&iacute;a, J., &amp; Fern&aacute;ndez, F. (2015). A comprehensive
+        survey on safe reinforcement learning.
+        <em>Journal of Machine Learning Research</em>, 16, 1437–1480.
+      </li>
+      <li>
+        Eysenbach, B., Gu, S., Ibarz, J., &amp; Levine, S. (2018). Leave no
+        trace: Learning to reset for safe and autonomous reinforcement learning.
+        In <em>International Conference on Learning Representations (ICLR)</em>.
+      </li>
+      <li>
+        Berkenkamp, F., Turchetta, M., Schoellig, A. P., &amp; Krause, A.
+        (2017). Safe model-based reinforcement learning with stability
+        guarantees. In
+        <em>Advances in Neural Information Processing Systems (NeurIPS)</em>,
+        908–918.
+      </li>
+      <li>
+        Tessler, C., Mankowitz, D. J., &amp; Mannor, S. (2018). Reward
+        constrained policy optimization. In
+        <em>International Conference on Learning Representations (ICLR)</em>.
+      </li>
+      <li>
+        Paternain, S., Chamon, L. F. O., Calvo-Fullana, M., &amp; Ribeiro, A.
+        (2019). Constrained reinforcement learning has zero duality gap. In
+        <em>Advances in Neural Information Processing Systems (NeurIPS)</em>,
+        7553–7563.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter12/Lesson4.html">
+          Lesson 4: Reward Design and Sparse-Reward Tricks
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter12/Lesson6.html">
+          Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

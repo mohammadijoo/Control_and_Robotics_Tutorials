@@ -1,0 +1,1752 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning - Lesson 3: Re-grasp and In-Hand Manipulation Planning | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</h1>
+    <h3>
+      <strong>Lesson 3: Re-grasp and In-Hand Manipulation Planning</strong>
+    </h3>
+    <p>
+      This lesson formalizes <em>re-grasp</em> and
+      <em>in-hand manipulation</em> as motion planning problems in a hybrid
+      state space that couples the hand configuration, object pose, and discrete
+      contact modes. We derive kinematic and quasi-static constraints for
+      multi-contact manipulation, introduce grasp/regrasp graphs, and present
+      optimization formulations for in-hand manipulation. Finally, we provide
+      multi-language implementations of a simple regrasp planner.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In this chapter you already studied analytical and data-driven grasp
+        generation and the notion of grasp quality in wrench space. Here we move
+        from <em>single grasp selection</em> to
+        <em>sequences of grasps</em> that transform an object from an initial to
+        a desired pose using a dexterous hand (or multi-arm system). We
+        distinguish:
+      </p>
+      <ul>
+        <li>
+          <strong>Re-grasp:</strong> sequences that break and form new contacts
+          (e.g., place object, change grasp, pick again).
+        </li>
+        <li>
+          <strong>In-hand manipulation:</strong> continuous motion where the
+          object moves relative to the palm without leaving the hand, possibly
+          with finger gaiting.
+        </li>
+      </ul>
+      <p>
+        Let <strong>\( \mathcal{X} \)</strong> denote the continuous state space
+        and <strong>\( \mathcal{M} \)</strong> the discrete
+        <em>contact mode</em> space. A manipulation plan is a hybrid trajectory
+      </p>
+      <h4 class="mathJax">
+        \[ \gamma = \{(x_k, m_k)\}_{k=0}^K,\quad x_k \in \mathcal{X},\; m_k \in
+        \mathcal{M}, \]
+      </h4>
+      <p>
+        connecting an initial grasp-state <strong>\( (x_0,m_0) \)</strong> to a
+        goal <strong>\( (x_K,m_K) \)</strong> while respecting kinematic,
+        contact, and friction constraints. The cost of a plan may penalize path
+        length, number of regrasps, and control effort.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Initial grasp (x0, m0)"] --> CAND["Generate candidate grasps / modes"]
+  CAND --> GRAPH["Build grasp / regrasp graph"]
+  GRAPH --> PLAN["Search for discrete path of grasps"]
+  PLAN --> CONT["For each edge: plan continuous in-hand motion"]
+  CONT --> VERIFY["Verify contact, friction, joint limits"]
+  VERIFY --> EXEC["Execute with feedback (vision / tactile)"]
+        </pre>
+      </div>
+      <p>
+        The remainder of the lesson makes each of these blocks mathematically
+        precise and connects them to algorithms you can implement.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Hybrid State and Grasp Representation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Hybrid State and Grasp Representation</h2>
+    <div class="down-content">
+      <p>
+        Consider a dexterous hand with <strong>\( n_h \)</strong> joints and an
+        object with pose <strong>\( g_o \in SE(3) \)</strong> in the world
+        frame. The continuous configuration state is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{C}_{\text{hand}} \subset \mathbb{R}^{n_h},\qquad
+        \mathcal{C}_{\text{obj}} = SE(3),\qquad \mathcal{X} =
+        \mathcal{C}_{\text{hand}} \times \mathcal{C}_{\text{obj}}. \]
+      </h4>
+      <p>
+        We denote a state as <strong>\( x = (q_h, g_o) \)</strong>, where
+        <strong>\( q_h \)</strong> is the hand joint vector. A
+        <em>contact mode</em> <strong>\( m \in \mathcal{M} \)</strong> encodes,
+        for each potential contact, whether it is active or inactive and its
+        regime (sticking, sliding, separating, etc.). For a set of potential
+        contacts indexed by <strong>\( i = 1,\dots,N_c \)</strong>, a simple
+        mode encoding is
+      </p>
+      <h4 class="mathJax">
+        \[ m = (m_1,\dots,m_{N_c}),\quad m_i \in \{\text{inactive},\
+        \text{sticking},\ \text{sliding}\}. \]
+      </h4>
+      <p>A <strong>grasp</strong> is a tuple</p>
+      <h4 class="mathJax">\[ g = (x,m) = (q_h,g_o,m) \]</h4>
+      <p>
+        such that the active contacts in <strong>\( m \)</strong> are
+        kinematically consistent with <strong>\( x \)</strong> and generate a
+        stable equilibrium (e.g. force-closure or sufficient grasp quality in
+        the wrench space defined in Chapter 7).
+      </p>
+      <p>
+        For in-hand manipulation, it is often convenient to express the object
+        pose in the hand frame (palm frame) via a homogeneous transform
+        <strong>\( T_{ho} \in SE(3) \)</strong>. If
+        <strong>\( T_{wh} \)</strong> and <strong>\( T_{wo} \)</strong> are the
+        world-to-hand and world-to-object transforms, then
+      </p>
+      <h4 class="mathJax">\[ T_{ho} = T_{wh}^{-1} T_{wo}. \]</h4>
+      <p>
+        A library of candidate grasps can therefore be represented as
+        <strong
+          >\( \mathcal{G} = \{ (T_{ho}^{(j)},q_h^{(j)},m^{(j)}) \}_{j=1}^N
+          \)</strong
+        >, which we will use to build a <em>regrasp graph</em>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Contact Kinematics and Quasi-Static Constraints -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Contact Kinematics and Quasi-Static Constraints</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \mathbf{v}_o \in \mathbb{R}^6 \)</strong> denote the
+        spatial twist of the object in the world frame (linear and angular
+        velocity), and
+        <strong>\( \dot{\mathbf{q}}_h \in \mathbb{R}^{n_h} \)</strong> the joint
+        velocities. For active contact <strong>\( i \)</strong>, the relative
+        velocity at the contact point, expressed in some frame, can be written
+        as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{v}_{c,i}(x,\dot{\mathbf{q}}_h,\mathbf{v}_o) =
+        \mathbf{J}_{h,i}(q_h)\,\dot{\mathbf{q}}_h -
+        \mathbf{J}_{o,i}(g_o)\,\mathbf{v}_o, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{J}_{h,i} \)</strong> is the hand Jacobian
+        mapping joint velocities to contact-point twist, and
+        <strong>\( \mathbf{J}_{o,i} \)</strong> is the object Jacobian at that
+        contact. For a <em>sticking</em> point contact we impose
+      </p>
+      <h4 class="mathJax">\[ \mathbf{v}_{c,i} = \mathbf{0}. \]</h4>
+      <p>
+        Stacking the constraints for all sticking contacts yields a linear
+        system
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}(x,m) \begin{bmatrix} \dot{\mathbf{q}}_h \\ \mathbf{v}_o
+        \end{bmatrix} = \mathbf{0}, \qquad \mathbf{A}(x,m) \in \mathbb{R}^{k
+        \times (n_h+6)}, \]
+      </h4>
+      <p>
+        where <strong>\( k \)</strong> is three times the number of sticking
+        contacts for full 3D motion (or two in planar settings).
+      </p>
+      <p>
+        Under quasi-static assumptions, inertial terms are negligible and
+        contact forces must balance external wrenches. Let
+        <strong>\( \boldsymbol{\lambda} \in \mathbb{R}^{3N_c} \)</strong> stack
+        the contact forces (or wrenches) at each active contact and
+        <strong>\( \mathbf{w}_{\text{ext}} \in \mathbb{R}^6 \)</strong> be the
+        external wrench (e.g. gravity). The grasp map
+        <strong>\( \mathbf{G}(x,m) \in \mathbb{R}^{6 \times 3N_c} \)</strong>
+        satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{G}(x,m)\,\boldsymbol{\lambda} + \mathbf{w}_{\text{ext}} =
+        \mathbf{0}. \]
+      </h4>
+      <p>
+        Contact forces must lie in the Coulomb friction cones. A common
+        polyhedral approximation is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{F}_i = \bigl\{ \mathbf{f}_i \in \mathbb{R}^3 \,\bigm|\,
+        \mathbf{F}_i\,\mathbf{f}_i \le \mathbf{0} \bigr\}, \]
+      </h4>
+      <p>
+        so that the stacked forces satisfy
+        <strong>\( \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0} \)</strong>.
+        The instantaneous feasibility problem for in-hand motion can be posed as
+        a quadratic program:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned}
+        \min_{\dot{\mathbf{q}}_h,\mathbf{v}_o,\boldsymbol{\lambda}} &\quad
+        \|\mathbf{v}_o - \mathbf{v}_o^{\ast}\|_2^2 + \alpha
+        \,\|\dot{\mathbf{q}}_h\|_2^2 \\ \text{s.t.} &\quad \mathbf{A}(x,m)
+        \begin{bmatrix} \dot{\mathbf{q}}_h \\ \mathbf{v}_o \end{bmatrix} =
+        \mathbf{0}, \\ &\quad \mathbf{G}(x,m)\,\boldsymbol{\lambda} +
+        \mathbf{w}_{\text{ext}} = \mathbf{0}, \\ &\quad
+        \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0}, \end{aligned} \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{v}_o^{\ast} \)</strong> is a desired object
+        twist and <strong>\( \alpha &gt; 0 \)</strong> sets a trade-off between
+        object motion tracking and joint effort. For fixed mode
+        <strong>\( m \)</strong>, this is a convex QP.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Grasp and Regrasp Graphs -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Grasp and Regrasp Graphs</h2>
+    <div class="down-content">
+      <p>
+        Suppose we have precomputed a finite set of stable grasps
+        <strong>\( \mathcal{G} = \{g_1,\dots,g_N\} \)</strong> using the
+        synthesis methods of Lesson 2. A <strong>grasp graph</strong> is a
+        directed graph
+        <strong>\( \mathcal{G}_{\text{graph}} = (V,E) \)</strong> with
+        <strong>\( V = \{1,\dots,N\} \)</strong> and edges
+      </p>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ (i,j) \in E \quad\Longleftrightarrow\quad \text{there exists a feasible manipulation taking } g_i \text{ to } g_j. \]
+      </h4>
+      <p>
+        Feasibility can mean an <em>in-hand motion</em> (no placement) or a
+        <em>place-and-regrasp</em>
+        maneuver via an intermediate stable placement on the environment. Let
+        <strong>\( \pi = (i_0,\dots,i_K) \)</strong> be a path in the graph
+        (vertex sequence). Its cost can be defined as
+      </p>
+      <h4 class="mathJax">
+        \[ J(\pi) = \sum_{k=0}^{K-1} c(g_{i_k},g_{i_{k+1}}), \]
+      </h4>
+      <p>
+        where an edge cost may combine orientation and position change, number
+        of fingers that change contact, and whether the move uses a placement:
+      </p>
+      <h4 class="mathJax">
+        \[ c(g_i,g_j) = w_p \,\|\mathbf{p}_i - \mathbf{p}_j\|_2 + w_R
+        \,d_{SO(3)}(R_i,R_j) + w_{\text{mode}}\,\Delta n_f(i,j) +
+        w_{\text{place}}\,\delta_{\text{place}}(i,j). \]
+      </h4>
+      <p>
+        Here <strong>\( \mathbf{p}_i,R_i \)</strong> are position and rotation
+        of the object relative to the hand in grasp <strong>\( g_i \)</strong>,
+        <strong>\( d_{SO(3)} \)</strong> is a metric on rotations (see Chapter
+        1), <strong>\( \Delta n_f \)</strong> counts the number of fingers that
+        change contact set, and <strong>\( \delta_{\text{place}} \)</strong> is
+        one if a placement is required.
+      </p>
+      <p>
+        Given an initial grasp index <strong>\( i_{\text{start}} \)</strong> and
+        a target grasp <strong>\( i_{\text{goal}} \)</strong>, regrasp planning
+        reduces to a shortest-path problem:
+      </p>
+      <h4 class="mathJax">
+        \[ \pi^{\ast} = \arg\min_{\pi \in
+        \mathcal{P}(i_{\text{start}},i_{\text{goal}})} J(\pi), \]
+      </h4>
+      <p>
+        where <strong>\( \mathcal{P} \)</strong> is the set of all directed
+        paths from <strong>\( i_{\text{start}} \)</strong> to
+        <strong>\( i_{\text{goal}} \)</strong>. Algorithms such as Dijkstra or
+        A* (Chapter 2) can be applied directly once edge costs are available.
+      </p>
+      <p>
+        <strong>Remark (connectivity via placements).</strong> If every stable
+        placement on the support surface admits at least one force-closure grasp
+        and the object can be rotated arbitrarily in a finite set of placements,
+        then the regrasp graph constructed from those placements and grasps is
+        strongly connected (any initial grasp can reach any other) under mild
+        assumptions on reachability. This justifies place-and-regrasp strategies
+        in practical systems.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Optimization-Based In-Hand Manipulation Planning -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Optimization-Based In-Hand Manipulation Planning</h2>
+    <div class="down-content">
+      <p>
+        Instead of precomputing a discrete graph, one can directly plan a
+        continuous in-hand trajectory driving the object from
+        <strong>\( T_{ho}^{(0)} \)</strong> to
+        <strong>\( T_{ho}^{(\text{goal})} \)</strong>. Discretize time into
+        <strong>\( k = 0,\dots,N \)</strong> with time step
+        <strong>\( \Delta t \)</strong> and decision variables
+        <strong>\( x_k = (q_h^k,g_o^k) \)</strong>, control inputs
+        <strong>\( \mathbf{u}_k \)</strong> (e.g. joint velocities or torques),
+        and contact forces <strong>\( \boldsymbol{\lambda}_k \)</strong>. For a
+        fixed mode sequence <strong>\( (m_0,\dots,m_{N-1}) \)</strong>, the
+        problem can be written as
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \min_{\{x_k,\mathbf{u}_k,\boldsymbol{\lambda}_k\}}
+        &\quad \sum_{k=0}^{N-1} \ell(x_k,\mathbf{u}_k) + \phi(x_N) \\
+        \text{s.t.} &\quad x_{k+1} = f(x_k,\mathbf{u}_k,m_k),\quad
+        k=0,\dots,N-1, \\ &\quad \mathbf{A}(x_k,m_k) \begin{bmatrix}
+        \dot{\mathbf{q}}_h^k \\ \mathbf{v}_o^k \end{bmatrix} = \mathbf{0}, \\
+        &\quad \mathbf{G}(x_k,m_k)\,\boldsymbol{\lambda}_k +
+        \mathbf{w}_{\text{ext}}(x_k) = \mathbf{0}, \\ &\quad
+        \mathbf{F}\boldsymbol{\lambda}_k \le \mathbf{0}, \\ &\quad x_0 =
+        x_{\text{start}},\quad x_N \approx x_{\text{goal}}. \end{aligned} \]
+      </h4>
+      <p>
+        The dynamics <strong>\( f \)</strong> can be a first-order integrator in
+        joint space and object pose, or a more detailed quasi-static model
+        derived from manipulator dynamics you studied in the kinematics and
+        dynamics course. The major difficulty is that contact modes can change:
+        formulation with <em>mode decision variables</em> leads to mixed-integer
+        (MIQP/MILP) problems, while <em>complementarity constraints</em> (normal
+        distance and normal force orthogonality) lead to nonlinear programs with
+        complementarity, both hard in general.
+      </p>
+      <p>
+        Practical systems often combine a <em>discrete</em> search over mode
+        sequences (e.g., finger gait patterns) with convex optimization for
+        continuous variables within each mode. The regrasp graph in Section 4
+        supplies the discrete skeleton, and each edge is refined via a
+        trajectory optimization of the above form.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Multi-language Computational Lab — Simple Regrasp Graph -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Multi-language Computational Lab &mdash; Simple Regrasp Graph</h2>
+    <div class="down-content">
+      <p>
+        We now implement a minimal regrasp graph planner in several languages.
+        The example is deliberately simplified: nodes represent candidate
+        in-hand object poses and edges represent feasible transitions if the
+        orientation and position differences are below thresholds. In a real
+        system these feasibility checks would call kinematics and
+        contact-constraint solvers.
+      </p>
+
+      <h3>
+        6.1 Python (with <code>pinocchio</code> and <code>networkx</code>)
+      </h3>
+      <pre><code class="language-python">
+import numpy as np
+import networkx as nx
+import pinocchio as pin  # robotics kinematics library
+
+class Grasp:
+    def __init__(self, idx, T_ho, quality):
+        self.idx = idx
+        self.T_ho = T_ho  # 4x4 homogeneous transform (hand frame to object)
+        self.quality = quality
+
+def random_transform(max_pos=0.05):
+    """Small random transform around the palm."""
+    T = np.eye(4)
+    T[:3, 3] = max_pos * (np.random.rand(3) - 0.5)
+    # small random rotation via axis-angle
+    axis = np.random.rand(3) - 0.5
+    axis /= np.linalg.norm(axis) + 1e-9
+    theta = 0.3 * (np.random.rand() - 0.5)
+    R = pin.exp3(axis * theta)
+    T[:3, :3] = R
+    return T
+
+def pose_distance(T1, T2, w_rot=1.0, w_pos=1.0):
+    dp = np.linalg.norm(T1[:3, 3] - T2[:3, 3])
+    R_rel = T1[:3, :3].T @ T2[:3, :3]
+    tr = np.trace(R_rel)
+    tr = np.clip(tr, -1.0, 3.0)
+    dtheta = np.arccos((tr - 1.0) / 2.0)
+    return w_pos * dp + w_rot * dtheta
+
+# Build synthetic grasp set
+np.random.seed(0)
+N = 6
+grasps = []
+for i in range(N):
+    T = random_transform()
+    quality = np.random.rand()
+    grasps.append(Grasp(i, T, quality))
+
+# Build directed regrasp graph
+G = nx.DiGraph()
+for g in grasps:
+    G.add_node(g.idx)
+
+max_step = 0.08  # admissible pose distance for direct regrasp
+for i in range(N):
+    for j in range(N):
+        if i == j:
+            continue
+        d = pose_distance(grasps[i].T_ho, grasps[j].T_ho)
+        if d &lt;= max_step:
+            # edge cost: pose distance plus penalty for quality loss
+            cost = d + max(0.0, grasps[i].quality - grasps[j].quality)
+            G.add_edge(i, j, cost=cost)
+
+start_id = 0
+goal_id = N - 1
+if nx.has_path(G, start_id, goal_id):
+    path = nx.shortest_path(G, source=start_id, target=goal_id, weight="cost")
+    print("Regrasp sequence:", path)
+else:
+    print("No path between grasps in this random example.")
+      </code></pre>
+      <p>
+        In a full implementation, each edge would also store a continuous
+        in-hand trajectory (planned via a QP as in Section 3) and low-level
+        commands for the hand controller.
+      </p>
+
+      <h3>6.2 C++ (with <code>Eigen</code> and <code>pinocchio</code>)</h3>
+      <pre><code class="language-cpp">
+#include &lt;vector&gt;
+#include &lt;queue&gt;
+#include &lt;limits&gt;
+#include &lt;iostream&gt;
+#include &lt;Eigen/Dense&gt;
+#include &lt;pinocchio/multibody/model.hpp&gt; // robotics kinematics library
+
+struct Edge {
+    int to;
+    double cost;
+};
+
+using Graph = std::vector&lt; std::vector&lt;Edge&gt; &gt;;
+
+std::vector&lt;int&gt; dijkstra(const Graph&amp; G, int start, int goal) {
+    const double INF = std::numeric_limits&lt;double&gt;::infinity();
+    int n = static_cast&lt;int&gt;(G.size());
+    std::vector&lt;double&gt; dist(n, INF);
+    std::vector&lt;int&gt; parent(n, -1);
+    using Node = std::pair&lt;double,int&gt;;
+    auto cmp = [](const Node&amp; a, const Node&amp; b) { return a.first &gt; b.first; };
+    std::priority_queue&lt;Node, std::vector&lt;Node&gt;, decltype(cmp)&gt; pq(cmp);
+
+    dist[start] = 0.0;
+    pq.push({0.0, start});
+
+    while (!pq.empty()) {
+        auto [d,u] = pq.top();
+        pq.pop();
+        if (d &gt; dist[u]) continue;
+        if (u == goal) break;
+        for (const auto&amp; e : G[u]) {
+            double nd = d + e.cost;
+            if (nd &lt; dist[e.to]) {
+                dist[e.to] = nd;
+                parent[e.to] = u;
+                pq.push({nd, e.to});
+            }
+        }
+    }
+
+    std::vector&lt;int&gt; path;
+    if (dist[goal] == INF) return path;
+    for (int v = goal; v != -1; v = parent[v]) {
+        path.push_back(v);
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
+int main() {
+    // Example: 4 grasps with a few feasible transitions
+    Graph G(4);
+    G[0].push_back({1, 1.0});
+    G[1].push_back({2, 1.0});
+    G[0].push_back({2, 2.5});
+    G[2].push_back({3, 1.0});
+
+    auto path = dijkstra(G, 0, 3);
+    if (path.empty()) {
+        std::cout &lt;&lt; "No regrasp path.\n";
+    } else {
+        std::cout &lt;&lt; "Path:";
+        for (int v : path) {
+            std::cout &lt;&lt; " " &lt;&lt; v;
+        }
+        std::cout &lt;&lt; std::endl;
+    }
+    return 0;
+}
+      </code></pre>
+      <p>
+        Here we used C++ and <code>Eigen</code>/<code>pinocchio</code> only for
+        linear algebra and kinematics support; a full system would call forward
+        kinematics and contact checks when building <code>Graph G</code>.
+      </p>
+
+      <h3>6.3 Java (graph abstraction for regrasp planning)</h3>
+      <pre><code class="language-java">
+import java.util.*;
+
+// Lightweight linear algebra can be provided by EJML or similar libraries.
+class GraspGraph {
+    static class Edge {
+        int to;
+        double cost;
+        Edge(int t, double c) { to = t; cost = c; }
+    }
+
+    private final List&lt;List&lt;Edge&gt;&gt; adj;
+
+    public GraspGraph(int n) {
+        adj = new ArrayList&lt;&gt;(n);
+        for (int i = 0; i &lt; n; ++i) {
+            adj.add(new ArrayList&lt;&gt;());
+        }
+    }
+
+    public void addEdge(int from, int to, double cost) {
+        adj.get(from).add(new Edge(to, cost));
+    }
+
+    public List&lt;Integer&gt; dijkstra(int start, int goal) {
+        int n = adj.size();
+        double[] dist = new double[n];
+        int[] parent = new int[n];
+        Arrays.fill(dist, Double.POSITIVE_INFINITY);
+        Arrays.fill(parent, -1);
+
+        class Node {
+            int v; double d;
+            Node(int v, double d) { this.v = v; this.d = d; }
+        }
+
+        PriorityQueue&lt;Node&gt; pq = new PriorityQueue&lt;&gt;(
+            Comparator.comparingDouble(a -&gt; a.d)
+        );
+
+        dist[start] = 0.0;
+        pq.add(new Node(start, 0.0));
+
+        while (!pq.isEmpty()) {
+            Node cur = pq.poll();
+            if (cur.d &gt; dist[cur.v]) continue;
+            if (cur.v == goal) break;
+            for (Edge e : adj.get(cur.v)) {
+                double nd = cur.d + e.cost;
+                if (nd &lt; dist[e.to]) {
+                    dist[e.to] = nd;
+                    parent[e.to] = cur.v;
+                    pq.add(new Node(e.to, nd));
+                }
+            }
+        }
+
+        List&lt;Integer&gt; path = new ArrayList&lt;&gt;();
+        if (Double.isInfinite(dist[goal])) return path;
+        for (int v = goal; v != -1; v = parent[v]) {
+            path.add(v);
+        }
+        Collections.reverse(path);
+        return path;
+    }
+
+    public static void main(String[] args) {
+        GraspGraph gg = new GraspGraph(4);
+        gg.addEdge(0, 1, 1.0);
+        gg.addEdge(1, 2, 0.8);
+        gg.addEdge(2, 3, 0.9);
+        gg.addEdge(0, 3, 3.5);
+
+        List&lt;Integer&gt; path = gg.dijkstra(0, 3);
+        System.out.println("Regrasp path: " + path);
+    }
+}
+      </code></pre>
+
+      <h3>6.4 MATLAB / Simulink</h3>
+      <pre><code class="language-matlab">
+% Simple directed regrasp graph and shortest path in MATLAB
+
+% Node indices for candidate grasps
+nodes = 1:4;
+
+% Edges: from, to, cost
+E_from = [1 2 1 3];
+E_to   = [2 3 4 4];
+E_cost = [1.0 1.0 1.0 2.5];
+
+G = digraph(E_from, E_to, E_cost, numel(nodes));
+[startNode, goalNode] = deal(1, 4);
+
+[path, totalCost] = shortestpath(G, startNode, goalNode, "Method", "positive");
+disp("Regrasp path:");
+disp(path);
+disp("Total cost:");
+disp(totalCost);
+
+% In a full implementation, each node would carry the hand configuration q_h
+% and object pose T_ho, and feasibility of edges would be checked using
+% Robotics System Toolbox (e.g., rigidBodyTree, inverseKinematics).
+      </code></pre>
+      <p>In <strong>Simulink</strong>, a common architecture is:</p>
+      <ul>
+        <li>
+          A Stateflow chart encoding contact modes and high-level regrasp
+          sequences.
+        </li>
+        <li>
+          A MATLAB Function block that, given the current mode, solves the
+          instantaneous QP of Section 3 to generate joint velocity commands.
+        </li>
+        <li>
+          A kinematic chain built from <code>Rigid Transform</code> and joint
+          blocks (or a <code>rigidBodyTree</code>-based Simscape model) to
+          simulate the hand and object motion.
+        </li>
+      </ul>
+
+      <h3>6.5 Wolfram Mathematica</h3>
+      <pre><code class="language-mathematica">
+(* Regrasp graph and shortest path in Mathematica *)
+
+graspVertices = {1, 2, 3, 4};
+edges = {1 -&gt; 2, 2 -&gt; 3, 1 -&gt; 3, 3 -&gt; 4};
+weights = {1.0, 1.0, 2.0, 1.0};
+
+g = Graph[
+  graspVertices,
+  Thread[edges, Rule],
+  EdgeWeight -&gt; weights,
+  DirectedEdges -&gt; True
+];
+
+HighlightGraph[
+  g,
+  PathGraph@FindShortestPath[g, 1, 4],
+  GraphLayout -&gt; "LayeredDigraphEmbedding"
+]
+
+(* In a more detailed model, vertices would store SE(3) poses and contact modes.
+   Feasibility of edges would be determined by solving quasi-static equilibrium
+   and friction constraints using LinearProgramming or NMinimize. *)
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Planar Rolling Contact Kinematics).</strong>
+        Consider a planar finger with a single revolute joint at the origin and
+        link length
+        <strong>\( L \)</strong>. It contacts a circular object of radius
+        <strong>\( R \)</strong> at a point on the boundary. The finger joint
+        angle is <strong>\( q \)</strong>, the object center has position
+        <strong>\( (x_o,y_o) \)</strong>, and its orientation is
+        <strong>\( \theta_o \)</strong>. Assume pure rolling contact (no slip).
+        Derive a linear relation between <strong>\( \dot{q} \)</strong> and the
+        object twist
+        <strong
+          >\( \mathbf{v}_o = (\dot{x}_o,\dot{y}_o,\dot{\theta}_o) \)</strong
+        >
+        at the contact.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The fingertip position in world coordinates is
+        <strong>\( \mathbf{p}_f = (L\cos q,\,L\sin q) \)</strong>. Its velocity
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{p}}_f = \frac{\partial \mathbf{p}_f}{\partial
+        q}\,\dot{q} = (-L\sin q,\,L\cos q)\,\dot{q}. \]
+      </h4>
+      <p>
+        For the circular object, the contact point in the object frame is
+        <strong>\( \mathbf{p}_{c,o} = (R,0) \)</strong>. In the world frame this
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{p}_c = \mathbf{p}_o + R \begin{bmatrix} \cos \theta_o \\ \sin
+        \theta_o \end{bmatrix}, \qquad \mathbf{p}_o = (x_o,y_o). \]
+      </h4>
+      <p>
+        The velocity of the contact point due to object motion is the sum of
+        translational and rotational contributions:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{p}}_c = \begin{bmatrix} \dot{x}_o \\ \dot{y}_o
+        \end{bmatrix} + \dot{\theta}_o \begin{bmatrix} -R\sin \theta_o \\ R\cos
+        \theta_o \end{bmatrix}. \]
+      </h4>
+      <p>
+        Pure rolling implies equality of contact point velocities:
+        <strong>\( \dot{\mathbf{p}}_f = \dot{\mathbf{p}}_c \)</strong>. This
+        yields
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix} -L\sin q \\ L\cos q \end{bmatrix}\dot{q} =
+        \begin{bmatrix} \dot{x}_o \\ \dot{y}_o \end{bmatrix} + \dot{\theta}_o
+        \begin{bmatrix} -R\sin \theta_o \\ R\cos \theta_o \end{bmatrix}. \]
+      </h4>
+      <p>This can be written in the standard Jacobian form</p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_{h}(q)\,\dot{q} - \mathbf{J}_{o}(\theta_o)\,\mathbf{v}_o =
+        \mathbf{0}, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{J}_h(q) = (-L\sin q,\,L\cos q) \)</strong> and
+        <strong>\( \mathbf{J}_o(\theta_o) \)</strong> is obtained from the
+        coefficients multiplying
+        <strong>\( (\dot{x}_o,\dot{y}_o,\dot{\theta}_o) \)</strong>. This is the
+        planar analogue of the general 3D contact kinematics in Section 3.
+      </p>
+
+      <p>
+        <strong
+          >Problem 2 (Convexity of Quasi-Static Force Feasibility).</strong
+        >
+        Consider a fixed state <strong>\( x \)</strong> and mode
+        <strong>\( m \)</strong> with grasp map
+        <strong>\( \mathbf{G} \)</strong>, external wrench
+        <strong>\( \mathbf{w}_{\text{ext}} \)</strong>, and polyhedral friction
+        constraints
+        <strong>\( \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0} \)</strong>.
+        Show that the set of feasible contact force vectors
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L} = \Bigl\{\boldsymbol{\lambda} \,\bigm|\,
+        \mathbf{G}\boldsymbol{\lambda} + \mathbf{w}_{\text{ext}} = \mathbf{0},\;
+        \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0}\Bigr\} \]
+      </h4>
+      <p>
+        is a convex polyhedron and explain why deciding whether a mode is
+        statically feasible can be reduced to a linear program.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The feasible set is the intersection of (i) an affine subspace defined
+        by
+        <strong
+          >\( \mathbf{G}\boldsymbol{\lambda} + \mathbf{w}_{\text{ext}} =
+          \mathbf{0} \)</strong
+        >
+        and (ii) a polyhedral cone defined by
+        <strong>\( \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0} \)</strong>.
+        Both are convex; the intersection of convex sets is convex, hence
+        <strong>\( \mathcal{L} \)</strong> is convex. Furthermore, each
+        constraint is linear in <strong>\( \boldsymbol{\lambda} \)</strong>, so
+        <strong>\( \mathcal{L} \)</strong> is precisely a (possibly unbounded)
+        convex polyhedron. Deciding feasibility is equivalent to checking
+        whether the linear program
+      </p>
+      <h4 class="mathJax">
+        \[ \min_{\boldsymbol{\lambda}} 0 \quad\text{s.t.}\quad
+        \mathbf{G}\boldsymbol{\lambda} + \mathbf{w}_{\text{ext}} = \mathbf{0},\;
+        \mathbf{F}\boldsymbol{\lambda} \le \mathbf{0} \]
+      </h4>
+      <p>
+        is feasible, which can be done with any LP solver. This yields a
+        computational test for mode feasibility in regrasp/in-hand planning.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Small Regrasp Graph and Path).</strong>
+        A robot has three stable grasps on an object:
+        <strong>\( g_0 \)</strong>, <strong>\( g_1 \)</strong>, and
+        <strong>\( g_2 \)</strong>. It can execute the following feasible
+        transitions:
+      </p>
+      <ul>
+        <li>
+          <strong>\( g_0 \to g_1 \)</strong> with cost 1 (in-hand motion),
+        </li>
+        <li>
+          <strong>\( g_1 \to g_2 \)</strong> with cost 1 (in-hand motion),
+        </li>
+        <li>
+          <strong>\( g_0 \to g_2 \)</strong> with cost 3 (place-and-regrasp).
+        </li>
+      </ul>
+      <p>
+        (a) Build the corresponding directed regrasp graph. (b) Compute the
+        minimum-cost path from
+        <strong>\( g_0 \)</strong> to <strong>\( g_2 \)</strong>. (c) Explain in
+        words why place-and-regrasp edges are still useful even if they are more
+        expensive.
+      </p>
+      <p><strong>Solution:</strong> (a) The graph is</p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  G0["g0"] -->|1| G1["g1"]
+  G1 -->|1| G2["g2"]
+  G0 -->|3| G2
+        </pre>
+      </div>
+      <p>
+        (b) There are two paths from <strong>\( g_0 \)</strong> to
+        <strong>\( g_2 \)</strong>: direct
+        <strong>\( g_0 \to g_2 \)</strong> with cost 3, and
+        <strong>\( g_0 \to g_1 \to g_2 \)</strong> with cost
+        <strong>\( 1+1=2 \)</strong>. The minimum-cost path is therefore
+        <strong>\( g_0 \to g_1 \to g_2 \)</strong>.
+      </p>
+      <p>
+        (c) In other situations, the in-hand edges may not exist because of
+        joint limits or self-collisions, while place-and-regrasp edges are still
+        possible. Even if they are more expensive, they preserve connectivity of
+        the regrasp graph, ensuring that a path exists whenever the task is
+        physically solvable via placements.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Hybrid Cost Functional).</strong>
+        Let <strong>\( \gamma = \{(x_k,m_k)\}_{k=0}^K \)</strong> be a hybrid
+        manipulation plan. Suppose the continuous part of the cost penalizes
+        squared object velocity and the discrete part penalizes mode switches.
+        Propose a cost functional of the form
+        <strong>\( J(\gamma) = J_{\text{cont}} + J_{\text{disc}} \)</strong> and
+        explain how the discrete term relates to the regrasp graph formulation
+        of Section 4.
+      </p>
+      <p><strong>Solution:</strong> A suitable choice is</p>
+      <h4 class="mathJax">
+        \[ J_{\text{cont}} = \sum_{k=0}^{K-1} \|\mathbf{v}_o^k\|_2^2 \,\Delta t,
+        \qquad J_{\text{disc}} = \beta \sum_{k=0}^{K-1} \mathbf{1}[m_{k+1} \ne
+        m_k], \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{v}_o^k \)</strong> is the object twist at step
+        <strong>\( k \)</strong>, <strong>\( \Delta t \)</strong> is the time
+        step, and <strong>\( \beta &gt; 0 \)</strong> weighs mode switches. In
+        the regrasp graph abstraction each edge corresponds to a segment of
+        <strong>\( \gamma \)</strong>; its cost
+        <strong>\( c(g_i,g_j) \)</strong> can be viewed as a local approximation
+        to <strong>\( J_{\text{cont}} + J_{\text{disc}} \)</strong> over that
+        segment, aggregating both the continuous effort and the number/type of
+        mode switches incurred by the transition from
+        <strong>\( g_i \)</strong> to <strong>\( g_j \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we lifted grasp synthesis from single configurations to
+        sequences of grasps and modes needed for regrasp and in-hand
+        manipulation. We formalized a hybrid state space combining hand
+        configuration, object pose, and discrete contact modes; derived
+        kinematic and quasi-static constraints for instantaneous in-hand motion;
+        introduced grasp and regrasp graphs as discrete abstractions of the
+        manipulation problem; and presented optimization-based formulations that
+        refine graph edges into dynamically and contact-feasible trajectories.
+        The multi-language examples showed how to encode regrasp graphs and run
+        shortest-path algorithms, paving the way for simulation labs in
+        subsequent lessons.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Salisbury, J.K., &amp; Craig, J.J. (1982). Articulated hands: Force
+        control and kinematic issues.
+        <em>International Journal of Robotics Research</em>, 1(1), 4&ndash;17.
+      </li>
+      <li>
+        Cutkosky, M.R. (1989). On grasp choice, grasp models, and the design of
+        hands for manufacturing tasks.
+        <em>IEEE Transactions on Robotics and Automation</em>, 5(3),
+        269&ndash;279.
+      </li>
+      <li>
+        Mason, M.T. (1986). Mechanics and planning of manipulator pushing
+        operations.
+        <em>International Journal of Robotics Research</em>, 5(3), 53&ndash;71.
+      </li>
+      <li>
+        Brock, O., &amp; Khatib, O. (2002). Elastic strips: A framework for
+        motion generation in human environments.
+        <em>International Journal of Robotics Research</em>, 21(12),
+        1031&ndash;1052.
+      </li>
+      <li>
+        Harada, K., Kaneko, K., Kanehiro, F., &amp; Morisawa, M. (2010). Regrasp
+        planning using a common contact region on the object.
+        <em>Robotics and Autonomous Systems</em>, 58(2), 272&ndash;281.
+      </li>
+      <li>
+        Prattichizzo, D., &amp; Trinkle, J.C. (2016). Grasping. In B. Siciliano
+        &amp; O. Khatib (Eds.), <em>Springer Handbook of Robotics</em> (2nd ed.,
+        pp. 955&ndash;988).
+      </li>
+      <li>
+        Pang, J.S., &amp; Trinkle, J.C. (2000). Complementarity formulations and
+        existence of solutions of dynamic multi-rigid-body contact problems with
+        Coulomb friction.
+        <em>Mathematical Programming</em>, 73(2), 199&ndash;226.
+      </li>
+      <li>
+        Toussaint, M., &amp; Lopes, M. (2017). Multi-bound tree search for
+        logic-geometric programming in cooperative manipulation domains.
+        <em>Artificial Intelligence</em>, 256, 1&ndash;37.
+      </li>
+      <li>
+        Xie, C., &amp; Tedrake, R. (2018). Robust and efficient contact-mode
+        enumeration in plane strain frictional contact problems.
+        <em>International Journal for Numerical Methods in Engineering</em>,
+        115(4), 510&ndash;539.
+      </li>
+      <li>
+        Ma, R.R., Dollar, A.M. (2011). On dexterity and dexterous manipulation.
+        In
+        <em>Advanced Robotics</em>, 25(8), 825&ndash;838.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter8/Lesson2.html">
+          Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter8/Lesson4.html">
+          Lesson 4: Tactile-Aware Grasp Refinement
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="active-lesson" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

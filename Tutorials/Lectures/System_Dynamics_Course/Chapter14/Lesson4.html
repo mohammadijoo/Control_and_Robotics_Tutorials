@@ -1,0 +1,1949 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Nonlinear System Dynamics - Lesson 4: Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models | System Dynamics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 14: Nonlinear System Dynamics</h1>
+    <h3><strong>Lesson 4: Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models</strong></h3>
+    <p>
+      Many engineering nonlinearities are not “smooth nonlinear functions” but rather <em>non-smooth constraints</em>
+      and <em>memory effects</em>: actuator saturation (limits), dead-zone (insensitivity near zero),
+      and backlash (hysteresis in gear trains). This lesson builds mathematically precise models for these effects,
+      shows how piecewise-linear (PWL) approximations turn nonlinear dynamics into <em>region-wise linear (affine)</em>
+      dynamics, and provides reference implementations in Python, C++, Java, MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In earlier lessons of this chapter we described nonlinear dynamics as
+        <strong> \( \dot{\mathbf{x}} = \mathbf{f}(\mathbf{x}, \mathbf{u}, t) \)</strong> and studied equilibria and linearization.
+        Here we focus on a very common and structurally important subclass: a <em>linear plant</em> interconnected with
+        a <em>nonlinear element</em> (often in the actuator or transmission path).
+      </p>
+      <p>
+        A standard abstraction is a linear state-space plant driven by a scalar “effective input”
+        <strong> \( u \)</strong> produced by a nonlinearity <strong> \( \varphi(\cdot) \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \dot{\mathbf{x}} = \mathbf{A}\mathbf{x} + \mathbf{B}\,u, \qquad
+          u = \varphi(v), \qquad
+          v = \mathbf{C}\mathbf{x} + \mathbf{D}\,r(t).
+        \]
+      </h4>
+      <p>
+        The modeling task is to specify <strong> \( \varphi(\cdot) \)</strong> with correct structure:
+        <em>memoryless</em> (saturation, dead-zone) versus <em>hysteretic</em> (backlash), and then to reason about
+        the resulting trajectories.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start: observed nonlinearity in actuator/transmission"] --> Q1["Is there memory (hysteresis)?"]
+  Q1 -->|yes| HYS["Use hysteresis operator \n(e.g., backlash/play) \nwith internal state"]
+  Q1 -->|no| Q2["Is response bounded (hard limits)?"]
+  Q2 -->|yes| SAT["Use saturation model \n(hard clip or smooth approx)"]
+  Q2 -->|no| Q3["Is there insensitivity around zero?"]
+  Q3 -->|yes| DZ["Use dead-zone \n(deadband) model"]
+  Q3 -->|no| PWL["Fit a PWL static map from data \n(lookup / interpolation)"]
+  SAT --> PWL
+  DZ --> PWL
+  HYS --> SIM["Simulate / analyze region-wise dynamics"]
+  PWL --> SIM
+        </pre>
+      </div>
+
+      <p>
+        In many systems, these effects appear together: a dead-zone (amplifier deadband) followed by saturation
+        (current/voltage limit) and then backlash (gear mesh). The combination yields <em>non-smooth</em>, sometimes
+        <em>hybrid</em> trajectories, even when the plant is linear.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Piecewise-Linear (PWL) Approximations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Piecewise-Linear Approximations</h2>
+    <div class="down-content">
+      <p>
+        A PWL approximation replaces a nonlinear static map <strong> \( g(u) \)</strong> by a function
+        <strong> \( \hat{g}(u) \)</strong> that is linear on intervals. Choose breakpoints
+        <strong> \( u_0 &lt; u_1 &lt; \cdots &lt; u_m \)</strong> and values <strong> \( g(u_i) \)</strong>, then define
+        <strong> \( \hat{g} \)</strong> by linear interpolation:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \hat{g}(u) =
+          \begin{cases}
+            g(u_0), & u &lt; u_0 \\
+            g(u_i) + \dfrac{g(u_{i+1})-g(u_i)}{u_{i+1}-u_i}\,(u-u_i),
+              & u_i \le u &lt; u_{i+1},\; i=0,\dots,m-1 \\
+            g(u_m), & u \ge u_m.
+          \end{cases}
+        \]
+      </h4>
+      <p>
+        The flat extrapolation outside <strong> \( [u_0,u_m] \)</strong> matches many actuator maps (bounded output).
+        On each interval the slope is constant; hence if a nonlinear element is inside a state-space model, the overall
+        dynamics become <em>piecewise-affine</em>.
+      </p>
+
+      <h3>2.1 From PWL static map to piecewise-affine dynamics</h3>
+      <p>
+        Suppose <strong> \( u = \varphi(v) \)</strong> and <strong> \( \varphi \)</strong> is affine in region <strong> \( \mathcal{R}_i \)</strong>:
+        <strong> \( \varphi(v) = k_i v + b_i \)</strong> for <strong> \( v \in \mathcal{R}_i \)</strong>. Then the plant
+      </p>
+      <h4 class="mathJax">
+        \[
+          \dot{\mathbf{x}} = \mathbf{A}\mathbf{x} + \mathbf{B}\,(k_i v + b_i), \qquad
+          v = \mathbf{C}\mathbf{x} + \mathbf{D}\,r(t)
+        \]
+      </h4>
+      <p>
+        becomes (in region <strong> \( \mathcal{R}_i \)</strong>):
+      </p>
+      <h4 class="mathJax">
+        \[
+          \dot{\mathbf{x}} =
+          (\mathbf{A} + \mathbf{B}k_i\mathbf{C})\mathbf{x} + \mathbf{B}k_i\mathbf{D}\,r(t) + \mathbf{B}b_i.
+        \]
+      </h4>
+      <p>
+        Therefore, within each region the dynamics are linear (affine), and switching occurs when the signal
+        <strong> \( v \)</strong> crosses a breakpoint. Precisely at a breakpoint, the vector field can be non-differentiable;
+        physically, this corresponds to a change in constraint regime.
+      </p>
+
+      <h3>2.2 Interpolation error bound (university-level result)</h3>
+      <p>
+        If <strong> \( g \)</strong> is twice continuously differentiable on <strong> \( [u_i, u_{i+1}] \)</strong> and
+        <strong> \( \max_{u \in [u_i,u_{i+1}]} |g''(u)| \le M_2 \)</strong>, then the error of linear interpolation satisfies:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \max_{u \in [u_i,u_{i+1}]} |g(u) - \hat{g}(u)| \le \frac{M_2}{8}\,(u_{i+1}-u_i)^2.
+        \]
+      </h4>
+      <p>
+        <strong>Sketch of proof.</strong> Let <strong> \( L(u) \)</strong> be the line through
+        <strong> \( (u_i,g(u_i)) \)</strong> and <strong> \( (u_{i+1},g(u_{i+1})) \)</strong>.
+        The interpolation remainder for linear interpolation can be derived from Taylor’s theorem with remainder:
+        for each <strong> \( u \)</strong> there exists <strong> \( \xi \)</strong> between <strong> \( u_i \)</strong> and <strong> \( u_{i+1} \)</strong> such that
+        <strong> \( g(u)-L(u)=\dfrac{g''(\xi)}{2}(u-u_i)(u-u_{i+1}) \)</strong>. The product
+        <strong> \( (u-u_i)(u-u_{i+1}) \)</strong> is maximized in magnitude at the midpoint, giving
+        <strong> \( \max |(u-u_i)(u-u_{i+1})| = (u_{i+1}-u_i)^2/4 \)</strong>, and the bound follows.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Saturation Models -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Saturation Models</h2>
+    <div class="down-content">
+      <p>
+        Saturation represents hard actuator limits. The most common symmetric hard saturation is
+        <strong> \( \operatorname{sat}(u;U) \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \operatorname{sat}(u;U)=
+          \begin{cases}
+            -U, & u &lt; -U \\
+            u,  & -U \le u \le U \\
+            U,  & u &gt; U.
+          \end{cases}
+        \]
+      </h4>
+
+      <h3>3.1 Lipschitz continuity (existence/uniqueness friendly)</h3>
+      <p>
+        <strong>Proposition.</strong> For all real <strong> \( u,v \)</strong>,
+        <strong> \( |\operatorname{sat}(u;U) - \operatorname{sat}(v;U)| \le |u-v| \)</strong>.
+      </p>
+      <p>
+        <strong>Proof.</strong> The map is a composition of “clipping” operations
+        <strong> \( \min(\max(u,-U),U) \)</strong>, each of which is 1-Lipschitz. Alternatively, check cases:
+        if both points are inside <strong> \( [-U,U] \)</strong>, the difference is exactly <strong> \( |u-v| \)</strong>;
+        if one or both are clipped, the output moves no faster than the input because the slope is either 0 or 1.
+        Hence the global Lipschitz constant is 1. □
+      </p>
+
+      <h3>3.2 Sector bound (useful for later stability tools)</h3>
+      <p>
+        For symmetric saturation, the ratio <strong> \( \operatorname{sat}(u;U)/u \)</strong> lies between 0 and 1 for <strong> \( u \ne 0 \)</strong>,
+        which yields the <em>sector inequality</em>:
+      </p>
+      <h4 class="mathJax">
+        \[
+          0 \le \operatorname{sat}(u;U)\,u \le u^2 \quad \text{for all } u\in\mathbb{R}.
+        \]
+      </h4>
+      <p>
+        Intuitively: saturation never flips sign (first inequality) and never amplifies magnitude (second inequality).
+        We will reuse this “bounded gain” viewpoint when we study more global nonlinear stability concepts later.
+      </p>
+
+      <h3>3.3 Smooth saturation (optional modeling)</h3>
+      <p>
+        In some analyses one uses a differentiable approximation such as
+        <strong> \( u_\text{eff} = U\tanh(u/U) \)</strong>. This is still bounded by <strong> \( \pm U \)</strong>, but avoids
+        non-differentiability at <strong> \( \pm U \)</strong>. A PWL fit can approximate such smooth maps with guaranteed error bounds
+        (Section 2.2).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Dead-Zone (Deadband) Models -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Dead-Zone (Deadband) Models</h2>
+    <div class="down-content">
+      <p>
+        A dead-zone captures insensitivity near zero: small commands do not move the actuator (e.g., valve stiction threshold,
+        amplifier deadband). A symmetric dead-zone of half-width <strong> \( d \)</strong> is:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \operatorname{dz}(u;d)=
+          \begin{cases}
+            0, & |u| \le d \\
+            u - d\,\operatorname{sgn}(u), & |u| &gt; d.
+          \end{cases}
+        \]
+      </h4>
+
+      <h3>4.1 Basic properties</h3>
+      <ul>
+        <li>
+          <strong>Lipschitz:</strong> <strong> \( |\operatorname{dz}(u;d)-\operatorname{dz}(v;d)| \le |u-v| \)</strong>
+          (again slopes are 0 or 1).
+        </li>
+        <li>
+          <strong>Sector:</strong> <strong> \( 0 \le \operatorname{dz}(u;d)\,u \le u^2 \)</strong> for all <strong> \( u \)</strong>.
+        </li>
+        <li>
+          <strong>Non-differentiability:</strong> kinks at <strong> \( u=\pm d \)</strong> mean local linearization depends on the operating point:
+          about <strong> \( u=0 \)</strong> the incremental gain is 0, while outside the dead-zone the incremental gain is 1.
+        </li>
+      </ul>
+
+      <h3>4.2 Why dead-zone matters in feedback loops</h3>
+      <p>
+        In a simple proportional loop, small steady-state errors may fail to generate enough control effort to exit the dead-zone,
+        so the error “sticks” at a nonzero value. This is a purely nonlinear effect and is not predicted by linear models.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Backlash Models (Hysteresis) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Backlash Models (Hysteresis)</h2>
+    <div class="down-content">
+      <p>
+        Backlash is a gap in mechanical transmissions (e.g., gear mesh). Unlike saturation and dead-zone, backlash is
+        <strong>not memoryless</strong>: the output depends on the <em>past direction</em> of motion.
+        A widely used mathematical model is the <em>play operator</em> (rate-independent hysteresis) of width <strong> \( b \)</strong>.
+      </p>
+
+      <h3>5.1 Play/backlash as an inequality + update rule</h3>
+      <p>
+        Let <strong> \( u(t) \)</strong> be the input (e.g., motor shaft angle or commanded displacement) and <strong> \( y(t) \)</strong> be the output
+        (e.g., load angle). The play operator enforces the band constraint:
+      </p>
+      <h4 class="mathJax">
+        \[
+          y(t) \in [\,u(t) - b/2,\; u(t) + b/2\,].
+        \]
+      </h4>
+      <p>
+        Inside the band, the output does not change. When <strong> \( u(t) \)</strong> pushes the boundary, the output follows to keep the constraint active.
+        One compact (engineering) description is the discrete-time update used in simulation:
+      </p>
+      <h4 class="mathJax">
+        \[
+          y_{k+1} =
+          \begin{cases}
+            u_{k+1} - b/2, & u_{k+1} &gt; y_k + b/2 \\
+            u_{k+1} + b/2, & u_{k+1} &lt; y_k - b/2 \\
+            y_k, & |u_{k+1} - y_k| \le b/2.
+          \end{cases}
+        \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  IN["Input u(k+1), previous output y(k), gap b"] --> C1["Is u(k+1) > y(k) + b/2 ?"]
+  C1 -->|yes| UP1["Set y(k+1) = u(k+1) - b/2"]
+  C1 -->|no| C2["Is u(k+1) < y(k) - b/2 ?"]
+  C2 -->|yes| UP2["Set y(k+1) = u(k+1) + b/2"]
+  C2 -->|no| HOLD["Keep y(k+1) = y(k)"]
+  UP1 --> OUT["Output y(k+1)"]
+  UP2 --> OUT
+  HOLD --> OUT
+        </pre>
+      </div>
+
+      <h3>5.2 Interpretation</h3>
+      <p>
+        The model creates a hysteresis loop: for increasing <strong> \( u \)</strong>, the output lags by <strong> \( b/2 \)</strong>, and for decreasing <strong> \( u \)</strong>
+        it lags in the opposite direction. This captures the key physical fact: reversing direction does not immediately reverse the output because the gear gap must be “taken up”.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementations (Python / C++ / Java / MATLAB / Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The implementations below provide: (i) reusable nonlinearity blocks, (ii) a simple closed-loop simulation that shows the effects,
+        and (iii) CSV output for plotting. In later chapters we will formalize simulation, stiffness, and event handling; here the focus is on the models.
+      </p>
+
+      <h3>6.1 Python (NumPy/SciPy optional; self-contained RK4 here)</h3>
+      <p><strong>File:</strong> Chapter14_Lesson4.py</p>
+      <pre><code class="language-python">
+"""
+Chapter14_Lesson4.py
+System Dynamics (Control Engineering) — Chapter 14, Lesson 4
+Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models
+
+This script:
+1) Defines common nonlinearities used in engineering models (static + hysteretic).
+2) Builds a simple closed-loop second-order plant.
+3) Simulates it with an explicit RK4 integrator (kept self-contained).
+4) Writes results to CSV for plotting/analysis.
+
+Note: Numerical integration is treated formally in Chapter 15; here we use RK4 as a practical tool.
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Tuple
+import math
+import csv
+
+
+def sat(u: float, u_max: float) -&gt; float:
+    """Hard saturation: clip to [-u_max, u_max]."""
+    if u &gt; u_max:
+        return u_max
+    if u &lt; -u_max:
+        return -u_max
+    return u
+
+
+def dead_zone(u: float, d: float) -&gt; float:
+    """
+    Symmetric dead-zone of half-width d:
+      y = 0                if |u| &lt;= d
+      y = u - d*sign(u)    if |u| &gt;  d
+    """
+    if abs(u) &lt;= d:
+        return 0.0
+    return u - d * (1.0 if u &gt; 0.0 else -1.0)
+
+
+@dataclass
+class Backlash:
+    """
+    Rate-independent backlash (play operator) of width b.
+    The output y stays within a band around the input u:
+        y ∈ [u - b/2, u + b/2]
+    and only changes when u pushes y to the band boundary.
+    """
+    b: float
+    y: float = 0.0
+
+    def step(self, u: float) -&gt; float:
+        half = 0.5 * self.b
+        if u &gt; self.y + half:
+            self.y = u - half
+        elif u &lt; self.y - half:
+            self.y = u + half
+        return self.y
+
+
+@dataclass
+class PWL:
+    """
+    1D piecewise-linear interpolant defined by breakpoints (x_i, y_i), x_i strictly increasing.
+    """
+    xs: List[float]
+    ys: List[float]
+
+    def __post_init__(self) -&gt; None:
+        if len(self.xs) != len(self.ys) or len(self.xs) &lt; 2:
+            raise ValueError("PWL requires &gt;=2 points with equal-length xs and ys.")
+        for i in range(len(self.xs) - 1):
+            if not (self.xs[i] &lt; self.xs[i+1]):
+                raise ValueError("xs must be strictly increasing.")
+
+    def eval(self, x: float) -&gt; float:
+        # Extrapolate flat outside range (common in actuator maps).
+        if x &lt;= self.xs[0]:
+            return self.ys[0]
+        if x &gt;= self.xs[-1]:
+            return self.ys[-1]
+
+        # Find interval (linear search; for large lists use bisect).
+        for i in range(len(self.xs) - 1):
+            if self.xs[i] &lt;= x &lt;= self.xs[i+1]:
+                x0, x1 = self.xs[i], self.xs[i+1]
+                y0, y1 = self.ys[i], self.ys[i+1]
+                t = (x - x0) / (x1 - x0)
+                return (1.0 - t) * y0 + t * y1
+
+        # Should not reach here
+        return self.ys[-1]
+
+
+def rk4_step(f, t: float, x: Tuple[float, float], dt: float, u: float) -&gt; Tuple[float, float]:
+    """One step of RK4 for a 2-state system x' = f(t, x, u)."""
+    x1, x2 = x
+
+    k1 = f(t, (x1, x2), u)
+    k2 = f(t + 0.5 * dt, (x1 + 0.5 * dt * k1[0], x2 + 0.5 * dt * k1[1]), u)
+    k3 = f(t + 0.5 * dt, (x1 + 0.5 * dt * k2[0], x2 + 0.5 * dt * k2[1]), u)
+    k4 = f(t + dt, (x1 + dt * k3[0], x2 + dt * k3[1]), u)
+
+    xn1 = x1 + (dt / 6.0) * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0])
+    xn2 = x2 + (dt / 6.0) * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])
+    return (xn1, xn2)
+
+
+def plant_dynamics(t: float, x: Tuple[float, float], u: float,
+                   wn: float = 5.0, zeta: float = 0.25, b: float = 1.0) -&gt; Tuple[float, float]:
+    """
+    Second-order plant:
+        x1' = x2
+        x2' = -2*zeta*wn*x2 - wn^2*x1 + b*u
+    """
+    x1, x2 = x
+    dx1 = x2
+    dx2 = -2.0 * zeta * wn * x2 - (wn * wn) * x1 + b * u
+    return (dx1, dx2)
+
+
+def simulate(T: float = 6.0, dt: float = 1e-3) -&gt; None:
+    # Reference (step)
+    def r(t: float) -&gt; float:
+        return 1.0
+
+    # PD controller (simple)
+    Kp, Kd = 18.0, 4.5
+
+    # Nonlinearities
+    u_max = 2.0     # saturation limit
+    d = 0.25        # dead-zone half-width
+    backlash = Backlash(b=0.20, y=0.0)
+
+    # Optional: approximate a smooth nonlinearity g(u)=tanh(u) using PWL
+    # (Illustrates PWL approximation; not required for saturation/deadzone/backlash.)
+    xs = [-3.0, -1.5, -0.5, 0.0, 0.5, 1.5, 3.0]
+    ys = [math.tanh(x) for x in xs]
+    pwl_tanh = PWL(xs=xs, ys=ys)
+
+    use_pwl_map = False  # if True, apply u &lt;- pwl_tanh.eval(u) as a static map
+
+    x = (0.0, 0.0)
+    t = 0.0
+
+    rows = []
+    while t &lt;= T + 1e-12:
+        # Control law
+        e = r(t) - x[0]
+        u_cmd = Kp * e - Kd * x[1]
+
+        # Apply dead-zone (e.g., valve stiction / quantization / amplifier deadband)
+        u_dz = dead_zone(u_cmd, d=d)
+
+        # Apply saturation (actuator limit)
+        u_sat = sat(u_dz, u_max=u_max)
+
+        # Optional static PWL map (e.g., linearizing an empirically measured nonlinearity)
+        u_map = pwl_tanh.eval(u_sat) if use_pwl_map else u_sat
+
+        # Apply backlash (gear train); introduces hysteresis (memory)
+        u_bl = backlash.step(u_map)
+
+        # Integrate plant
+        x = rk4_step(lambda tt, xx, uu: plant_dynamics(tt, xx, uu), t, x, dt, u_bl)
+
+        rows.append((t, x[0], x[1], u_cmd, u_dz, u_sat, u_bl))
+        t += dt
+
+    out_csv = "Chapter14_Lesson4_output.csv"
+    with open(out_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["t", "x1", "x2", "u_cmd", "u_deadzone", "u_sat", "u_backlash"])
+        w.writerows(rows)
+
+    print(f"Wrote {out_csv} with {len(rows)} samples.")
+    print("Tip: plot x1(t) and compare u_cmd vs u_backlash to see dead-zone + saturation + hysteresis effects.")
+
+
+if __name__ == "__main__":
+    simulate()
+      </code></pre>
+
+      <h3>6.2 C++ (standard library; optional Eigen for larger models)</h3>
+      <p><strong>File:</strong> Chapter14_Lesson4.cpp</p>
+      <pre><code class="language-cpp">
+/*
+Chapter14_Lesson4.cpp
+System Dynamics (Control Engineering) — Chapter 14, Lesson 4
+Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models
+
+Build (example, MSYS2/MinGW64):
+  g++ -O2 -std=c++17 Chapter14_Lesson4.cpp -o Chapter14_Lesson4.exe
+
+Run:
+  ./Chapter14_Lesson4.exe
+
+It writes: Chapter14_Lesson4_output.csv
+*/
+
+#include &lt;iostream&gt;
+#include &lt;fstream&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+#include &lt;stdexcept&gt;
+#include &lt;iomanip&gt;
+#include &lt;string&gt;
+
+static double sat(double u, double umax) {
+    if (u &gt; umax) return umax;
+    if (u &lt; -umax) return -umax;
+    return u;
+}
+
+static double dead_zone(double u, double d) {
+    if (std::abs(u) &lt;= d) return 0.0;
+    return u - d * ((u &gt; 0.0) ? 1.0 : -1.0);
+}
+
+struct Backlash {
+    double b;
+    double y;
+    explicit Backlash(double width, double y0=0.0) : b(width), y(y0) {}
+
+    double step(double u) {
+        const double half = 0.5 * b;
+        if (u &gt; y + half) y = u - half;
+        else if (u &lt; y - half) y = u + half;
+        return y;
+    }
+};
+
+struct PWL {
+    std::vector&lt;double&gt; xs;
+    std::vector&lt;double&gt; ys;
+
+    PWL(std::vector&lt;double&gt; x, std::vector&lt;double&gt; y) : xs(std::move(x)), ys(std::move(y)) {
+        if (xs.size() != ys.size() || xs.size() &lt; 2) throw std::runtime_error("PWL needs &gt;=2 points.");
+        for (size_t i=0; i+1&lt;xs.size(); ++i) {
+            if (!(xs[i] &lt; xs[i+1])) throw std::runtime_error("PWL xs must be strictly increasing.");
+        }
+    }
+
+    double eval(double x) const {
+        if (x &lt;= xs.front()) return ys.front();
+        if (x &gt;= xs.back())  return ys.back();
+        for (size_t i=0; i+1&lt;xs.size(); ++i) {
+            if (xs[i] &lt;= x && x &lt;= xs[i+1]) {
+                const double x0 = xs[i], x1 = xs[i+1];
+                const double y0 = ys[i], y1 = ys[i+1];
+                const double t = (x - x0) / (x1 - x0);
+                return (1.0 - t)*y0 + t*y1;
+            }
+        }
+        return ys.back();
+    }
+};
+
+static void plant(double /*t*/, const double x1, const double x2, const double u,
+                  double& dx1, double& dx2, double wn=5.0, double zeta=0.25, double b=1.0) {
+    dx1 = x2;
+    dx2 = -2.0*zeta*wn*x2 - (wn*wn)*x1 + b*u;
+}
+
+static void rk4_step(double t, double& x1, double& x2, double dt, double u) {
+    double k1_1, k1_2; plant(t, x1, x2, u, k1_1, k1_2);
+    double k2_1, k2_2; plant(t+0.5*dt, x1+0.5*dt*k1_1, x2+0.5*dt*k1_2, u, k2_1, k2_2);
+    double k3_1, k3_2; plant(t+0.5*dt, x1+0.5*dt*k2_1, x2+0.5*dt*k2_2, u, k3_1, k3_2);
+    double k4_1, k4_2; plant(t+dt, x1+dt*k3_1, x2+dt*k3_2, u, k4_1, k4_2);
+
+    x1 += (dt/6.0)*(k1_1 + 2.0*k2_1 + 2.0*k3_1 + k4_1);
+    x2 += (dt/6.0)*(k1_2 + 2.0*k2_2 + 2.0*k3_2 + k4_2);
+}
+
+int main() {
+    const double T = 6.0;
+    const double dt = 1e-3;
+
+    // PD controller
+    const double Kp = 18.0, Kd = 4.5;
+
+    // Nonlinearities
+    const double u_max = 2.0;
+    const double d = 0.25;
+    Backlash backlash(0.20, 0.0);
+
+    // Optional PWL map approximating tanh(u)
+    std::vector&lt;double&gt; xs = {-3.0,-1.5,-0.5,0.0,0.5,1.5,3.0};
+    std::vector&lt;double&gt; ys; ys.reserve(xs.size());
+    for (double x : xs) ys.push_back(std::tanh(x));
+    PWL pwl_tanh(xs, ys);
+
+    const bool use_pwl_map = false;
+
+    double x1 = 0.0, x2 = 0.0;
+
+    std::ofstream out("Chapter14_Lesson4_output.csv");
+    out &lt;&lt; "t,x1,x2,u_cmd,u_deadzone,u_sat,u_backlash\n";
+    out &lt;&lt; std::fixed &lt;&lt; std::setprecision(9);
+
+    for (double t=0.0; t &lt;= T + 1e-12; t += dt) {
+        const double r = 1.0;               // step reference
+        const double e = r - x1;
+        const double u_cmd = Kp*e - Kd*x2;
+
+        const double u_dz  = dead_zone(u_cmd, d);
+        const double u_sat = sat(u_dz, u_max);
+        const double u_map = use_pwl_map ? pwl_tanh.eval(u_sat) : u_sat;
+        const double u_bl  = backlash.step(u_map);
+
+        rk4_step(t, x1, x2, dt, u_bl);
+
+        out &lt;&lt; t &lt;&lt; "," &lt;&lt; x1 &lt;&lt; "," &lt;&lt; x2 &lt;&lt; ","
+            &lt;&lt; u_cmd &lt;&lt; "," &lt;&lt; u_dz &lt;&lt; "," &lt;&lt; u_sat &lt;&lt; "," &lt;&lt; u_bl &lt;&lt; "\n";
+    }
+
+    std::cout &lt;&lt; "Wrote Chapter14_Lesson4_output.csv\n";
+    std::cout &lt;&lt; "Plot x1(t) and compare u_cmd vs u_backlash to see nonlinear effects.\n";
+    return 0;
+}
+      </code></pre>
+
+      <h3>6.3 Java (standard library; optional Apache Commons Math)</h3>
+      <p><strong>File:</strong> Chapter14_Lesson4.java</p>
+      <pre><code class="language-java">
+/*
+Chapter14_Lesson4.java
+System Dynamics (Control Engineering) — Chapter 14, Lesson 4
+Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models
+
+Compile:
+  javac Chapter14_Lesson4.java
+
+Run:
+  java Chapter14_Lesson4
+
+Output:
+  Chapter14_Lesson4_output.csv
+*/
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Arrays;
+
+public class Chapter14_Lesson4 {
+
+    static double sat(double u, double umax) {
+        if (u &gt; umax) return umax;
+        if (u &lt; -umax) return -umax;
+        return u;
+    }
+
+    static double deadZone(double u, double d) {
+        if (Math.abs(u) &lt;= d) return 0.0;
+        return u - d * ((u &gt; 0.0) ? 1.0 : -1.0);
+    }
+
+    static class Backlash {
+        final double b;
+        double y;
+        Backlash(double width, double y0) { b = width; y = y0; }
+        double step(double u) {
+            final double half = 0.5 * b;
+            if (u &gt; y + half) y = u - half;
+            else if (u &lt; y - half) y = u + half;
+            return y;
+        }
+    }
+
+    static class PWL {
+        final double[] xs;
+        final double[] ys;
+
+        PWL(double[] xs, double[] ys) {
+            if (xs.length != ys.length || xs.length &lt; 2) {
+                throw new IllegalArgumentException("PWL needs &gt;=2 points with equal lengths.");
+            }
+            for (int i=0; i&lt;xs.length-1; i++) {
+                if (!(xs[i] &lt; xs[i+1])) throw new IllegalArgumentException("xs must be strictly increasing.");
+            }
+            this.xs = Arrays.copyOf(xs, xs.length);
+            this.ys = Arrays.copyOf(ys, ys.length);
+        }
+
+        double eval(double x) {
+            if (x &lt;= xs[0]) return ys[0];
+            if (x &gt;= xs[xs.length-1]) return ys[ys.length-1];
+            for (int i=0; i&lt;xs.length-1; i++) {
+                if (xs[i] &lt;= x && x &lt;= xs[i+1]) {
+                    double x0 = xs[i], x1 = xs[i+1];
+                    double y0 = ys[i], y1 = ys[i+1];
+                    double t = (x - x0) / (x1 - x0);
+                    return (1.0 - t)*y0 + t*y1;
+                }
+            }
+            return ys[ys.length-1];
+        }
+    }
+
+    static double[] plant(double x1, double x2, double u, double wn, double zeta, double b) {
+        double dx1 = x2;
+        double dx2 = -2.0*zeta*wn*x2 - (wn*wn)*x1 + b*u;
+        return new double[]{dx1, dx2};
+    }
+
+    static double[] rk4Step(double x1, double x2, double u, double dt) {
+        double wn = 5.0, zeta = 0.25, b = 1.0;
+
+        double[] k1 = plant(x1, x2, u, wn, zeta, b);
+        double[] k2 = plant(x1 + 0.5*dt*k1[0], x2 + 0.5*dt*k1[1], u, wn, zeta, b);
+        double[] k3 = plant(x1 + 0.5*dt*k2[0], x2 + 0.5*dt*k2[1], u, wn, zeta, b);
+        double[] k4 = plant(x1 + dt*k3[0], x2 + dt*k3[1], u, wn, zeta, b);
+
+        double xn1 = x1 + (dt/6.0)*(k1[0] + 2.0*k2[0] + 2.0*k3[0] + k4[0]);
+        double xn2 = x2 + (dt/6.0)*(k1[1] + 2.0*k2[1] + 2.0*k3[1] + k4[1]);
+
+        return new double[]{xn1, xn2};
+    }
+
+    public static void main(String[] args) throws IOException {
+        final double T = 6.0;
+        final double dt = 1e-3;
+
+        // PD controller
+        final double Kp = 18.0, Kd = 4.5;
+
+        // Nonlinearities
+        final double uMax = 2.0;
+        final double d = 0.25;
+        Backlash backlash = new Backlash(0.20, 0.0);
+
+        // Optional PWL map approximating tanh(u)
+        double[] xs = new double[]{-3.0,-1.5,-0.5,0.0,0.5,1.5,3.0};
+        double[] ys = new double[xs.length];
+        for (int i=0; i&lt;xs.length; i++) ys[i] = Math.tanh(xs[i]);
+        PWL pwlTanh = new PWL(xs, ys);
+
+        final boolean usePwlMap = false;
+
+        double x1 = 0.0, x2 = 0.0;
+
+        try (FileWriter fw = new FileWriter("Chapter14_Lesson4_output.csv")) {
+            fw.write("t,x1,x2,u_cmd,u_deadzone,u_sat,u_backlash\n");
+            for (double t=0.0; t &lt;= T + 1e-12; t += dt) {
+                double r = 1.0;
+                double e = r - x1;
+                double uCmd = Kp*e - Kd*x2;
+
+                double uDz  = deadZone(uCmd, d);
+                double uSat = sat(uDz, uMax);
+                double uMap = usePwlMap ? pwlTanh.eval(uSat) : uSat;
+                double uBl  = backlash.step(uMap);
+
+                double[] xn = rk4Step(x1, x2, uBl, dt);
+                x1 = xn[0]; x2 = xn[1];
+
+                fw.write(String.format(java.util.Locale.US,
+                        "%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n",
+                        t, x1, x2, uCmd, uDz, uSat, uBl));
+            }
+        }
+
+        System.out.println("Wrote Chapter14_Lesson4_output.csv");
+        System.out.println("Plot x1(t) and compare u_cmd vs u_backlash to see nonlinear effects.");
+    }
+}
+      </code></pre>
+
+      <h3>6.4 MATLAB / Simulink</h3>
+      <p><strong>File:</strong> Chapter14_Lesson4.m</p>
+      <pre><code class="language-matlab">
+% Chapter14_Lesson4.m
+% System Dynamics (Control Engineering) — Chapter 14, Lesson 4
+% Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models
+%
+% This script implements the nonlinearities and runs a simple RK4 simulation
+% of a 2nd-order plant under a PD controller. Results are written to CSV.
+%
+% Note: Numerical simulation methods are covered systematically in Chapter 15.
+% Here RK4 is used as a practical, self-contained integrator.
+
+clear; clc;
+
+T  = 6.0;
+dt = 1e-3;
+t  = 0:dt:T;
+
+% PD &larr;controller
+Kp = 18.0; Kd = 4.5;
+
+% Nonlinearities
+u_max = 2.0;      % saturation
+d     = 0.25;     % dead-zone half width
+b_gap = 0.20;     % backlash width
+
+% Plant parameters
+wn = 5.0; zeta = 0.25; b = 1.0;
+
+% Backlash internal state
+y_bl = 0.0;
+
+% Optional PWL map approximating tanh(u)
+xs = [-3.0 -1.5 -0.5 0.0 0.5 1.5 3.0];
+ys = tanh(xs);
+use_pwl_map = false;
+
+% Storage
+x1 = zeros(size(t));  % position
+x2 = zeros(size(t));  % velocity
+u_cmd = zeros(size(t));
+u_dz  = zeros(size(t));
+u_sat = zeros(size(t));
+u_bl  = zeros(size(t));
+
+for k = 1:(numel(t)-1)
+    r = 1.0; % step reference
+
+    e = r - x1(k);
+    u_cmd(k) = Kp*e - Kd*x2(k);
+
+    u_dz(k)  = dead_zone(u_cmd(k), d);
+    u_sat(k) = sat(u_dz(k), u_max);
+
+    u_map = u_sat(k);
+    if use_pwl_map
+        u_map = pwl_eval(xs, ys, u_sat(k));
+    end
+
+    [u_bl(k), y_bl] = backlash_step(u_map, y_bl, b_gap);
+
+    % RK4 integration for x' = f(x,u)
+    x = [x1(k); x2(k)];
+    f = @(xx,uu) plant(xx, uu, wn, zeta, b);
+
+    k1 = f(x, u_bl(k));
+    k2 = f(x + 0.5*dt*k1, u_bl(k));
+    k3 = f(x + 0.5*dt*k2, u_bl(k));
+    k4 = f(x + dt*k3, u_bl(k));
+
+    x_next = x + (dt/6)*(k1 + 2*k2 + 2*k3 + k4);
+    x1(k+1) = x_next(1);
+    x2(k+1) = x_next(2);
+end
+
+% Last control sample (for completeness)
+u_cmd(end) = u_cmd(end-1);
+u_dz(end)  = u_dz(end-1);
+u_sat(end) = u_sat(end-1);
+u_bl(end)  = u_bl(end-1);
+
+tbl = table(t(:), x1(:), x2(:), u_cmd(:), u_dz(:), u_sat(:), u_bl(:), ...
+    'VariableNames', {'t','x1','x2','u_cmd','u_deadzone','u_sat','u_backlash'});
+
+writetable(tbl, 'Chapter14_Lesson4_output.csv');
+disp('Wrote Chapter14_Lesson4_output.csv');
+
+% Optional quick plots (uncomment if desired)
+% figure; plot(t, x1); grid on; xlabel('t'); ylabel('x1');
+% figure; plot(t, u_cmd, t, u_bl); grid on; xlabel('t'); ylabel('u'); legend('u\_cmd','u\_backlash');
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Nonlinearity functions
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function y = sat(u, umax)
+    y = min(max(u, -umax), umax);
+end
+
+function y = dead_zone(u, d)
+    if abs(u) &lt;= d
+        y = 0.0;
+    else
+        y = u - d*sign(u);
+    end
+end
+
+function [y, y_state] = backlash_step(u, y_state, b_gap)
+    half = 0.5*b_gap;
+    if u &gt; y_state + half
+        y_state = u - half;
+    elseif u &lt; y_state - half
+        y_state = u + half;
+    end
+    y = y_state;
+end
+
+function y = pwl_eval(xs, ys, x)
+    % Flat extrapolation outside range
+    if x &lt;= xs(1), y = ys(1); return; end
+    if x &gt;= xs(end), y = ys(end); return; end
+    % Find interval
+    idx = find(xs &lt;= x, 1, 'last');
+    x0 = xs(idx); x1 = xs(idx+1);
+    y0 = ys(idx); y1 = ys(idx+1);
+    t = (x - x0)/(x1 - x0);
+    y = (1-t)*y0 + t*y1;
+end
+
+function dx = plant(x, u, wn, zeta, b)
+    % x = [x1; x2]
+    dx = zeros(2,1);
+    dx(1) = x(2);
+    dx(2) = -2*zeta*wn*x(2) - (wn^2)*x(1) + b*u;
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Simulink note (blocks):
+% - Use "Saturation" block for sat()
+% - Use "Dead Zone" block for dead_zone()
+% - Use "Backlash" block for backlash_step()
+% - Use "1-D Lookup Table" for PWL maps (xs, ys)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+      </code></pre>
+
+      <h3>6.5 Wolfram Mathematica</h3>
+      <p><strong>File:</strong> Chapter14_Lesson4.nb</p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter14_Lesson4.nb
+   System Dynamics (Control Engineering) — Chapter 14, Lesson 4
+   Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models *)
+
+(* This notebook-style file is a plain-text Wolfram Notebook expression.
+   You can open it in Wolfram Mathematica. *)
+
+Notebook[{
+  Cell["Chapter 14 — Lesson 4: PWL, Saturation, Dead-Zone, Backlash", "Title"],
+  Cell["1) Nonlinearities (static + backlash/play operator)", "Section"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    sat[u_, umax_] := Clip[u, {-umax, umax}]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    deadZone[u_, d_] := Piecewise[{
+      {0, Abs[u] &lt;= d},
+      {u - d Sign[u], Abs[u] &gt; d}
+    }]
+  ], "Input"],
+
+  Cell[TextData[{
+    "Backlash as a play operator: output y stays within [u - b/2, u + b/2] ",
+    "and only updates when u pushes the band boundary."
+  }], "Text"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    backlashStep[u_, y_, b_] := Module[{half = b/2},
+      Which[
+        u &gt; y + half, {u - half, u - half},
+        u &lt; y - half, {u + half, u + half},
+        True,         {y, y}
+      ]
+    ]
+  ], "Input"],
+
+  Cell["2) Piecewise-linear (PWL) map via linear interpolation", "Section"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    pwlEval[xs_List, ys_List, x_] := Module[{n = Length[xs], i, t},
+      If[x &lt;= xs[[1]], Return[ys[[1]]]];
+      If[x &gt;= xs[[n]], Return[ys[[n]]]];
+      i = First@FirstPosition[UnitStep[xs - x], 1] - 1; (* xs[[i]] &lt;= x &lt; xs[[i+1]] *)
+      t = (x - xs[[i]])/(xs[[i + 1]] - xs[[i]]);
+      (1 - t) ys[[i]] + t ys[[i + 1]]
+    ]
+  ], "Input"],
+
+  Cell["3) Closed-loop simulation (RK4, self-contained)", "Section"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    plant[{x1_, x2_}, u_, wn_, zeta_, b_] := {x2, -2 zeta wn x2 - wn^2 x1 + b u}
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    rk4Step[f_, x_, u_, dt_] := Module[{k1, k2, k3, k4},
+      k1 = f[x, u];
+      k2 = f[x + (dt/2) k1, u];
+      k3 = f[x + (dt/2) k2, u];
+      k4 = f[x + dt k3, u];
+      x + (dt/6) (k1 + 2 k2 + 2 k3 + k4)
+    ]
+  ], "Input"],
+
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    Module[{
+      T = 6.0, dt = 0.001, steps, wn = 5.0, zeta = 0.25, b = 1.0,
+      Kp = 18.0, Kd = 4.5, umax = 2.0, d = 0.25, bgap = 0.20,
+      xs, ys, usePwl = False,
+      x = {0.0, 0.0}, ybl = 0.0,
+      data = {}
+    },
+      steps = Round[T/dt];
+      xs = {-3.0, -1.5, -0.5, 0.0, 0.5, 1.5, 3.0};
+      ys = Tanh /@ xs;
+
+      Do[
+        Module[{t = k dt, r = 1.0, e, ucmd, udz, usat, umap, ubl, tmp},
+          e = r - x[[1]];
+          ucmd = Kp e - Kd x[[2]];
+          udz = deadZone[ucmd, d];
+          usat = sat[udz, umax];
+          umap = If[usePwl, pwlEval[xs, ys, usat], usat];
+          tmp = backlashStep[umap, ybl, bgap];
+          ubl = tmp[[1]]; ybl = tmp[[2]];
+
+          x = rk4Step[(plant[#, #2, wn, zeta, b] &), x, ubl, dt];
+          AppendTo[data, {t, x[[1]], x[[2]], ucmd, udz, usat, ubl}];
+        ],
+        {k, 0, steps}
+      ];
+
+      Export["Chapter14_Lesson4_output.csv",
+        Prepend[data, {"t","x1","x2","u_cmd","u_deadzone","u_sat","u_backlash"}]
+      ];
+      "Wrote Chapter14_Lesson4_output.csv"
+    ]
+  ], "Input"]
+}]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Interpolation error of PWL):</strong> Let <strong> \( g \in C^2([a,b]) \)</strong> and
+        assume <strong> \( \max_{u\in[a,b]} |g''(u)| \le M_2 \)</strong>. Show that the linear interpolant <strong> \( \hat{g} \)</strong> on <strong> \( [a,b] \)</strong>
+        satisfies <strong> \( \max_{u\in[a,b]} |g(u)-\hat{g}(u)| \le M_2(b-a)^2/8 \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Use the interpolation remainder formula
+        <strong> \( g(u)-\hat{g}(u)=\dfrac{g''(\xi)}{2}(u-a)(u-b) \)</strong> for some <strong> \( \xi \in (a,b) \)</strong>.
+        Since <strong> \( |g''(\xi)| \le M_2 \)</strong> and <strong> \( \max_{u\in[a,b]} |(u-a)(u-b)|=(b-a)^2/4 \)</strong>, the bound follows.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Saturation is 1-Lipschitz):</strong> Prove that for all <strong> \( u,v \)</strong>,
+        <strong> \( |\operatorname{sat}(u;U)-\operatorname{sat}(v;U)| \le |u-v| \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Write <strong> \( \operatorname{sat}(u;U)=\min(\max(u,-U),U) \)</strong>.
+        The map <strong> \( u \mapsto \max(u,-U) \)</strong> is nonexpansive (it is a projection onto a half-line), and
+        <strong> \( u \mapsto \min(u,U) \)</strong> is also nonexpansive. The composition of nonexpansive maps is nonexpansive, hence 1-Lipschitz.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Equilibria with saturation):</strong> Consider the scalar system
+        <strong> \( \dot{x} = -a x + \operatorname{sat}(k x;U) \)</strong> with <strong> \( a &gt; 0 \)</strong>, <strong> \( k &gt; 0 \)</strong>.
+        (a) Find equilibria. (b) Determine stability using piecewise linearization.
+      </p>
+      <p>
+        <strong>Solution:</strong> Equilibria solve <strong> \( a x^* = \operatorname{sat}(k x^*;U) \)</strong>.
+        If <strong> \( |k x^*| \le U \)</strong> then <strong> \( a x^* = k x^* \Rightarrow x^*=0 \)</strong> unless <strong> \( a=k \)</strong> (non-isolated case).
+        If <strong> \( k x^* &gt; U \)</strong>, then <strong> \( a x^* = U \Rightarrow x^* = U/a \)</strong> provided <strong> \( k(U/a) &gt; U \Rightarrow k/a &gt; 1 \)</strong>.
+        Similarly, if <strong> \( k x^* &lt; -U \)</strong>, then <strong> \( x^*=-U/a \)</strong> provided <strong> \( k/a &gt; 1 \)</strong>.
+        For stability: around <strong> \( x=0 \)</strong> (unsaturated region), linearization is <strong> \( \dot{x} \approx -(a-k)x \)</strong>.
+        Hence <strong> \( x=0 \)</strong> is locally asymptotically stable if <strong> \( a-k &gt; 0 \)</strong>, unstable if <strong> \( a-k &lt; 0 \)</strong>.
+        Around <strong> \( x^*=\pm U/a \)</strong> the saturation is flat (incremental gain 0), so linearization is <strong> \( \dot{\delta x}= -a\,\delta x \)</strong>,
+        which is stable. Thus when <strong> \( k/a &gt; 1 \)</strong>, stable saturated equilibria appear at <strong> \( \pm U/a \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Dead-zone steady-state error intuition):</strong> Consider a proportional control law <strong> \( u = K(r-x) \)</strong> applied to
+        the stable first-order plant <strong> \( \dot{x} = -a x + u_\text{eff} \)</strong>, where <strong> \( u_\text{eff} = \operatorname{dz}(u;d) \)</strong>.
+        Explain why a constant reference <strong> \( r \)</strong> may lead to a nonzero steady-state tracking error.
+      </p>
+      <p>
+        <strong>Solution:</strong> If the loop settles such that <strong> \( |u|=|K(r-x)| \le d \)</strong>, then <strong> \( u_\text{eff}=0 \)</strong> and the plant converges to
+        <strong> \( x \to 0 \)</strong>, not <strong> \( r \)</strong>. To maintain <strong> \( x \approx r \)</strong>, the controller must produce a command outside the dead-zone.
+        Therefore, the equilibrium condition becomes piecewise: either <strong> \( x^*=0 \)</strong> (inside dead-zone) or
+        <strong> \( a x^* = K(r-x^*) - d\,\operatorname{sgn}(K(r-x^*)) \)</strong> (outside dead-zone). For small references, the first regime is consistent and yields nonzero error.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Backlash band invariance):</strong> Using the update rule in Section 5.1, prove that if
+        <strong> \( y_k \in [u_k-b/2,\;u_k+b/2] \)</strong>, then the next output satisfies
+        <strong> \( y_{k+1} \in [u_{k+1}-b/2,\;u_{k+1}+b/2] \)</strong> for any input sequence <strong> \( u_k \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Consider three cases. (i) If <strong> \( u_{k+1} &gt; y_k + b/2 \)</strong>, the rule sets
+        <strong> \( y_{k+1}=u_{k+1}-b/2 \)</strong>, which lies exactly on the lower band boundary. (ii) If
+        <strong> \( u_{k+1} &lt; y_k - b/2 \)</strong>, then <strong> \( y_{k+1}=u_{k+1}+b/2 \)</strong>, which lies exactly on the upper boundary.
+        (iii) Otherwise <strong> \( |u_{k+1}-y_k| \le b/2 \)</strong>, and we keep <strong> \( y_{k+1}=y_k \)</strong>, which immediately implies
+        <strong> \( y_{k+1} \in [u_{k+1}-b/2,\;u_{k+1}+b/2] \)</strong>. Hence the band constraint is invariant. □
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formalized four ubiquitous engineering nonlinearities: PWL static maps (region-wise linearization),
+        saturation (hard limits), dead-zone (insensitivity), and backlash (hysteresis via an internal-state operator).
+        We derived key mathematical properties (Lipschitz continuity, sector-type bounds, interpolation error bounds)
+        that support well-posed simulation and later stability reasoning. The accompanying implementations provide
+        reusable building blocks and a closed-loop example to observe their qualitative impact on trajectories.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Popov, V.M. (1962). Absolute stability of nonlinear systems of automatic control.
+        <em>Automation and Remote Control</em>, 22, 857–875.
+      </li>
+      <li>
+        Yakubovich, V.A. (1962). The solution of certain matrix inequalities in automatic control theory.
+        <em>Doklady Akademii Nauk SSSR</em>, 143, 1304–1307.
+      </li>
+      <li>
+        Zames, G., &amp; Falb, P.L. (1968). Stability conditions for systems with monotone and slope-restricted nonlinearities.
+        <em>SIAM Journal on Control</em>, 6(1), 89–108.
+      </li>
+      <li>
+        Filippov, A.F. (1960). Differential equations with discontinuous right-hand sides.
+        <em>Matematicheskii Sbornik</em>, 51(1), 99–128.
+      </li>
+      <li>
+        Chua, L.O., &amp; Lin, G.-N. (1990). Canonical realization of Chua's circuit family.
+        <em>IEEE Transactions on Circuits and Systems</em>, 37(7), 885–902.
+      </li>
+      <li>
+        Johansson, M., &amp; Rantzer, A. (1998). Computation of piecewise quadratic Lyapunov functions for hybrid systems.
+        <em>IEEE Transactions on Automatic Control</em>, 43(4), 555–559.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter14/Lesson3.html">
+          Lesson 3: Linearization vs. True Nonlinear Behavior: When Linear Models Fail
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson5.html">
+          Lesson 5: Limit Cycles, Multiple Equilibria, and Basic Bifurcation Notions
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>System Dynamics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Introduction to System Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What is System Dynamics?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Dynamic vs. Static, Linear vs. Nonlinear, Time-Invariant vs. Time-Varying
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Lumped vs. Distributed Parameter Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Continuous-Time vs. Discrete-Time Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Modeling Workflow, Assumptions, Validation, and Role in Control Engineering
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Mathematical Preliminaries</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Ordinary Differential Equations (ODEs): Order, Linearity, Initial Value Problems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Laplace Transform, Inverse Transform, and Common Pairs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Complex Numbers, Exponentials, Phasors, and Poles/Zeros in the s-Plane
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Linear Algebra for Dynamic Systems (Vectors, Matrices, Eigenvalues, Eigenvectors)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Numerical Concepts: Local/Global Error, Stability of Numerical Schemes
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Modeling of Translational Mechanical Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Newton’s Laws and Free-Body Diagrams for Translational Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Mass–Spring–Damper Systems and Governing ODEs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Equivalent Mass, Stiffness, and Damping (Series/Parallel Combinations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Friction Models: Viscous, Coulomb, Stribeck, Stick–Slip
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Example Models: Vehicle Suspension, Building Floor, Actuator–Load Systems
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Rotational Mechanical and Mechatronic Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Rotational Dynamics: Moment of Inertia, Torsional Springs and Dampers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Gears, Levers, and Other Transformers Between Domains
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Coupled Translational–Rotational Systems (Rack-and-Pinion, Crank–Slider)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Flexible Shafts, Backlash, and Non-Ideal Gear Trains
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Mechatronic Examples: Motor–Load Dynamics and Servo Drives
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Electrical, Fluid, and Thermal System Modeling</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: RLC Circuits: KVL, KCL, and Dynamic Equations for Electrical Networks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Mechanical–Electrical Analogies (Force–Voltage, Force–Current, etc.)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Fluid Systems: Hydraulic Resistance, Capacitance, Inertance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Thermal Systems: Lumped Thermal Capacitance and Thermal Resistance Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Multi-domain Examples: Electromechanical, Thermo-Fluid, and Electro-Thermal Couplings
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Input–Output Description and Transfer Functions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Impulse Response, Convolution, and Linear Time-Invariant (LTI) Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Deriving Transfer Functions from ODEs (Zero Initial Conditions, Laplace Approach)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Properties of Transfer Functions: Poles, Zeros, and System Order
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Interconnection of Systems: Series, Parallel, Feedback, and Feedforward
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Stability, Causality, and Physical Realizability via Transfer Functions
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Block Diagrams and Signal Flow Graphs</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Block Diagram Representation of Dynamic Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Block Diagram Algebra and Reduction Techniques
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Signal Flow Graphs and Mason’s Gain Formula
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Multi-Loop and Multi-Input–Multi-Output (MIMO) Interconnections
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Practical Modeling Examples Using Block Diagrams and Signal Flow Graphs
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: State-Space Modeling</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Concept of State, State Variables, and State-Space Representation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Deriving State-Space Models from Differential Equations and Physical Laws
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Canonical Forms: Controllable, Observable, and Diagonal Forms
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: State Transformations and Equivalence of Representations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Relationship Between Transfer Function and State-Space Models
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Linearization and Local Behavior</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Operating Points, Equilibria, and Perturbation Variables
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Jacobian Linearization of Nonlinear Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Validity of Linearization: Regions of Attraction and Limitations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Linearization of Multi-Input–Multi-Output Nonlinear Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Examples: Linearized Models of Pendulum, DC Motor, and Fluid Level Systems
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Time-Domain Response of Linear Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: First-Order Systems: Step Response, Time Constant, and Physical Interpretation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Second-Order Systems: Natural Frequency, Damping Ratio, and Standard Forms
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Underdamped, Critically Damped, and Overdamped Responses
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Higher-Order Systems: Dominant Poles and Model Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Performance Metrics: Rise Time, Settling Time, Overshoot, Steady-State Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Stability Analysis of Linear Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Concepts of Stability: BIBO, Asymptotic, and Exponential Stability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Pole Locations and Stability Regions in the s-Plane
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Routh–Hurwitz Stability Criterion and Parameter Ranges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Eigenvalue-Based Stability for State-Space Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Sensitivity of Poles to Parameter Variations and Robustness Insight
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Frequency Response and Resonance</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sinusoidal Steady-State Response and Frequency Response Definition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Bode Plots: Magnitude, Phase, Asymptotes, and Construction Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Resonance, Bandwidth, and Quality Factor in Mechanical and Electrical Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Nyquist and Nichols Plots (Introductory Level)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Time–Frequency Domain Relationships and Trade-offs (Speed vs. Overshoot, etc.)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Vibrations and Multi-Degree-of-Freedom (MDOF) Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Modeling Two- and Multi-Degree-of-Freedom Mechanical Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Natural Frequencies and Normal Modes (Eigenvalue Problems)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Modal Coordinates and Decoupling of MDOF Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Damping in MDOF Systems and Mode Shapes with Damping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Intro to Experimental Modal Analysis and System Identification Concepts
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Nonlinear System Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Sources and Types of Nonlinearities in Engineering Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Equilibrium Points, Phase Portraits, and Trajectories (2D Systems)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Linearization vs. True Nonlinear Behavior: When Linear Models Fail
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Piecewise-Linear Approximations, Saturation, Dead-Zone, and Backlash Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Limit Cycles, Multiple Equilibria, and Basic Bifurcation Notions
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Numerical Simulation of Dynamic Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Initial Value Problems and Basic Numerical Methods (Euler, Improved Euler)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Runge–Kutta Methods and Step Size Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Stiff Systems and Implicit Methods (High-Level Overview)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Event Handling, Switching, and Hybrid (Continuous–Discrete) Dynamics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Numerical Stability, Error Control, and Model Verification via Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Discrete-Time and Sampled-Data System Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sampling Process, Aliasing, and Sample-and-Hold Devices
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Difference Equations and Discrete-Time State-Space Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: z-Transform and Discrete-Time Transfer Functions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Continuous–Discrete Conversions: Zero-Order Hold, Exact Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Stability and Time Response of Discrete-Time Systems
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Stochastic Processes and Random Vibrations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Random Variables, Random Processes, and Stationarity Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Autocorrelation, Power Spectral Density, and White Noise Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Response of Linear Systems to Random Inputs: Mean and Variance Propagation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Noise Modeling in Sensors and Actuators for Dynamic Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Monte Carlo Simulation of Stochastic Dynamic Systems
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Energy-Based and Multi-Domain Modeling</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Work, Energy, and Power in Mechanical, Electrical, Fluid, and Thermal Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Lagrangian Modeling: Generalized Coordinates and Euler–Lagrange Equations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Hamiltonian Systems and Port-Hamiltonian Framework (Introductory)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Bond Graph Modeling: Effort/Flow Variables and Basic Elements
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Multi-Domain Energy-Based Models: Mechatronics, Power Systems, and Robotics
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Distributed-Parameter Systems and Spatial Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: PDE Models: Heat Equation, Wave Equation, and Diffusion Equation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Separation of Variables and Modal Decomposition of PDEs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Finite Difference and Finite Element Approximations (Conceptual Level)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Transport Delay Models and Pseudo-Distributed Approximations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Spatio-Temporal Dynamics and Links to Control of Distributed Systems
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Chaos, Complex Dynamics, and Computational Tools</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Nonlinear Maps and Continuous-Time Chaotic Systems (Logistic Map, Lorenz System)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Bifurcation Diagrams, Period Doubling, and Strange Attractors
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Sensitivity to Initial Conditions and Lyapunov Exponents (Intro)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Computational Tools: MATLAB/Simulink, Python (SciPy), and Modelica for System Dynamics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Integrated Case Studies and Projects (Mechatronic System, Vehicle Dynamics, Thermal–Fluid System)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

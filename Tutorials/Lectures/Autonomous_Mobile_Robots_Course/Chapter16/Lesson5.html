@@ -1,0 +1,2983 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 16: Obstacle Avoidance in Dynamic Environments - Lesson 5: Lab: Navigate Through Moving Crowds | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 16: Obstacle Avoidance in Dynamic Environments</h1>
+    <h3><strong>Lesson 5: Lab: Navigate Through Moving Crowds</strong></h3>
+    <p>
+      This lab integrates the dynamic-obstacle sensing assumptions (Lesson 1),
+      velocity-obstacle reasoning (Lesson 2), socially aware navigation costs
+      (Lesson 3), and prediction-aware local navigation (Lesson 4) into a
+      complete <em>crowd navigation</em>
+      pipeline. You will implement and evaluate a crowd-aware local planner that
+      can reach a goal while maintaining safety and comfort constraints in
+      dense, moving crowds.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Experimental Contract -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Experimental Contract</h2>
+    <div class="down-content">
+      <p>
+        The core task is: given a robot with planar pose
+        <strong> \( \mathbf{x} = [x, y, \theta]^\top \)</strong>, a goal
+        position <strong> \( \mathbf{g} \in \mathbb{R}^2 \)</strong>, and a set
+        of moving humans modeled as discs, compute control inputs
+        <strong> \( u(t) = [v(t), \omega(t)]^\top \)</strong>
+        such that the robot reaches the goal while maintaining a required
+        clearance and exhibiting socially acceptable motion (no aggressive
+        cutting, minimal discomfort).
+      </p>
+
+      <p>
+        <strong>Robot model (unicycle).</strong> We assume a kinematic model
+        (from Chapters 2–3):
+      </p>
+      <h4 class="mathJax">
+        \[ \dot x = v \cos\theta,\qquad \dot y = v \sin\theta,\qquad \dot\theta
+        = \omega. \]
+      </h4>
+
+      <p>
+        <strong>Human model (dynamic discs).</strong> Each human
+        <strong> \( j \)</strong> has state
+        <strong> \( (\mathbf{p}_j(t), \mathbf{v}_j(t)) \)</strong> and radius
+        <strong> \( r_j \)</strong>, with a robot radius
+        <strong> \( r_r \)</strong>. The safety distance for pair (robot, human
+        j) is <strong> \( R_j = r_r + r_j \)</strong>.
+      </p>
+
+      <p>
+        <strong>Experimental contract.</strong> Your implementation is
+        considered correct if it satisfies:
+      </p>
+      <ul>
+        <li>
+          <strong>Safety:</strong> for all humans <strong> \( j \)</strong> and
+          all times,
+          <strong> \( \|\mathbf{p}_r(t) - \mathbf{p}_j(t)\| &gt; R_j \)</strong
+          >.
+        </li>
+        <li>
+          <strong>Goal reach:</strong> robot reaches
+          <strong>
+            \( \|\mathbf{p}_r - \mathbf{g}\| &lt; \varepsilon_g \)</strong
+          >
+          within a time budget.
+        </li>
+        <li>
+          <strong>Comfort:</strong> trajectories minimize a discomfort
+          functional (Section 4).
+        </li>
+        <li>
+          <strong>Reproducibility:</strong> you log trajectories and metrics for
+          repeated seeds.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Scenario generator (crowd + goal)"] --> P["Perception (tracks + velocities)"]
+  P --> PR["Prediction (short-horizon)"]
+  PR --> L["Local planner (crowd-aware sampling)"]
+  L --> U["Control u(t) = [v, w]"]
+  U --> M["Robot motion model"]
+  M --> F["Safety & comfort monitors"]
+  F -->|log| E["Evaluation metrics + report"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Baseline Crowd Kinematics and Short-Horizon Prediction -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Baseline Crowd Kinematics and Short-Horizon Prediction</h2>
+    <div class="down-content">
+      <p>
+        In this lab we use a conservative, short-horizon predictor suitable for
+        a local planner: a constant-velocity model with optional process noise.
+        For each human
+        <strong> \( j \)</strong> at time <strong> \( t \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{p}_j(t+\Delta t) = \mathbf{p}_j(t) + \mathbf{v}_j(t)\,\Delta
+        t, \qquad \mathbf{v}_j(t+\Delta t) = \mathbf{v}_j(t). \]
+      </h4>
+
+      <p>
+        <strong>Uncertainty growth (prediction-aware navigation).</strong>
+        If the velocity estimate is noisy, model position as Gaussian:
+        <strong>
+          \( \mathbf{p}_j(t) \sim \mathcal{N}(\bar{\mathbf{p}}_j(t),
+          \Sigma_j(t)) \)</strong
+        >
+        with
+        <strong> \( \Sigma_j(t+\Delta t) = \Sigma_j(t) + Q\,\Delta t \)</strong
+        >. A standard chance constraint for collision avoidance over a single
+        time step is:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbb{P}\big( \|\mathbf{p}_r - \mathbf{p}_j\| &gt; R_j \big) \ge
+        1-\delta. \]
+      </h4>
+      <p>
+        In practice we use a conservative deterministic surrogate by inflating
+        the safety radius:
+        <strong> \( R_j^{\text{eff}}(t) = R_j + k_\delta\,\sigma_d(t) \)</strong
+        >, where <strong> \( \sigma_d(t) \)</strong> is an approximate standard
+        deviation of the relative distance and
+        <strong> \( k_\delta \)</strong> is a normal quantile (or a tuned
+        constant).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Dynamic Collision Geometry (TTC and Velocity-Obstacle View) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Dynamic Collision Geometry (TTC and Velocity-Obstacle View)</h2>
+    <div class="down-content">
+      <p>
+        For a single human <strong> \( j \)</strong>, define relative position
+        and relative velocity:
+        <strong> \( \mathbf{p}_{rel} = \mathbf{p}_r - \mathbf{p}_j \)</strong>,
+        <strong> \( \mathbf{v}_{rel} = \mathbf{v}_r - \mathbf{v}_j \)</strong>.
+        Under constant velocities, a collision occurs when:
+        <strong> \( \|\mathbf{p}_{rel} + t\,\mathbf{v}_{rel}\| = R_j \)</strong>
+        for some <strong> \( t \ge 0 \)</strong>.
+      </p>
+
+      <p>
+        <strong>Time-to-collision (TTC).</strong> Squaring yields a quadratic in
+        <strong> \( t \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \|\mathbf{v}_{rel}\|^2 t^2 + 2(\mathbf{p}_{rel}^\top
+        \mathbf{v}_{rel}) t + (\|\mathbf{p}_{rel}\|^2 - R_j^2) = 0. \]
+      </h4>
+      <p>
+        The smallest nonnegative root is the TTC (or
+        <strong> \( +\infty \)</strong> if no real nonnegative root exists).
+        This TTC is used in the lab as a <em>dynamic safety margin</em>: large
+        TTC means “safe for now”; small TTC means imminent collision unless the
+        control changes.
+      </p>
+
+      <p>
+        <strong>Velocity-obstacle (VO) statement (Lesson 2 connection).</strong>
+        Define the VO set (for horizon <strong> \( T \)</strong>) as relative
+        velocities that will cause a collision within time:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathrm{VO}_j^T(\mathbf{p}_{rel}) = \left\{ \mathbf{v}_{rel} :
+        \exists t \in [0,T],\; \|\mathbf{p}_{rel} + t\,\mathbf{v}_{rel}\| \le
+        R_j \right\}. \]
+      </h4>
+      <p>
+        Selecting <strong> \( \mathbf{v}_r \)</strong> such that
+        <strong>
+          \( \mathbf{v}_r - \mathbf{v}_j \notin \mathrm{VO}_j^T \)</strong
+        >
+        is equivalent to enforcing
+        <strong> \( \mathrm{TTC}_j &gt; T \)</strong> under constant velocity
+        prediction.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Crowd-Aware Local Planning as Constrained Optimization -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Crowd-Aware Local Planning as Constrained Optimization</h2>
+    <div class="down-content">
+      <p>
+        The lab uses a practical local-planning design pattern: sample feasible
+        controls over a short horizon, predict trajectories, enforce safety
+        constraints, and minimize a multi-objective cost combining task progress
+        and social comfort. This approach is compatible with the sampling
+        mindset of Chapter 15 (DWA), extended to dynamic obstacles (Chapter 16).
+      </p>
+
+      <p>
+        <strong>Candidate controls.</strong> At each control cycle, sample
+        <strong> \( u = [v, \omega]^\top \)</strong> within a dynamic window
+        defined by acceleration limits:
+        <strong> \( v \in [v_{min}, v_{max}] \)</strong>,
+        <strong> \( \omega \in [\omega_{min}, \omega_{max}] \)</strong>.
+      </p>
+
+      <p>
+        <strong>Trajectory rollout.</strong> With step size
+        <strong> \( \Delta t \)</strong> and horizon
+        <strong> \( T = N\Delta t \)</strong>, define predicted robot positions:
+        <strong>
+          \( \mathbf{p}_r^{(k)} \approx \mathbf{p}_r(t + k\Delta t) \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Safety constraints.</strong> We use a strict collision
+        rejection:
+        <strong>
+          \( \min_{j,k} \big( \|\mathbf{p}_r^{(k)} - \mathbf{p}_j^{(k)}\| - R_j
+          \big) &gt; 0 \)</strong
+        >, and a soft safety cost via TTC:
+        <strong>
+          \( J_{ttc}(u) = \sum_j \frac{1}{\mathrm{TTC}_j(u) + \epsilon}
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Social discomfort field.</strong> Model each human as generating
+        an anisotropic potential centered at their position. Let the human
+        heading define a local frame (forward axis aligned with
+        <strong> \( \mathbf{v}_j \)</strong>). For robot position
+        <strong> \( \mathbf{p} \)</strong> expressed in that frame as
+        <strong> \( (d_x, d_y) \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \phi_j(\mathbf{p}) = \exp\!\left( -\tfrac{1}{2}\left(
+        \frac{d_x^2}{\sigma_x^2} + \frac{d_y^2}{\sigma_y^2} \right) \right),
+        \qquad \sigma_x = \begin{cases} \sigma_{front} & \text{if } d_x \ge 0 \\
+        \sigma_{back} & \text{if } d_x &lt; 0 \end{cases} \]
+      </h4>
+      <p>
+        The discomfort cost along a predicted trajectory is approximated by a
+        discrete sum:
+        <strong>
+          \( J_{soc}(u) = \frac{1}{N}\sum_{k=1}^N \sum_j
+          \phi_j(\mathbf{p}_r^{(k)}) \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Total cost.</strong> A typical crowd-aware sampling objective
+        is:
+      </p>
+      <h4 class="mathJax">
+        \[ J(u) = w_g\,\|\mathbf{p}_r^{(N)} - \mathbf{g}\| +
+        w_c\,\frac{1}{c_{min}(u)+\epsilon} +
+        w_t\,\frac{1}{\mathrm{TTC}_{min}(u)+\epsilon} + \\ w_s\,J_{soc}(u) +
+        w_v\,(v_{pref}-v)^2 + w_\omega\,\omega^2 + w_\Delta\,\|u-u_{prev}\|^2.
+        \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Sample (v,w) in dynamic window"] --> B["Roll out N steps"]
+  B --> C["Predict humans (const-vel)"]
+  C --> D["Compute clearance + TTC + discomfort"]
+  D --> E["Reject if clearance le 0"]
+  E --> F["Select argmin cost J(u)"]
+  F --> G["Apply (v,w) for one dt"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Why the hard rejection works (local guarantee).</strong>
+        If humans follow the constant-velocity predictor over the horizon and a
+        candidate control yields
+        <strong>
+          \( \|\mathbf{p}_r^{(k)} - \mathbf{p}_j^{(k)}\| &gt; R_j \)</strong
+        >
+        for all <strong> \( k=1,\dots,N \)</strong> and all humans
+        <strong> \( j \)</strong>, then the discretized rollout is
+        collision-free at all sampled instants. By choosing
+        <strong> \( \Delta t \)</strong> small enough (Chapter 15 clearance
+        reasoning), you can make this a tight approximation to continuous-time
+        safety.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Lab Procedure and Evaluation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Lab Procedure and Evaluation</h2>
+    <div class="down-content">
+      <p>
+        Run the planner across multiple crowd scenarios and random seeds. Your
+        deliverable is a short report with plots and aggregated metrics.
+      </p>
+
+      <h3>5.1 Scenarios</h3>
+      <ul>
+        <li>
+          <strong>Crossing flows:</strong> two perpendicular human streams
+          crossing near the origin.
+        </li>
+        <li>
+          <strong>Corridor bidirectional:</strong> humans move in opposite
+          directions through a narrow corridor.
+        </li>
+        <li>
+          <strong>Goal behind crowd:</strong> robot must pass through a cluster
+          that drifts slowly.
+        </li>
+      </ul>
+
+      <h3>5.2 Metrics</h3>
+      <p>Log robot and human trajectories and compute:</p>
+      <ul>
+        <li><strong>Success rate</strong> (reach goal without collision).</li>
+        <li>
+          <strong>Minimum clearance</strong>:
+          <strong>
+            \( c_{min} = \min_{t,j} \|\mathbf{p}_r(t)-\mathbf{p}_j(t)\| - R_j
+            \)</strong
+          >.
+        </li>
+        <li>
+          <strong>Minimum TTC</strong> over time:
+          <strong>
+            \( \mathrm{TTC}_{min} = \min_{t,j} \mathrm{TTC}_j(t) \)</strong
+          >.
+        </li>
+        <li><strong>Path efficiency</strong> (time, path length).</li>
+        <li>
+          <strong>Smoothness</strong> (finite differences in commanded
+          <strong> \( v,\omega \)</strong>).
+        </li>
+        <li>
+          <strong>Discomfort integral</strong>:
+          <strong> \( \sum_k \sum_j \phi_j(\mathbf{p}_r^{(k)}) \)</strong>.
+        </li>
+      </ul>
+
+      <h3>5.3 Parameter sweep</h3>
+      <p>
+        Perform a controlled sweep over <strong> \( w_s \)</strong> (social
+        weight) and <strong> \( w_t \)</strong> (TTC weight), and report the
+        Pareto-like tradeoff between speed and comfort.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Reference Implementations (Python / C++ / Java / MATLAB-Simulink / Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Reference Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following implementations provide a consistent baseline across
+        languages. They implement the same crowd scenario (crossing flows) and
+        the same crowd-aware sampling planner. You are expected to modify
+        parameters, add scenarios, and compute metrics.
+      </p>
+
+      <h3>6.1 Python</h3>
+      <p><strong>Chapter16_Lesson5.py</strong></p>
+      <pre><code class="language-python">
+import math
+import random
+from dataclasses import dataclass
+from typing import List, Tuple, Dict
+
+# ============================
+# Chapter16_Lesson5.py
+# Lab: Navigate Through Moving Crowds (baseline multi-objective sampler)
+# ============================
+
+@dataclass
+class UnicycleState:
+    x: float
+    y: float
+    theta: float
+
+@dataclass
+class Human:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    r: float
+
+@dataclass
+class Params:
+    dt: float = 0.1
+    horizon: float = 2.0
+    robot_radius: float = 0.30
+    # dynamic window bounds (kinematic; can be extended to include accel constraints)
+    v_min: float = 0.0
+    v_max: float = 1.2
+    w_min: float = -1.5
+    w_max: float = 1.5
+    # sampling
+    n_v: int = 11
+    n_w: int = 21
+    # costs
+    w_goal: float = 1.0
+    w_clear: float = 0.8
+    w_ttc: float = 0.6
+    w_social: float = 0.7
+    w_speed: float = 0.15
+    w_omega: float = 0.05
+    w_delta_u: float = 0.1
+    v_pref: float = 0.8
+    eps: float = 1e-6
+    # social field parameters (anisotropic)
+    sigma_front: float = 1.2
+    sigma_back: float = 0.6
+    sigma_y: float = 0.8
+
+def wrap_angle(a: float) -> float:
+    while a &gt; math.pi:
+        a -= 2.0 * math.pi
+    while a &lt; -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+def step_unicycle(s: UnicycleState, v: float, w: float, dt: float) -&gt; UnicycleState:
+    # forward Euler
+    nx = s.x + v * math.cos(s.theta) * dt
+    ny = s.y + v * math.sin(s.theta) * dt
+    nth = wrap_angle(s.theta + w * dt)
+    return UnicycleState(nx, ny, nth)
+
+def predict_humans_const_vel(humans: List[Human], dt: float) -&gt; List[Human]:
+    nxt = []
+    for h in humans:
+        nxt.append(Human(h.x + h.vx * dt, h.y + h.vy * dt, h.vx, h.vy, h.r))
+    return nxt
+
+def dist(a: Tuple[float,float], b: Tuple[float,float]) -&gt; float:
+    return math.hypot(a[0]-b[0], a[1]-b[1])
+
+def ttc_disc_rel(prel: Tuple[float,float], vrel: Tuple[float,float], R: float, eps: float=1e-9) -&gt; float:
+    # Solve ||p + t v||^2 = R^2 for smallest t &gt;= 0
+    px, py = prel
+    vx, vy = vrel
+    A = vx*vx + vy*vy
+    B = 2.0*(px*vx + py*vy)
+    C = px*px + py*py - R*R
+    if A &lt; eps:
+        # relative speed ~ 0: either already colliding or never colliding
+        return 0.0 if C &lt;= 0.0 else float("inf")
+    disc = B*B - 4.0*A*C
+    if disc &lt; 0.0:
+        return float("inf")
+    sqrt_disc = math.sqrt(disc)
+    t1 = (-B - sqrt_disc) / (2.0*A)
+    t2 = (-B + sqrt_disc) / (2.0*A)
+    ts = [t for t in (t1, t2) if t &gt;= 0.0]
+    return min(ts) if ts else float("inf")
+
+def human_frame_components(px: float, py: float, hvx: float, hvy: float) -&gt; Tuple[float,float]:
+    # define human forward axis aligned with velocity; if near zero, use x-axis
+    sp = math.hypot(hvx, hvy)
+    if sp &lt; 1e-9:
+        fx, fy = 1.0, 0.0
+    else:
+        fx, fy = hvx/sp, hvy/sp
+    # lateral axis (rotate +90)
+    lx, ly = -fy, fx
+    dx = px*fx + py*fy
+    dy = px*lx + py*ly
+    return dx, dy
+
+def social_phi(robot_pos: Tuple[float,float], h: Human, P: Params) -&gt; float:
+    # anisotropic gaussian-like discomfort around human
+    rx, ry = robot_pos
+    relx = rx - h.x
+    rely = ry - h.y
+    dx, dy = human_frame_components(relx, rely, h.vx, h.vy)
+    sigma_x = P.sigma_front if dx &gt;= 0.0 else P.sigma_back
+    # potential in [0,1]
+    val = math.exp(-0.5*((dx*dx)/(sigma_x*sigma_x) + (dy*dy)/(P.sigma_y*P.sigma_y)))
+    return val
+
+def rollout_and_score(
+    s0: UnicycleState,
+    humans0: List[Human],
+    goal: Tuple[float,float],
+    u: Tuple[float,float],
+    u_prev: Tuple[float,float],
+    P: Params
+) -&gt; Tuple[float, Dict[str,float]]:
+    v, w = u
+    dt = P.dt
+    N = max(1, int(P.horizon / dt))
+    s = s0
+    humans = humans0
+
+    min_clear = float("inf")
+    min_ttc = float("inf")
+    soc_sum = 0.0
+
+    for k in range(1, N+1):
+        # propagate robot
+        s = step_unicycle(s, v, w, dt)
+        # propagate humans
+        humans = predict_humans_const_vel(humans, dt)
+
+        pr = (s.x, s.y)
+        vr = (v*math.cos(s.theta), v*math.sin(s.theta))
+
+        # evaluate against each human
+        for h in humans:
+            ph = (h.x, h.y)
+            R = P.robot_radius + h.r
+            d = dist(pr, ph)
+            clear = d - R
+            if clear &lt; min_clear:
+                min_clear = clear
+
+            # TTC w.r.t. human (in world frame)
+            prel = (pr[0]-ph[0], pr[1]-ph[1])
+            vrel = (vr[0]-h.vx, vr[1]-h.vy)
+            ttc = ttc_disc_rel(prel, vrel, R)
+            if ttc &lt; min_ttc:
+                min_ttc = ttc
+
+            # social potential
+            soc_sum += social_phi(pr, h, P)
+
+    # hard rejection handled outside; score assumes min_clear &gt; 0
+    goal_dist = dist((s.x, s.y), goal)
+    # soft penalties
+    J_clear = 1.0 / (min_clear + P.eps)
+    J_ttc = 1.0 / (min_ttc + P.eps)
+    J_soc = soc_sum / float(N)
+
+    J = (
+        P.w_goal*goal_dist
+        + P.w_clear*J_clear
+        + P.w_ttc*J_ttc
+        + P.w_social*J_soc
+        + P.w_speed*((P.v_pref - v)**2)
+        + P.w_omega*(w*w)
+        + P.w_delta_u*((v-u_prev[0])**2 + (w-u_prev[1])**2)
+    )
+
+    info = {
+        "goal_dist": goal_dist,
+        "min_clear": min_clear,
+        "min_ttc": min_ttc,
+        "J_soc": J_soc,
+        "J_total": J
+    }
+    return J, info
+
+def sample_controls(P: Params) -&gt; List[Tuple[float,float]]:
+    controls = []
+    if P.n_v &lt;= 1:
+        v_list = [0.5*(P.v_min+P.v_max)]
+    else:
+        v_list = [P.v_min + i*(P.v_max-P.v_min)/(P.n_v-1) for i in range(P.n_v)]
+    if P.n_w &lt;= 1:
+        w_list = [0.0]
+    else:
+        w_list = [P.w_min + j*(P.w_max-P.w_min)/(P.n_w-1) for j in range(P.n_w)]
+    for v in v_list:
+        for w in w_list:
+            controls.append((v,w))
+    return controls
+
+def make_crossing_flow_scene(seed: int = 0) -&gt; Tuple[UnicycleState, Tuple[float,float], List[Human]]:
+    random.seed(seed)
+    # robot start and goal
+    s0 = UnicycleState(-4.0, -4.0, math.radians(45.0))
+    goal = (4.0, 4.0)
+
+    humans: List[Human] = []
+    # flow 1: left to right near y=0
+    for i in range(10):
+        y = random.uniform(-1.2, 1.2)
+        x = random.uniform(-4.0, 4.0)
+        vx = random.uniform(0.4, 0.9)
+        humans.append(Human(x, y, vx, 0.0, 0.30))
+
+    # flow 2: bottom to top near x=0
+    for i in range(10):
+        x = random.uniform(-1.2, 1.2)
+        y = random.uniform(-4.0, 4.0)
+        vy = random.uniform(0.4, 0.9)
+        humans.append(Human(x, y, 0.0, vy, 0.30))
+
+    return s0, goal, humans
+
+def run_episode(seed: int = 0, P: Params = Params()) -&gt; Dict[str, float]:
+    s, goal, humans = make_crossing_flow_scene(seed)
+    u_prev = (0.0, 0.0)
+
+    T_total = 35.0
+    steps = int(T_total / P.dt)
+    min_clear_all = float("inf")
+    min_ttc_all = float("inf")
+    soc_integral = 0.0
+
+    for t in range(steps):
+        # stop if reached
+        if dist((s.x, s.y), goal) &lt; 0.35:
+            return {
+                "success": 1.0,
+                "time": t*P.dt,
+                "min_clear": min_clear_all,
+                "min_ttc": min_ttc_all,
+                "social": soc_integral
+            }
+
+        best_u = None
+        best_J = float("inf")
+        best_info = None
+
+        # evaluate all controls
+        for u in sample_controls(P):
+            J, info = rollout_and_score(s, humans, goal, u, u_prev, P)
+            # hard safety rejection
+            if info["min_clear"] &lt;= 0.0:
+                continue
+            if J &lt; best_J:
+                best_J = J
+                best_u = u
+                best_info = info
+
+        # if no safe control found, freeze (or rotate in place as a recovery)
+        if best_u is None:
+            v, w = 0.0, 0.0
+            best_info = {"min_clear": -1.0, "min_ttc": 0.0, "J_soc": 0.0}
+        else:
+            v, w = best_u
+
+        # apply for one step
+        s = step_unicycle(s, v, w, P.dt)
+        humans = predict_humans_const_vel(humans, P.dt)
+        u_prev = (v, w)
+
+        # accumulate episode metrics
+        min_clear_all = min(min_clear_all, best_info["min_clear"])
+        min_ttc_all = min(min_ttc_all, best_info["min_ttc"])
+        soc_integral += best_info.get("J_soc", 0.0)
+
+        # hard collision check (simulation truth under the same human model)
+        for h in humans:
+            if dist((s.x, s.y), (h.x, h.y)) &lt;= P.robot_radius + h.r:
+                return {
+                    "success": 0.0,
+                    "time": t*P.dt,
+                    "min_clear": min_clear_all,
+                    "min_ttc": min_ttc_all,
+                    "social": soc_integral
+                }
+
+    return {
+        "success": 0.0,
+        "time": T_total,
+        "min_clear": min_clear_all,
+        "min_ttc": min_ttc_all,
+        "social": soc_integral
+    }
+
+def sweep_weights(seeds: List[int], w_social_list: List[float], w_ttc_list: List[float]) -&gt; List[Dict[str, float]]:
+    P = Params()
+    results = []
+    for ws in w_social_list:
+        for wt in w_ttc_list:
+            P.w_social = ws
+            P.w_ttc = wt
+            succ = 0.0
+            times = []
+            clears = []
+            ttcs = []
+            socs = []
+            for sd in seeds:
+                out = run_episode(sd, P)
+                succ += out["success"]
+                times.append(out["time"])
+                clears.append(out["min_clear"])
+                ttcs.append(out["min_ttc"])
+                socs.append(out["social"])
+            n = float(len(seeds))
+            results.append({
+                "w_social": ws,
+                "w_ttc": wt,
+                "success_rate": succ/n,
+                "time_avg": sum(times)/n,
+                "min_clear_avg": sum(clears)/n,
+                "min_ttc_avg": sum(ttcs)/n,
+                "social_avg": sum(socs)/n
+            })
+    return results
+
+if __name__ == "__main__":
+    # quick demo
+    P = Params()
+    out = run_episode(seed=0, P=P)
+    print("Episode metrics:", out)
+
+    # small sweep
+    seeds = list(range(5))
+    res = sweep_weights(seeds, w_social_list=[0.2, 0.7, 1.2], w_ttc_list=[0.2, 0.6, 1.0])
+    for r in res:
+        print(r)
+      </code></pre>
+
+      <h3>6.2 C++</h3>
+      <p><strong>Chapter16_Lesson5.cpp</strong></p>
+      <pre><code class="language-cpp">
+#include &lt;cmath&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;random&gt;
+#include &lt;tuple&gt;
+#include &lt;vector&gt;
+
+// ============================
+// Chapter16_Lesson5.cpp
+// Lab: Navigate Through Moving Crowds (baseline multi-objective sampler)
+// ============================
+
+struct UnicycleState {
+  double x{0.0}, y{0.0}, theta{0.0};
+};
+
+struct Human {
+  double x{0.0}, y{0.0}, vx{0.0}, vy{0.0}, r{0.30};
+};
+
+struct Params {
+  double dt = 0.1;
+  double horizon = 2.0;
+  double robot_radius = 0.30;
+
+  double v_min = 0.0, v_max = 1.2;
+  double w_min = -1.5, w_max = 1.5;
+
+  int n_v = 11;
+  int n_w = 21;
+
+  double w_goal = 1.0;
+  double w_clear = 0.8;
+  double w_ttc = 0.6;
+  double w_social = 0.7;
+  double w_speed = 0.15;
+  double w_omega = 0.05;
+  double w_delta_u = 0.1;
+  double v_pref = 0.8;
+  double eps = 1e-6;
+
+  double sigma_front = 1.2;
+  double sigma_back = 0.6;
+  double sigma_y = 0.8;
+};
+
+static double wrap_angle(double a) {
+  while (a &gt; M_PI) a -= 2.0 * M_PI;
+  while (a &lt; -M_PI) a += 2.0 * M_PI;
+  return a;
+}
+
+static UnicycleState step_unicycle(const UnicycleState&amp; s, double v, double w, double dt) {
+  UnicycleState ns;
+  ns.x = s.x + v * std::cos(s.theta) * dt;
+  ns.y = s.y + v * std::sin(s.theta) * dt;
+  ns.theta = wrap_angle(s.theta + w * dt);
+  return ns;
+}
+
+static std::vector&lt;Human&gt; predict_humans_const_vel(const std::vector&lt;Human&gt;&amp; humans, double dt) {
+  std::vector&lt;Human&gt; nxt;
+  nxt.reserve(humans.size());
+  for (const auto&amp; h : humans) {
+    nxt.push_back(Human{h.x + h.vx * dt, h.y + h.vy * dt, h.vx, h.vy, h.r});
+  }
+  return nxt;
+}
+
+static double dist2(double ax, double ay, double bx, double by) {
+  double dx = ax - bx, dy = ay - by;
+  return dx * dx + dy * dy;
+}
+
+static double dist(double ax, double ay, double bx, double by) {
+  return std::sqrt(dist2(ax, ay, bx, by));
+}
+
+static double ttc_disc_rel(double px, double py, double vx, double vy, double R) {
+  // Solve ||p + t v||^2 = R^2 for smallest t &gt;= 0
+  double A = vx * vx + vy * vy;
+  double B = 2.0 * (px * vx + py * vy);
+  double C = px * px + py * py - R * R;
+
+  const double eps = 1e-12;
+  if (A &lt; eps) {
+    return (C &lt;= 0.0) ? 0.0 : std::numeric_limits&lt;double&gt;::infinity();
+  }
+
+  double disc = B * B - 4.0 * A * C;
+  if (disc &lt; 0.0) return std::numeric_limits&lt;double&gt;::infinity();
+
+  double sd = std::sqrt(disc);
+  double t1 = (-B - sd) / (2.0 * A);
+  double t2 = (-B + sd) / (2.0 * A);
+
+  double best = std::numeric_limits&lt;double&gt;::infinity();
+  if (t1 &gt;= 0.0) best = std::min(best, t1);
+  if (t2 &gt;= 0.0) best = std::min(best, t2);
+  return best;
+}
+
+static std::pair&lt;double, double&gt; human_frame_components(double relx, double rely, double hvx, double hvy) {
+  double sp = std::hypot(hvx, hvy);
+  double fx = 1.0, fy = 0.0;
+  if (sp &gt; 1e-12) {
+    fx = hvx / sp;
+    fy = hvy / sp;
+  }
+  // lateral axis = rotate +90
+  double lx = -fy, ly = fx;
+  double dx = relx * fx + rely * fy;
+  double dy = relx * lx + rely * ly;
+  return {dx, dy};
+}
+
+static double social_phi(double rx, double ry, const Human&amp; h, const Params&amp; P) {
+  double relx = rx - h.x;
+  double rely = ry - h.y;
+  auto [dx, dy] = human_frame_components(relx, rely, h.vx, h.vy);
+  double sigma_x = (dx &gt;= 0.0) ? P.sigma_front : P.sigma_back;
+  double val = std::exp(-0.5 * ((dx * dx) / (sigma_x * sigma_x) + (dy * dy) / (P.sigma_y * P.sigma_y)));
+  return val;
+}
+
+struct RolloutInfo {
+  double goal_dist{0.0};
+  double min_clear{0.0};
+  double min_ttc{0.0};
+  double J_soc{0.0};
+  double J_total{0.0};
+};
+
+static std::pair&lt;double, RolloutInfo&gt; rollout_and_score(
+  const UnicycleState&amp; s0,
+  const std::vector&lt;Human&gt;&amp; humans0,
+  std::pair&lt;double, double&gt; goal,
+  std::pair&lt;double, double&gt; u,
+  std::pair&lt;double, double&gt; u_prev,
+  const Params&amp; P
+) {
+  double v = u.first, w = u.second;
+  int N = std::max(1, static_cast&lt;int&gt;(P.horizon / P.dt));
+
+  UnicycleState s = s0;
+  std::vector&lt;Human&gt; humans = humans0;
+
+  double min_clear = std::numeric_limits&lt;double&gt;::infinity();
+  double min_ttc = std::numeric_limits&lt;double&gt;::infinity();
+  double soc_sum = 0.0;
+
+  for (int k = 1; k &lt;= N; ++k) {
+    s = step_unicycle(s, v, w, P.dt);
+    humans = predict_humans_const_vel(humans, P.dt);
+
+    double vrx = v * std::cos(s.theta);
+    double vry = v * std::sin(s.theta);
+
+    for (const auto&amp; h : humans) {
+      double R = P.robot_radius + h.r;
+      double d = dist(s.x, s.y, h.x, h.y);
+      double clear = d - R;
+      min_clear = std::min(min_clear, clear);
+
+      // TTC
+      double prel_x = s.x - h.x;
+      double prel_y = s.y - h.y;
+      double vrel_x = vrx - h.vx;
+      double vrel_y = vry - h.vy;
+      double ttc = ttc_disc_rel(prel_x, prel_y, vrel_x, vrel_y, R);
+      min_ttc = std::min(min_ttc, ttc);
+
+      soc_sum += social_phi(s.x, s.y, h, P);
+    }
+  }
+
+  double goal_dist = dist(s.x, s.y, goal.first, goal.second);
+  double J_clear = 1.0 / (min_clear + P.eps);
+  double J_ttc = 1.0 / (min_ttc + P.eps);
+  double J_soc = soc_sum / static_cast&lt;double&gt;(N);
+
+  double J =
+    P.w_goal * goal_dist +
+    P.w_clear * J_clear +
+    P.w_ttc * J_ttc +
+    P.w_social * J_soc +
+    P.w_speed * std::pow(P.v_pref - v, 2) +
+    P.w_omega * (w * w) +
+    P.w_delta_u * (std::pow(v - u_prev.first, 2) + std::pow(w - u_prev.second, 2));
+
+  RolloutInfo info;
+  info.goal_dist = goal_dist;
+  info.min_clear = min_clear;
+  info.min_ttc = min_ttc;
+  info.J_soc = J_soc;
+  info.J_total = J;
+
+  return {J, info};
+}
+
+static std::vector&lt;std::pair&lt;double, double&gt;&gt; sample_controls(const Params&amp; P) {
+  std::vector&lt;std::pair&lt;double, double&gt;&gt; controls;
+  std::vector&lt;double&gt; v_list, w_list;
+
+  if (P.n_v &lt;= 1) v_list = {0.5 * (P.v_min + P.v_max)};
+  else {
+    v_list.reserve(P.n_v);
+    for (int i = 0; i &lt; P.n_v; ++i)
+      v_list.push_back(P.v_min + i * (P.v_max - P.v_min) / (P.n_v - 1));
+  }
+
+  if (P.n_w &lt;= 1) w_list = {0.0};
+  else {
+    w_list.reserve(P.n_w);
+    for (int j = 0; j &lt; P.n_w; ++j)
+      w_list.push_back(P.w_min + j * (P.w_max - P.w_min) / (P.n_w - 1));
+  }
+
+  controls.reserve(v_list.size() * w_list.size());
+  for (double v : v_list) for (double w : w_list) controls.push_back({v, w});
+  return controls;
+}
+
+static std::tuple&lt;UnicycleState, std::pair&lt;double, double&gt;, std::vector&lt;Human&gt;&gt;
+make_crossing_flow_scene(int seed) {
+  std::mt19937 rng(seed);
+  auto unif = [&amp;](double a, double b) {
+    std::uniform_real_distribution&lt;double&gt; d(a, b);
+    return d(rng);
+  };
+
+  UnicycleState s0{-4.0, -4.0, 45.0 * M_PI / 180.0};
+  std::pair&lt;double, double&gt; goal{4.0, 4.0};
+
+  std::vector&lt;Human&gt; humans;
+  humans.reserve(20);
+
+  for (int i = 0; i &lt; 10; ++i) {
+    double y = unif(-1.2, 1.2);
+    double x = unif(-4.0, 4.0);
+    double vx = unif(0.4, 0.9);
+    humans.push_back(Human{x, y, vx, 0.0, 0.30});
+  }
+
+  for (int i = 0; i &lt; 10; ++i) {
+    double x = unif(-1.2, 1.2);
+    double y = unif(-4.0, 4.0);
+    double vy = unif(0.4, 0.9);
+    humans.push_back(Human{x, y, 0.0, vy, 0.30});
+  }
+
+  return {s0, goal, humans};
+}
+
+struct EpisodeOut {
+  double success{0.0};
+  double time{0.0};
+  double min_clear{0.0};
+  double min_ttc{0.0};
+  double social{0.0};
+};
+
+static EpisodeOut run_episode(int seed, const Params&amp; P) {
+  auto [s0, goal, humans0] = make_crossing_flow_scene(seed);
+  UnicycleState s = s0;
+  std::pair&lt;double, double&gt; g = goal;
+  std::vector&lt;Human&gt; humans = humans0;
+
+  std::pair&lt;double, double&gt; u_prev{0.0, 0.0};
+
+  double T_total = 35.0;
+  int steps = static_cast&lt;int&gt;(T_total / P.dt);
+
+  double min_clear_all = std::numeric_limits&lt;double&gt;::infinity();
+  double min_ttc_all = std::numeric_limits&lt;double&gt;::infinity();
+  double soc_integral = 0.0;
+
+  for (int t = 0; t &lt; steps; ++t) {
+    if (dist(s.x, s.y, g.first, g.second) &lt; 0.35) {
+      return EpisodeOut{1.0, t * P.dt, min_clear_all, min_ttc_all, soc_integral};
+    }
+
+    std::pair&lt;double, double&gt; best_u{0.0, 0.0};
+    double best_J = std::numeric_limits&lt;double&gt;::infinity();
+    RolloutInfo best_info;
+    bool found = false;
+
+    for (auto u : sample_controls(P)) {
+      auto [J, info] = rollout_and_score(s, humans, g, u, u_prev, P);
+      if (info.min_clear &lt;= 0.0) continue; // hard reject
+      if (J &lt; best_J) {
+        best_J = J;
+        best_u = u;
+        best_info = info;
+        found = true;
+      }
+    }
+
+    double v = 0.0, w = 0.0;
+    if (!found) {
+      // freeze (or implement recovery rotation)
+      v = 0.0; w = 0.0;
+      best_info.min_clear = -1.0;
+      best_info.min_ttc = 0.0;
+      best_info.J_soc = 0.0;
+    } else {
+      v = best_u.first; w = best_u.second;
+    }
+
+    s = step_unicycle(s, v, w, P.dt);
+    humans = predict_humans_const_vel(humans, P.dt);
+    u_prev = {v, w};
+
+    min_clear_all = std::min(min_clear_all, best_info.min_clear);
+    min_ttc_all = std::min(min_ttc_all, best_info.min_ttc);
+    soc_integral += best_info.J_soc;
+
+    for (const auto&amp; h : humans) {
+      if (dist(s.x, s.y, h.x, h.y) &lt;= P.robot_radius + h.r) {
+        return EpisodeOut{0.0, t * P.dt, min_clear_all, min_ttc_all, soc_integral};
+      }
+    }
+  }
+
+  return EpisodeOut{0.0, T_total, min_clear_all, min_ttc_all, soc_integral};
+}
+
+int main() {
+  Params P;
+  EpisodeOut out = run_episode(0, P);
+  std::cout &lt;&lt; "Episode metrics: "
+            &lt;&lt; "{success=" &lt;&lt; out.success
+            &lt;&lt; ", time=" &lt;&lt; out.time
+            &lt;&lt; ", min_clear=" &lt;&lt; out.min_clear
+            &lt;&lt; ", min_ttc=" &lt;&lt; out.min_ttc
+            &lt;&lt; ", social=" &lt;&lt; out.social &lt;&lt; "}" &lt;&lt; std::endl;
+
+  // tiny sweep example
+  std::vector&lt;double&gt; wS = {0.2, 0.7, 1.2};
+  std::vector&lt;double&gt; wT = {0.2, 0.6, 1.0};
+  for (double ws : wS) {
+    for (double wt : wT) {
+      Params Q = P;
+      Q.w_social = ws;
+      Q.w_ttc = wt;
+      double succ = 0.0;
+      double time_avg = 0.0;
+      double clr_avg = 0.0;
+      double ttc_avg = 0.0;
+      double soc_avg = 0.0;
+      int N = 5;
+      for (int sd = 0; sd &lt; N; ++sd) {
+        EpisodeOut e = run_episode(sd, Q);
+        succ += e.success;
+        time_avg += e.time;
+        clr_avg += e.min_clear;
+        ttc_avg += e.min_ttc;
+        soc_avg += e.social;
+      }
+      std::cout &lt;&lt; "w_social=" &lt;&lt; ws &lt;&lt; ", w_ttc=" &lt;&lt; wt
+                &lt;&lt; ", success_rate=" &lt;&lt; (succ / N)
+                &lt;&lt; ", time_avg=" &lt;&lt; (time_avg / N)
+                &lt;&lt; ", min_clear_avg=" &lt;&lt; (clr_avg / N)
+                &lt;&lt; ", min_ttc_avg=" &lt;&lt; (ttc_avg / N)
+                &lt;&lt; ", social_avg=" &lt;&lt; (soc_avg / N)
+                &lt;&lt; std::endl;
+    }
+  }
+  return 0;
+}
+      </code></pre>
+
+      <h3>6.3 Java</h3>
+      <p><strong>Chapter16_Lesson5.java</strong></p>
+      <pre><code class="language-java">
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+// ============================
+// Chapter16_Lesson5.java
+// Lab: Navigate Through Moving Crowds (baseline multi-objective sampler)
+// ============================
+
+public class Chapter16_Lesson5 {
+
+  static class UnicycleState {
+    double x, y, theta;
+    UnicycleState(double x, double y, double theta) { this.x = x; this.y = y; this.theta = theta; }
+  }
+
+  static class Human {
+    double x, y, vx, vy, r;
+    Human(double x, double y, double vx, double vy, double r) { this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.r = r; }
+  }
+
+  static class Params {
+    double dt = 0.1;
+    double horizon = 2.0;
+    double robotRadius = 0.30;
+
+    double vMin = 0.0, vMax = 1.2;
+    double wMin = -1.5, wMax = 1.5;
+
+    int nV = 11;
+    int nW = 21;
+
+    double wGoal = 1.0;
+    double wClear = 0.8;
+    double wTtc = 0.6;
+    double wSocial = 0.7;
+    double wSpeed = 0.15;
+    double wOmega = 0.05;
+    double wDeltaU = 0.1;
+    double vPref = 0.8;
+    double eps = 1e-6;
+
+    double sigmaFront = 1.2;
+    double sigmaBack = 0.6;
+    double sigmaY = 0.8;
+  }
+
+  static double wrapAngle(double a) {
+    while (a &gt; Math.PI) a -= 2.0 * Math.PI;
+    while (a &lt; -Math.PI) a += 2.0 * Math.PI;
+    return a;
+  }
+
+  static UnicycleState stepUnicycle(UnicycleState s, double v, double w, double dt) {
+    double nx = s.x + v * Math.cos(s.theta) * dt;
+    double ny = s.y + v * Math.sin(s.theta) * dt;
+    double nth = wrapAngle(s.theta + w * dt);
+    return new UnicycleState(nx, ny, nth);
+  }
+
+  static List&lt;Human&gt; predictHumansConstVel(List&lt;Human&gt; humans, double dt) {
+    List&lt;Human&gt; nxt = new ArrayList&lt;&gt;(humans.size());
+    for (Human h : humans) {
+      nxt.add(new Human(h.x + h.vx * dt, h.y + h.vy * dt, h.vx, h.vy, h.r));
+    }
+    return nxt;
+  }
+
+  static double dist(double ax, double ay, double bx, double by) {
+    double dx = ax - bx, dy = ay - by;
+    return Math.hypot(dx, dy);
+  }
+
+  static double ttcDiscRel(double px, double py, double vx, double vy, double R) {
+    // Solve ||p + t v||^2 = R^2 for smallest t &gt;= 0
+    double A = vx * vx + vy * vy;
+    double B = 2.0 * (px * vx + py * vy);
+    double C = px * px + py * py - R * R;
+
+    double eps = 1e-12;
+    if (A &lt; eps) {
+      return (C &lt;= 0.0) ? 0.0 : Double.POSITIVE_INFINITY;
+    }
+
+    double disc = B * B - 4.0 * A * C;
+    if (disc &lt; 0.0) return Double.POSITIVE_INFINITY;
+
+    double sd = Math.sqrt(disc);
+    double t1 = (-B - sd) / (2.0 * A);
+    double t2 = (-B + sd) / (2.0 * A);
+
+    double best = Double.POSITIVE_INFINITY;
+    if (t1 &gt;= 0.0) best = Math.min(best, t1);
+    if (t2 &gt;= 0.0) best = Math.min(best, t2);
+    return best;
+  }
+
+  static double[] humanFrameComponents(double relx, double rely, double hvx, double hvy) {
+    double sp = Math.hypot(hvx, hvy);
+    double fx = 1.0, fy = 0.0;
+    if (sp &gt; 1e-12) {
+      fx = hvx / sp;
+      fy = hvy / sp;
+    }
+    double lx = -fy, ly = fx;
+    double dx = relx * fx + rely * fy;
+    double dy = relx * lx + rely * ly;
+    return new double[]{dx, dy};
+  }
+
+  static double socialPhi(double rx, double ry, Human h, Params P) {
+    double relx = rx - h.x;
+    double rely = ry - h.y;
+    double[] comps = humanFrameComponents(relx, rely, h.vx, h.vy);
+    double dx = comps[0], dy = comps[1];
+    double sigmaX = (dx &gt;= 0.0) ? P.sigmaFront : P.sigmaBack;
+    return Math.exp(-0.5 * ((dx * dx) / (sigmaX * sigmaX) + (dy * dy) / (P.sigmaY * P.sigmaY)));
+  }
+
+  static class RolloutInfo {
+    double goalDist;
+    double minClear;
+    double minTtc;
+    double jSoc;
+    double jTotal;
+  }
+
+  static class Score {
+    double J;
+    RolloutInfo info;
+    Score(double J, RolloutInfo info) { this.J = J; this.info = info; }
+  }
+
+  static Score rolloutAndScore(UnicycleState s0, List&lt;Human&gt; humans0, double gx, double gy,
+                               double v, double w, double vPrev, double wPrev, Params P) {
+    int N = Math.max(1, (int)Math.floor(P.horizon / P.dt));
+    UnicycleState s = s0;
+    List&lt;Human&gt; humans = humans0;
+
+    double minClear = Double.POSITIVE_INFINITY;
+    double minTtc = Double.POSITIVE_INFINITY;
+    double socSum = 0.0;
+
+    for (int k = 1; k &lt;= N; k++) {
+      s = stepUnicycle(s, v, w, P.dt);
+      humans = predictHumansConstVel(humans, P.dt);
+
+      double vrx = v * Math.cos(s.theta);
+      double vry = v * Math.sin(s.theta);
+
+      for (Human h : humans) {
+        double R = P.robotRadius + h.r;
+        double d = dist(s.x, s.y, h.x, h.y);
+        double clear = d - R;
+        if (clear &lt; minClear) minClear = clear;
+
+        double prelX = s.x - h.x;
+        double prelY = s.y - h.y;
+        double vrelX = vrx - h.vx;
+        double vrelY = vry - h.vy;
+        double ttc = ttcDiscRel(prelX, prelY, vrelX, vrelY, R);
+        if (ttc &lt; minTtc) minTtc = ttc;
+
+        socSum += socialPhi(s.x, s.y, h, P);
+      }
+    }
+
+    double goalDist = dist(s.x, s.y, gx, gy);
+    double jClear = 1.0 / (minClear + P.eps);
+    double jTtc = 1.0 / (minTtc + P.eps);
+    double jSoc = socSum / (double)N;
+
+    double J =
+      P.wGoal * goalDist +
+      P.wClear * jClear +
+      P.wTtc * jTtc +
+      P.wSocial * jSoc +
+      P.wSpeed * (P.vPref - v) * (P.vPref - v) +
+      P.wOmega * (w * w) +
+      P.wDeltaU * ((v - vPrev) * (v - vPrev) + (w - wPrev) * (w - wPrev));
+
+    RolloutInfo info = new RolloutInfo();
+    info.goalDist = goalDist;
+    info.minClear = minClear;
+    info.minTtc = minTtc;
+    info.jSoc = jSoc;
+    info.jTotal = J;
+
+    return new Score(J, info);
+  }
+
+  static List&lt;double[]&gt; sampleControls(Params P) {
+    List&lt;double[]&gt; controls = new ArrayList&lt;&gt;();
+    double[] vList;
+    double[] wList;
+
+    if (P.nV &lt;= 1) vList = new double[]{0.5 * (P.vMin + P.vMax)};
+    else {
+      vList = new double[P.nV];
+      for (int i = 0; i &lt; P.nV; i++) vList[i] = P.vMin + i * (P.vMax - P.vMin) / (P.nV - 1);
+    }
+
+    if (P.nW &lt;= 1) wList = new double[]{0.0};
+    else {
+      wList = new double[P.nW];
+      for (int j = 0; j &lt; P.nW; j++) wList[j] = P.wMin + j * (P.wMax - P.wMin) / (P.nW - 1);
+    }
+
+    for (double v : vList) for (double w : wList) controls.add(new double[]{v, w});
+    return controls;
+  }
+
+  static class Scene {
+    UnicycleState s0;
+    double gx, gy;
+    List&lt;Human&gt; humans;
+  }
+
+  static Scene makeCrossingFlowScene(int seed) {
+    Random rng = new Random(seed);
+    Scene sc = new Scene();
+
+    sc.s0 = new UnicycleState(-4.0, -4.0, Math.toRadians(45.0));
+    sc.gx = 4.0; sc.gy = 4.0;
+
+    sc.humans = new ArrayList&lt;&gt;();
+    // flow 1: left to right near y=0
+    for (int i = 0; i &lt; 10; i++) {
+      double y = -1.2 + 2.4 * rng.nextDouble();
+      double x = -4.0 + 8.0 * rng.nextDouble();
+      double vx = 0.4 + 0.5 * rng.nextDouble();
+      sc.humans.add(new Human(x, y, vx, 0.0, 0.30));
+    }
+    // flow 2: bottom to top near x=0
+    for (int i = 0; i &lt; 10; i++) {
+      double x = -1.2 + 2.4 * rng.nextDouble();
+      double y = -4.0 + 8.0 * rng.nextDouble();
+      double vy = 0.4 + 0.5 * rng.nextDouble();
+      sc.humans.add(new Human(x, y, 0.0, vy, 0.30));
+    }
+    return sc;
+  }
+
+  static class EpisodeOut {
+    double success;
+    double time;
+    double minClear;
+    double minTtc;
+    double social;
+    EpisodeOut(double success, double time, double minClear, double minTtc, double social) {
+      this.success = success; this.time = time; this.minClear = minClear; this.minTtc = minTtc; this.social = social;
+    }
+  }
+
+  static EpisodeOut runEpisode(int seed, Params P) {
+    Scene sc = makeCrossingFlowScene(seed);
+    UnicycleState s = sc.s0;
+    double gx = sc.gx, gy = sc.gy;
+    List&lt;Human&gt; humans = sc.humans;
+
+    double vPrev = 0.0, wPrev = 0.0;
+
+    double Ttotal = 35.0;
+    int steps = (int)Math.floor(Ttotal / P.dt);
+
+    double minClearAll = Double.POSITIVE_INFINITY;
+    double minTtcAll = Double.POSITIVE_INFINITY;
+    double socIntegral = 0.0;
+
+    for (int t = 0; t &lt; steps; t++) {
+      if (dist(s.x, s.y, gx, gy) &lt; 0.35) {
+        return new EpisodeOut(1.0, t * P.dt, minClearAll, minTtcAll, socIntegral);
+      }
+
+      double bestV = 0.0, bestW = 0.0;
+      double bestJ = Double.POSITIVE_INFINITY;
+      RolloutInfo bestInfo = new RolloutInfo();
+      boolean found = false;
+
+      for (double[] u : sampleControls(P)) {
+        double v = u[0], w = u[1];
+        Score scScore = rolloutAndScore(s, humans, gx, gy, v, w, vPrev, wPrev, P);
+        if (scScore.info.minClear &lt;= 0.0) continue;
+        if (scScore.J &lt; bestJ) {
+          bestJ = scScore.J;
+          bestV = v; bestW = w;
+          bestInfo = scScore.info;
+          found = true;
+        }
+      }
+
+      double vCmd = 0.0, wCmd = 0.0;
+      if (!found) {
+        vCmd = 0.0; wCmd = 0.0;
+        bestInfo.minClear = -1.0;
+        bestInfo.minTtc = 0.0;
+        bestInfo.jSoc = 0.0;
+      } else {
+        vCmd = bestV; wCmd = bestW;
+      }
+
+      s = stepUnicycle(s, vCmd, wCmd, P.dt);
+      humans = predictHumansConstVel(humans, P.dt);
+      vPrev = vCmd; wPrev = wCmd;
+
+      minClearAll = Math.min(minClearAll, bestInfo.minClear);
+      minTtcAll = Math.min(minTtcAll, bestInfo.minTtc);
+      socIntegral += bestInfo.jSoc;
+
+      for (Human h : humans) {
+        if (dist(s.x, s.y, h.x, h.y) &lt;= P.robotRadius + h.r) {
+          return new EpisodeOut(0.0, t * P.dt, minClearAll, minTtcAll, socIntegral);
+        }
+      }
+    }
+    return new EpisodeOut(0.0, Ttotal, minClearAll, minTtcAll, socIntegral);
+  }
+
+  public static void main(String[] args) {
+    Params P = new Params();
+    EpisodeOut out = runEpisode(0, P);
+    System.out.println("Episode metrics: {success=" + out.success +
+        ", time=" + out.time +
+        ", min_clear=" + out.minClear +
+        ", min_ttc=" + out.minTtc +
+        ", social=" + out.social + "}");
+
+    int N = 5;
+    double[] wS = new double[]{0.2, 0.7, 1.2};
+    double[] wT = new double[]{0.2, 0.6, 1.0};
+    for (double ws : wS) {
+      for (double wt : wT) {
+        Params Q = new Params();
+        Q.wSocial = ws;
+        Q.wTtc = wt;
+
+        double succ = 0.0, timeAvg = 0.0, clrAvg = 0.0, ttcAvg = 0.0, socAvg = 0.0;
+        for (int sd = 0; sd &lt; N; sd++) {
+          EpisodeOut e = runEpisode(sd, Q);
+          succ += e.success;
+          timeAvg += e.time;
+          clrAvg += e.minClear;
+          ttcAvg += e.minTtc;
+          socAvg += e.social;
+        }
+        System.out.println("w_social=" + ws + ", w_ttc=" + wt +
+            ", success_rate=" + (succ / N) +
+            ", time_avg=" + (timeAvg / N) +
+            ", min_clear_avg=" + (clrAvg / N) +
+            ", min_ttc_avg=" + (ttcAvg / N) +
+            ", social_avg=" + (socAvg / N));
+      }
+    }
+  }
+}
+      </code></pre>
+
+      <h3>6.4 MATLAB / Simulink</h3>
+      <p><strong>Chapter16_Lesson5.m</strong></p>
+      <pre><code class="language-matlab">
+function Chapter16_Lesson5()
+% ============================
+% Chapter16_Lesson5.m
+% Lab: Navigate Through Moving Crowds (baseline multi-objective sampler)
+% ============================
+
+P = defaultParams();
+
+out = runEpisode(0, P);
+disp(out);
+
+% small sweep
+seeds = 0:4;
+wS = [0.2, 0.7, 1.2];
+wT = [0.2, 0.6, 1.0];
+
+for i = 1:numel(wS)
+  for j = 1:numel(wT)
+    Q = P;
+    Q.w_social = wS(i);
+    Q.w_ttc = wT(j);
+
+    succ = 0; timeAvg = 0; clrAvg = 0; ttcAvg = 0; socAvg = 0;
+    for sd = seeds
+      e = runEpisode(sd, Q);
+      succ = succ + e.success;
+      timeAvg = timeAvg + e.time;
+      clrAvg = clrAvg + e.min_clear;
+      ttcAvg = ttcAvg + e.min_ttc;
+      socAvg = socAvg + e.social;
+    end
+    N = numel(seeds);
+    fprintf('w_social=%.2f, w_ttc=%.2f, success_rate=%.2f, time_avg=%.2f, min_clear_avg=%.3f, min_ttc_avg=%.3f, social_avg=%.3f\n', ...
+      Q.w_social, Q.w_ttc, succ/N, timeAvg/N, clrAvg/N, ttcAvg/N, socAvg/N);
+  end
+end
+
+end
+
+% ----------------------------
+% Parameters
+% ----------------------------
+function P = defaultParams()
+P.dt = 0.1;
+P.horizon = 2.0;
+P.robot_radius = 0.30;
+
+P.v_min = 0.0; P.v_max = 1.2;
+P.w_min = -1.5; P.w_max = 1.5;
+
+P.n_v = 11;
+P.n_w = 21;
+
+P.w_goal = 1.0;
+P.w_clear = 0.8;
+P.w_ttc = 0.6;
+P.w_social = 0.7;
+P.w_speed = 0.15;
+P.w_omega = 0.05;
+P.w_delta_u = 0.1;
+P.v_pref = 0.8;
+P.eps = 1e-6;
+
+P.sigma_front = 1.2;
+P.sigma_back = 0.6;
+P.sigma_y = 0.8;
+
+P.goal_tol = 0.35;
+P.T_total = 35.0;
+end
+
+% ----------------------------
+% Core functions
+% ----------------------------
+function a = wrapAngle(a)
+while a &gt; pi, a = a - 2*pi; end
+while a &lt; -pi, a = a + 2*pi; end
+end
+
+function s = stepUnicycle(s, v, w, dt)
+s.x = s.x + v*cos(s.theta)*dt;
+s.y = s.y + v*sin(s.theta)*dt;
+s.theta = wrapAngle(s.theta + w*dt);
+end
+
+function humans = predictHumansConstVel(humans, dt)
+humans.x = humans.x + humans.vx*dt;
+humans.y = humans.y + humans.vy*dt;
+end
+
+function d = dist(ax, ay, bx, by)
+d = hypot(ax-bx, ay-by);
+end
+
+function ttc = ttcDiscRel(px, py, vx, vy, R)
+A = vx*vx + vy*vy;
+B = 2*(px*vx + py*vy);
+C = px*px + py*py - R*R;
+if A &lt; 1e-12
+  if C &lt;= 0, ttc = 0; else, ttc = inf; end
+  return;
+end
+disc = B*B - 4*A*C;
+if disc &lt; 0
+  ttc = inf; return;
+end
+sd = sqrt(disc);
+t1 = (-B - sd) / (2*A);
+t2 = (-B + sd) / (2*A);
+cand = [t1, t2];
+cand = cand(cand &gt;= 0);
+if isempty(cand), ttc = inf; else, ttc = min(cand); end
+end
+
+function [dx, dy] = humanFrameComponents(relx, rely, hvx, hvy)
+sp = hypot(hvx, hvy);
+if sp &lt; 1e-12
+  fx = 1; fy = 0;
+else
+  fx = hvx/sp; fy = hvy/sp;
+end
+lx = -fy; ly = fx;
+dx = relx*fx + rely*fy;
+dy = relx*lx + rely*ly;
+end
+
+function val = socialPhi(rx, ry, h, P)
+relx = rx - h.x;
+rely = ry - h.y;
+[dx, dy] = humanFrameComponents(relx, rely, h.vx, h.vy);
+if dx &gt;= 0, sigma_x = P.sigma_front; else, sigma_x = P.sigma_back; end
+val = exp(-0.5*((dx*dx)/(sigma_x*sigma_x) + (dy*dy)/(P.sigma_y*P.sigma_y)));
+end
+
+function controls = sampleControls(P)
+if P.n_v &lt;= 1
+  v_list = 0.5*(P.v_min+P.v_max);
+else
+  v_list = linspace(P.v_min, P.v_max, P.n_v);
+end
+if P.n_w &lt;= 1
+  w_list = 0;
+else
+  w_list = linspace(P.w_min, P.w_max, P.n_w);
+end
+[V, W] = meshgrid(v_list, w_list);
+controls = [V(:), W(:)];
+end
+
+function [s0, goal, humans] = makeCrossingFlowScene(seed)
+rng(seed);
+
+s0.x = -4.0; s0.y = -4.0; s0.theta = deg2rad(45.0);
+goal = [4.0, 4.0];
+
+% flow1: left-&gt;right
+n1 = 10;
+x1 = -4 + 8*rand(n1,1);
+y1 = -1.2 + 2.4*rand(n1,1);
+vx1 = 0.4 + 0.5*rand(n1,1);
+vy1 = zeros(n1,1);
+
+% flow2: bottom-&gt;top
+n2 = 10;
+x2 = -1.2 + 2.4*rand(n2,1);
+y2 = -4 + 8*rand(n2,1);
+vx2 = zeros(n2,1);
+vy2 = 0.4 + 0.5*rand(n2,1);
+
+humans.x = [x1; x2];
+humans.y = [y1; y2];
+humans.vx = [vx1; vx2];
+humans.vy = [vy1; vy2];
+humans.r = 0.30*ones(n1+n2,1);
+end
+
+function [J, info] = rolloutAndScore(s0, humans0, goal, u, u_prev, P)
+v = u(1); w = u(2);
+dt = P.dt;
+N = max(1, floor(P.horizon/dt));
+
+s = s0;
+humans = humans0;
+
+min_clear = inf;
+min_ttc = inf;
+soc_sum = 0;
+
+for k = 1:N
+  s = stepUnicycle(s, v, w, dt);
+  humans = predictHumansConstVel(humans, dt);
+
+  vrx = v*cos(s.theta);
+  vry = v*sin(s.theta);
+
+  for i = 1:numel(humans.x)
+    R = P.robot_radius + humans.r(i);
+    d = dist(s.x, s.y, humans.x(i), humans.y(i));
+    clear = d - R;
+    min_clear = min(min_clear, clear);
+
+    prel = [s.x - humans.x(i), s.y - humans.y(i)];
+    vrel = [vrx - humans.vx(i), vry - humans.vy(i)];
+    ttc = ttcDiscRel(prel(1), prel(2), vrel(1), vrel(2), R);
+    min_ttc = min(min_ttc, ttc);
+
+    h.x = humans.x(i); h.y = humans.y(i);
+    h.vx = humans.vx(i); h.vy = humans.vy(i);
+    soc_sum = soc_sum + socialPhi(s.x, s.y, h, P);
+  end
+end
+
+goal_dist = dist(s.x, s.y, goal(1), goal(2));
+J_clear = 1/(min_clear + P.eps);
+J_ttc = 1/(min_ttc + P.eps);
+J_soc = soc_sum / N;
+
+J = P.w_goal*goal_dist + P.w_clear*J_clear + P.w_ttc*J_ttc + P.w_social*J_soc + ...
+    P.w_speed*(P.v_pref - v)^2 + P.w_omega*(w^2) + P.w_delta_u*((v-u_prev(1))^2 + (w-u_prev(2))^2);
+
+info.goal_dist = goal_dist;
+info.min_clear = min_clear;
+info.min_ttc = min_ttc;
+info.J_soc = J_soc;
+info.J_total = J;
+end
+
+function out = runEpisode(seed, P)
+[s, goal, humans] = makeCrossingFlowScene(seed);
+u_prev = [0, 0];
+
+steps = floor(P.T_total / P.dt);
+
+min_clear_all = inf;
+min_ttc_all = inf;
+soc_integral = 0;
+
+for t = 1:steps
+  if dist(s.x, s.y, goal(1), goal(2)) &lt; P.goal_tol
+    out.success = 1;
+    out.time = (t-1)*P.dt;
+    out.min_clear = min_clear_all;
+    out.min_ttc = min_ttc_all;
+    out.social = soc_integral;
+    return;
+  end
+
+  bestJ = inf;
+  bestU = [];
+  bestInfo = [];
+
+  controls = sampleControls(P);
+  for k = 1:size(controls,1)
+    u = controls(k,:);
+    [J, info] = rolloutAndScore(s, humans, goal, u, u_prev, P);
+    if info.min_clear &lt;= 0, continue; end
+    if J &lt; bestJ
+      bestJ = J;
+      bestU = u;
+      bestInfo = info;
+    end
+  end
+
+  if isempty(bestU)
+    v = 0; w = 0;
+    bestInfo.min_clear = -1;
+    bestInfo.min_ttc = 0;
+    bestInfo.J_soc = 0;
+  else
+    v = bestU(1); w = bestU(2);
+  end
+
+  s = stepUnicycle(s, v, w, P.dt);
+  humans = predictHumansConstVel(humans, P.dt);
+  u_prev = [v, w];
+
+  min_clear_all = min(min_clear_all, bestInfo.min_clear);
+  min_ttc_all = min(min_ttc_all, bestInfo.min_ttc);
+  soc_integral = soc_integral + bestInfo.J_soc;
+
+  % collision check
+  for i = 1:numel(humans.x)
+    if dist(s.x, s.y, humans.x(i), humans.y(i)) &lt;= (P.robot_radius + humans.r(i))
+      out.success = 0;
+      out.time = (t-1)*P.dt;
+      out.min_clear = min_clear_all;
+      out.min_ttc = min_ttc_all;
+      out.social = soc_integral;
+      return;
+    end
+  end
+end
+
+out.success = 0;
+out.time = P.T_total;
+out.min_clear = min_clear_all;
+out.min_ttc = min_ttc_all;
+out.social = soc_integral;
+end
+      </code></pre>
+
+      <h3>6.5 Wolfram Mathematica</h3>
+      <p><strong>Chapter16_Lesson5.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* ============================ *)
+(* Chapter16_Lesson5.nb        *)
+(* Lab: Navigate Through Moving Crowds (baseline multi-objective sampler) *)
+(* ============================ *)
+
+ClearAll["Global`*"];
+
+(* Parameters *)
+P = &lt;|
+   "dt" -&gt; 0.1,
+   "horizon" -&gt; 2.0,
+   "robotRadius" -&gt; 0.30,
+   "vMin" -&gt; 0.0, "vMax" -&gt; 1.2,
+   "wMin" -&gt; -1.5, "wMax" -&gt; 1.5,
+   "nV" -&gt; 11, "nW" -&gt; 21,
+   "wGoal" -&gt; 1.0,
+   "wClear" -&gt; 0.8,
+   "wTtc" -&gt; 0.6,
+   "wSocial" -&gt; 0.7,
+   "wSpeed" -&gt; 0.15,
+   "wOmega" -&gt; 0.05,
+   "wDeltaU" -&gt; 0.1,
+   "vPref" -&gt; 0.8,
+   "eps" -&gt; 10^-6,
+   "sigmaFront" -&gt; 1.2,
+   "sigmaBack" -&gt; 0.6,
+   "sigmaY" -&gt; 0.8,
+   "goalTol" -&gt; 0.35,
+   "Ttotal" -&gt; 35.0
+   |&gt;;
+
+WrapAngle[a_] := Module[{x = a},
+  While[x &gt; Pi, x -= 2 Pi];
+  While[x &lt; -Pi, x += 2 Pi];
+  x
+];
+
+StepUnicycle[s_, v_, w_, dt_] := Module[{x, y, th},
+  {x, y, th} = s;
+  {x + v Cos[th] dt, y + v Sin[th] dt, WrapAngle[th + w dt]}
+];
+
+PredictHumansConstVel[humans_, dt_] :=
+  humans /. {x_, y_, vx_, vy_, r_} :&gt; {x + vx dt, y + vy dt, vx, vy, r};
+
+Dist[a_, b_] := Norm[a - b];
+
+TTCDiscRel[p_, v_, R_] := Module[{A, B, C, disc, t1, t2, cand},
+  A = v.v;
+  B = 2 (p.v);
+  C = p.p - R^2;
+  If[A &lt; 10^-12, Return[If[C &lt;= 0, 0, Infinity]]];
+  disc = B^2 - 4 A C;
+  If[disc &lt; 0, Return[Infinity]];
+  t1 = (-B - Sqrt[disc])/(2 A);
+  t2 = (-B + Sqrt[disc])/(2 A);
+  cand = Select[{t1, t2}, # &gt;= 0 &amp;&amp; NumericQ[#] &amp;&amp; # &lt; Infinity &amp;];
+  If[cand === {}, Infinity, Min[cand]]
+];
+
+HumanFrameComponents[rel_, hv_] := Module[{sp, f, l, dx, dy},
+  sp = Norm[hv];
+  f = If[sp &lt; 10^-12, {1, 0}, hv/sp];
+  l = {-f[[2]], f[[1]]};
+  dx = rel.f;
+  dy = rel.l;
+  {dx, dy}
+];
+
+SocialPhi[robotPos_, h_, P_] := Module[{rel, hv, dx, dy, sigmaX, val},
+  rel = robotPos - h[[{1, 2}]];
+  hv = h[[{3, 4}]];
+  {dx, dy} = HumanFrameComponents[rel, hv];
+  sigmaX = If[dx &gt;= 0, P["sigmaFront"], P["sigmaBack"]];
+  val = Exp[-1/2 ((dx^2)/(sigmaX^2) + (dy^2)/(P["sigmaY"]^2))];
+  val
+];
+
+SampleControls[P_] := Module[{vList, wList},
+  vList = If[P["nV"] &lt;= 1, {0.5 (P["vMin"] + P["vMax"])},
+    Table[P["vMin"] + i (P["vMax"] - P["vMin"])/(P["nV"] - 1), {i, 0, P["nV"] - 1}]
+  ];
+  wList = If[P["nW"] &lt;= 1, {0},
+    Table[P["wMin"] + j (P["wMax"] - P["wMin"])/(P["nW"] - 1), {j, 0, P["nW"] - 1}]
+  ];
+  Flatten[Table[{v, w}, {v, vList}, {w, wList}], 1]
+];
+
+MakeCrossingFlowScene[seed_] := Module[{rng, s0, goal, humans, n1 = 10, n2 = 10,
+    unif, flow1, flow2},
+  rng = RandomGeneratorState[seed];
+  SeedRandom[seed];
+  s0 = {-4.0, -4.0, 45 Degree};
+  goal = {4.0, 4.0};
+  unif[a_, b_] := a + (b - a) RandomReal[];
+
+  flow1 = Table[{unif[-4, 4], unif[-1.2, 1.2], unif[0.4, 0.9], 0.0, 0.30}, {n1}];
+  flow2 = Table[{unif[-1.2, 1.2], unif[-4, 4], 0.0, unif[0.4, 0.9], 0.30}, {n2}];
+
+  humans = Join[flow1, flow2];
+  {s0, goal, humans}
+];
+
+RolloutAndScore[s0_, humans0_, goal_, u_, uPrev_, P_] :=
+ Module[{v = u[[1]], w = u[[2]], dt = P["dt"], N, s = s0, humans = humans0,
+   minClear = Infinity, minTtc = Infinity, socSum = 0.0, k, robotPos, vr,
+   h, R, d, clear, prel, vrel, ttc, goalDist, Jclear, Jttc, Jsoc, J},
+  N = Max[1, Floor[P["horizon"]/dt]];
+  For[k = 1, k &lt;= N, k++,
+   s = StepUnicycle[s, v, w, dt];
+   humans = PredictHumansConstVel[humans, dt];
+   robotPos = s[[{1, 2}]];
+   vr = v {Cos[s[[3]]], Sin[s[[3]]]};
+   Do[
+    h = humans[[i]];
+    R = P["robotRadius"] + h[[5]];
+    d = Dist[robotPos, h[[{1, 2}]]];
+    clear = d - R;
+    minClear = Min[minClear, clear];
+    prel = robotPos - h[[{1, 2}]];
+    vrel = vr - h[[{3, 4}]];
+    ttc = TTCDiscRel[prel, vrel, R];
+    minTtc = Min[minTtc, ttc];
+    socSum += SocialPhi[robotPos, h, P];
+    , {i, Length[humans]}];
+   ];
+  goalDist = Dist[s[[{1, 2}]], goal];
+  Jclear = 1/(minClear + P["eps"]);
+  Jttc = 1/(minTtc + P["eps"]);
+  Jsoc = socSum/N;
+  J = P["wGoal"] goalDist + P["wClear"] Jclear + P["wTtc"] Jttc + P["wSocial"] Jsoc +
+     P["wSpeed"] (P["vPref"] - v)^2 + P["wOmega"] w^2 + P["wDeltaU"] ((v - uPrev[[1]])^2 + (w - uPrev[[2]])^2);
+  {J, &lt;|"goalDist" -&gt; goalDist, "minClear" -&gt; minClear, "minTtc" -&gt; minTtc, "Jsoc" -&gt; Jsoc, "J" -&gt; J|&gt;}
+];
+
+RunEpisode[seed_, P_] := Module[{s0, goal, humans, s, uPrev = {0, 0}, steps, t,
+   minClearAll = Infinity, minTtcAll = Infinity, socIntegral = 0.0,
+   controls, bestJ, bestU, bestInfo, found, v, w},
+  {s0, goal, humans} = MakeCrossingFlowScene[seed];
+  s = s0;
+  steps = Floor[P["Ttotal"]/P["dt"]];
+  For[t = 1, t &lt;= steps, t++,
+   If[Dist[s[[{1, 2}]], goal] &lt; P["goalTol"],
+    Return[&lt;|"success" -&gt; 1, "time" -&gt; (t - 1) P["dt"], "minClear" -&gt; minClearAll, "minTtc" -&gt; minTtcAll, "social" -&gt; socIntegral|&gt;]
+   ];
+   controls = SampleControls[P];
+   bestJ = Infinity; found = False;
+   Do[
+    Module[{J, info},
+     {J, info} = RolloutAndScore[s, humans, goal, u, uPrev, P];
+     If[info["minClear"] &lt;= 0, Continue[]];
+     If[J &lt; bestJ, bestJ = J; bestU = u; bestInfo = info; found = True];
+     ],
+    {u, controls}];
+   If[!found,
+    v = 0; w = 0; bestInfo = &lt;|"minClear" -&gt; -1, "minTtc" -&gt; 0, "Jsoc" -&gt; 0|&gt;,
+    v = bestU[[1]]; w = bestU[[2]];
+   ];
+   s = StepUnicycle[s, v, w, P["dt"]];
+   humans = PredictHumansConstVel[humans, P["dt"]];
+   uPrev = {v, w};
+   minClearAll = Min[minClearAll, bestInfo["minClear"]];
+   minTtcAll = Min[minTtcAll, bestInfo["minTtc"]];
+   socIntegral += bestInfo["Jsoc"];
+   (* collision check *)
+   If[Min[Table[Dist[s[[{1, 2}]], humans[[i, {1, 2}]]] - (P["robotRadius"] + humans[[i, 5]]), {i, Length[humans]}]] &lt;= 0,
+    Return[&lt;|"success" -&gt; 0, "time" -&gt; (t - 1) P["dt"], "minClear" -&gt; minClearAll, "minTtc" -&gt; minTtcAll, "social" -&gt; socIntegral|&gt;]
+   ];
+  ];
+  &lt;|"success" -&gt; 0, "time" -&gt; P["Ttotal"], "minClear" -&gt; minClearAll, "minTtc" -&gt; minTtcAll, "social" -&gt; socIntegral|&gt;
+];
+
+(* Demo *)
+out = RunEpisode[0, P];
+Print["Episode metrics: ", out];
+
+(* Tiny sweep *)
+seeds = Range[0, 4];
+wS = {0.2, 0.7, 1.2};
+wT = {0.2, 0.6, 1.0};
+
+results = Flatten[
+  Table[
+    Module[{Q = P, succ = 0.0, timeSum = 0.0, clrSum = 0.0, ttcSum = 0.0, socSum = 0.0, e, Nn},
+      Q["wSocial"] = ws; Q["wTtc"] = wt;
+      Do[
+        e = RunEpisode[sd, Q];
+        succ += e["success"];
+        timeSum += e["time"];
+        clrSum += e["minClear"];
+        ttcSum += e["minTtc"];
+        socSum += e["social"];
+        , {sd, seeds}];
+      Nn = Length[seeds];
+      &lt;|"wSocial" -&gt; ws, "wTtc" -&gt; wt, "successRate" -&gt; succ/Nn,
+        "timeAvg" -&gt; timeSum/Nn, "minClearAvg" -&gt; clrSum/Nn,
+        "minTtcAvg" -&gt; ttcSum/Nn, "socialAvg" -&gt; socSum/Nn|&gt;
+    ],
+    {ws, wS}, {wt, wT}],
+  1
+];
+
+Print /@ results;
+      </code></pre>
+
+      <p>
+        <strong
+          >ROS/Navigation-stack integration note (optional extension).</strong
+        >
+        In ROS2 Nav2, the local planner/controller is typically implemented in
+        C++ as a plugin. As an extension, wrap the sampling planner inside a
+        controller plugin that consumes tracked people (e.g., from a perception
+        stack) and publishes <strong> \( v,\omega \)</strong> commands. This
+        extension is not required for the multi-language baseline but is
+        strongly recommended if you plan to deploy on a real platform.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (TTC derivation for discs):</strong>
+        Let <strong> \( \mathbf{p}_{rel} \)</strong> and
+        <strong> \( \mathbf{v}_{rel} \)</strong> be constant. Show that
+        collision between two discs of combined radius
+        <strong> \( R \)</strong> occurs iff the quadratic
+        <strong>
+          \( \|\mathbf{v}_{rel}\|^2 t^2 + 2(\mathbf{p}_{rel}^\top
+          \mathbf{v}_{rel}) t + (\|\mathbf{p}_{rel}\|^2 - R^2)=0 \)</strong
+        >
+        has a real root <strong> \( t \ge 0 \)</strong>, and derive the smallest
+        such root.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Starting from
+        <strong> \( \|\mathbf{p}_{rel} + t\mathbf{v}_{rel}\|^2 = R^2 \)</strong
+        >, expand:
+        <strong>
+          \( (\mathbf{p}_{rel} + t\mathbf{v}_{rel})^\top(\mathbf{p}_{rel} +
+          t\mathbf{v}_{rel})=R^2 \)</strong
+        >, giving:
+        <strong>
+          \( \|\mathbf{v}_{rel}\|^2 t^2 + 2(\mathbf{p}_{rel}^\top
+          \mathbf{v}_{rel}) t + (\|\mathbf{p}_{rel}\|^2 - R^2)=0 \)</strong
+        >. If the discriminant
+        <strong>
+          \( \Delta = 4(\mathbf{p}_{rel}^\top \mathbf{v}_{rel})^2 -
+          4\|\mathbf{v}_{rel}\|^2(\|\mathbf{p}_{rel}\|^2 - R^2) \)</strong
+        >
+        is negative, there is no real collision time. Otherwise the roots are:
+      </p>
+      <h4 class="mathJax">
+        \[ t_{1,2} = \frac{-2\,\mathbf{p}_{rel}^\top \mathbf{v}_{rel} \pm
+        \sqrt{\Delta}}{2\|\mathbf{v}_{rel}\|^2} = \frac{-\mathbf{p}_{rel}^\top
+        \mathbf{v}_{rel} \pm \sqrt{(\mathbf{p}_{rel}^\top \mathbf{v}_{rel})^2 -
+        \|\mathbf{v}_{rel}\|^2(\|\mathbf{p}_{rel}\|^2 -
+        R^2)}}{\|\mathbf{v}_{rel}\|^2}. \]
+      </h4>
+      <p>
+        The TTC is <strong> \( \min\{t_1,t_2\} \)</strong> among nonnegative
+        roots; if both are negative, TTC is <strong> \( +\infty \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (VO–TTC equivalence for constant velocity):</strong>
+        Prove that for fixed horizon <strong> \( T \)</strong> and constant
+        <strong> \( \mathbf{v}_j \)</strong>, the condition
+        <strong>
+          \( \mathbf{v}_r - \mathbf{v}_j \notin
+          \mathrm{VO}_j^T(\mathbf{p}_{rel}) \)</strong
+        >
+        holds iff <strong> \( \mathrm{TTC}_j &gt; T \)</strong> (or
+        <strong> \( \mathrm{TTC}_j = +\infty \)</strong>).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        By definition,
+        <strong> \( \mathbf{v}_{rel} \in \mathrm{VO}_j^T \)</strong> iff
+        <strong> \( \exists t\in[0,T] \)</strong> such that
+        <strong> \( \|\mathbf{p}_{rel} + t\mathbf{v}_{rel}\| \le R_j \)</strong
+        >. The earliest such time is exactly the TTC. Therefore
+        <strong> \( \mathbf{v}_{rel} \notin \mathrm{VO}_j^T \)</strong> iff no
+        collision occurs in <strong> \( [0,T] \)</strong>, i.e., TTC exceeds
+        <strong> \( T \)</strong> (or is infinite).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Discomfort anisotropy):</strong>
+        The discomfort field uses different spreads in front of and behind a
+        human. Show that <strong> \( \phi_j(\mathbf{p}) \)</strong> is
+        continuous but generally not differentiable at the line
+        <strong> \( d_x=0 \)</strong> when
+        <strong> \( \sigma_{front} \neq \sigma_{back} \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        For <strong> \( d_x \ge 0 \)</strong>,
+        <strong>
+          \( \phi = \exp(-\tfrac12(d_x^2/\sigma_{front}^2 + d_y^2/\sigma_y^2))
+          \)</strong
+        >. For <strong> \( d_x &lt; 0 \)</strong>, replace
+        <strong> \( \sigma_{front} \)</strong> by
+        <strong> \( \sigma_{back} \)</strong>. At <strong> \( d_x=0 \)</strong>,
+        both expressions evaluate to
+        <strong> \( \exp(-\tfrac12 d_y^2/\sigma_y^2) \)</strong>, hence
+        continuity. The derivative with respect to
+        <strong> \( d_x \)</strong> depends on
+        <strong> \( 1/\sigma_x^2 \)</strong>; if spreads differ, left/right
+        derivatives do not match.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Discrete-time safety sampling):</strong>
+        Assume the distance function to a moving disc boundary is 1-Lipschitz in
+        time with constant
+        <strong> \( L \)</strong> over a step <strong> \( \Delta t \)</strong>,
+        i.e., <strong> \( |c(t) - c(t_k)| \le L|t-t_k| \)</strong>. Show that if
+        <strong> \( c(t_k) &gt; L\Delta t \)</strong> then
+        <strong> \( c(t) &gt; 0 \)</strong> for all
+        <strong> \( t\in[t_k,t_{k+1}] \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        For any <strong> \( t\in[t_k,t_{k+1}] \)</strong>,
+        <strong>
+          \( c(t) \ge c(t_k) - L|t-t_k| \ge c(t_k) - L\Delta t &gt; 0 \)</strong
+        >. This justifies using sufficiently small
+        <strong> \( \Delta t \)</strong> for discrete collision checks.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Weight tuning and failure modes):</strong>
+        Explain qualitatively why too large <strong> \( w_s \)</strong> can
+        cause “freezing” (robot stops), while too small
+        <strong> \( w_s \)</strong> can cause socially unacceptable
+        near-cutting.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        With large <strong> \( w_s \)</strong>, the optimizer strongly penalizes
+        proximity to humans, so the minimum-cost action may be to stop and wait
+        for the field to dissipate (especially if all forward motions incur high
+        social penalty). With small <strong> \( w_s \)</strong>,
+        progress-to-goal dominates and the planner chooses aggressive
+        gap-cutting trajectories that are safe geometrically but violate comfort
+        norms.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        You implemented a crowd-aware local planner by extending sampling-based
+        local motion generation to dynamic obstacles using TTC/VO reasoning and
+        a socially aware discomfort field. You designed evaluation metrics, ran
+        repeated-seed experiments, and learned how weight tuning trades off
+        speed, safety margin, and human comfort in dense crowds.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Fiorini, P., &amp; Shiller, Z. (1998). Motion planning in dynamic
+        environments using velocity obstacles.
+        <em>International Journal of Robotics Research</em>, 17(7), 760–772.
+      </li>
+      <li>
+        van den Berg, J., Guy, S.J., Lin, M., &amp; Manocha, D. (2011).
+        Reciprocal n-body collision avoidance.
+        <em>Robotics Research</em> (Springer Tracts in Advanced Robotics), 70,
+        3–19.
+      </li>
+      <li>
+        Helbing, D., &amp; Molnár, P. (1995). Social force model for pedestrian
+        dynamics.
+        <em>Physical Review E</em>, 51(5), 4282–4286.
+      </li>
+      <li>
+        Trautman, P., &amp; Krause, A. (2010). Unfreezing the robot: Navigation
+        in dense, interacting crowds.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 797–803.
+      </li>
+      <li>
+        Kruse, T., Pandey, A.K., Alami, R., &amp; Kirsch, A. (2013). Human-aware
+        robot navigation: A survey.
+        <em>Robotics and Autonomous Systems</em>, 61(12), 1726–1743.
+      </li>
+      <li>
+        Everett, M., Chen, Y.F., &amp; How, J.P. (2018). Motion planning among
+        dynamic, decision-making agents with deep reinforcement learning.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 3052–3059.
+      </li>
+      <li>
+        Kretzschmar, H., Spies, M., Sprunk, C., &amp; Burgard, W. (2016).
+        Socially compliant mobile robot navigation via inverse reinforcement
+        learning.
+        <em>International Journal of Robotics Research</em>, 35(11), 1289–1307.
+      </li>
+      <li>
+        Rios-Martinez, J., Spalanzani, A., &amp; Laugier, C. (2015). From
+        proxemics theory to socially-aware navigation: A survey.
+        <em>International Journal of Social Robotics</em>, 7(2), 137–153.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter16/Lesson4.html">
+          Lesson 4: Prediction-Aware Local Navigation
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter17/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Frontier-Based Exploration
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="active-lesson" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

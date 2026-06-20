@@ -1,0 +1,1733 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 15: Learning-Augmented Control (Non-RL Focus) - Lesson 5: Lab: Learning Residual Dynamics for Better Tracking | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 15: Learning-Augmented Control (Non-RL Focus)</h1>
+    <h3>
+      <strong
+        >Lesson 5: Lab: Learning Residual Dynamics for Better Tracking</strong
+      >
+    </h3>
+    <p>
+      This lab implements a learning-augmented controller for a robot joint (or
+      a low-DOF manipulator) by identifying a residual dynamics model on top of
+      an existing model-based controller (e.g., computed-torque). We go from
+      mathematical formulation to a complete simulation and controller code in
+      Python, C++, Java, MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Setup -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Setup</h2>
+    <div class="down-content">
+      <p>
+        We consider a robot manipulator with known nominal rigid-body dynamics
+        and unknown modeling errors (unmodeled friction, flexibilities,
+        actuation imperfections). The true joint-space dynamics are
+      </p>
+      <h4 class="mathJax">
+        \[ M(q)\ddot q + C(q,\dot q)\dot q + g(q) + d(q,\dot q,\ddot q) =
+        &bsol;tau, \]
+      </h4>
+      <p>
+        where <strong>\( q \in \mathbb{R}^n \)</strong>,
+        <strong>\( M(q) \)</strong> is the inertia matrix,
+        <strong>\( C(q,\dot q)\dot q \)</strong> the Coriolis/centrifugal term,
+        <strong>\( g(q) \)</strong> gravity, and
+        <strong>\( d(\cdot) \)</strong> is an unknown disturbance / modeling
+        error. We only have a <em>nominal model</em>
+      </p>
+      <h4 class="mathJax">
+        \[ M_n(q)\ddot q + C_n(q,\dot q)\dot q + g_n(q) \approx &bsol;tau. \]
+      </h4>
+      <p>The goal of this lab is to:</p>
+      <ul>
+        <li>Implement a <em>nominal model-based tracking controller</em>.</li>
+        <li>
+          Collect data under this controller and estimate a residual map
+          <strong>\( r^\star(z) \)</strong> that approximates the missing
+          dynamics, where <strong>\( z \)</strong> is a feature vector built
+          from <strong>\( (q,\dot q,\ddot q_d) \)</strong>.
+        </li>
+        <li>
+          Close the loop with a <em>learning-augmented controller</em>
+          <strong
+            >\( &bsol;tau = &bsol;tau_{\mathrm{nom}} + \hat r_\theta(z)
+            \)</strong
+          >
+          and compare tracking performance.
+        </li>
+        <li>
+          Check (at least qualitatively) that the learned residual preserves the
+          stability guarantees from the nominal design (by bounding the
+          residual).
+        </li>
+      </ul>
+      <p>The overall experimental flow is illustrated below.</p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  T["Desired trajectory q_d(t)"] --> N["Nominal controller tau_nom(q, qdot, qd, qd_dot, qd_ddot)"]
+  N --> R["Robot (true dynamics)"]
+  R --> S["Sensors (q, qdot, tau)"]
+  S --> L["Log data and build dataset (z_k, y_k)"]
+  L --> F["Fit residual model hat r_theta(z)"]
+  F --> C["Updated controller tau = tau_nom + hat r_theta(z)"]
+  C --> R
+        </pre>
+      </div>
+      <p>
+        We will use a low-DOF case (1-DOF or 2-DOF) in code, but the derivations
+        are valid for general manipulators.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Nominal Computed-Torque Tracking and Error Dynamics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Nominal Computed-Torque Tracking and Error Dynamics</h2>
+    <div class="down-content">
+      <p>
+        Let the desired joint trajectory be
+        <strong>\( q_d(t) \)</strong>, with derivatives
+        <strong>\( \dot q_d(t), \ddot q_d(t) \)</strong>. Define tracking error
+        and its derivative as
+      </p>
+      <h4 class="mathJax">
+        \[ e = q - q_d, \quad \dot e = \dot q - \dot q_d. \]
+      </h4>
+      <p>
+        The standard computed-torque controller built on the
+        <em>nominal</em> model is
+      </p>
+      <h4 class="mathJax">
+        \[ &bsol;tau_{\mathrm{nom}}(t) = M_n(q)\bigl(\ddot q_d - K_d \dot e -
+        K_p e\bigr) + C_n(q,\dot q)\dot q + g_n(q), \]
+      </h4>
+      <p>
+        where <strong>\( K_p, K_d \)</strong> are positive-definite gain
+        matrices. Substituting
+        <strong>\( &bsol;tau = &bsol;tau_{\mathrm{nom}} \)</strong> into the
+        <em>true</em> dynamics, we obtain
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} M(q)\ddot q + C(q,\dot q)\dot q + g(q) + d(q,\dot
+        q,\ddot q) &= M_n(q)\bigl(\ddot q_d - K_d \dot e - K_p e\bigr) +
+        C_n(q,\dot q)\dot q + g_n(q). \end{aligned} \]
+      </h4>
+      <p>
+        Rearranging and expressing in terms of the tracking error dynamics, we
+        get
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} M(q)\ddot e + C(q,\dot q)\dot e + K_d M_n(q)\dot e +
+        K_p M_n(q) e = \Delta(q,\dot q,\ddot q_d), \end{aligned} \]
+      </h4>
+      <p>
+        where the <em>lumped disturbance</em>
+        <strong>\( \Delta \)</strong> collects both the physical disturbance
+        <strong>\( d \)</strong> and the nominal model mismatch
+        <strong>\( M_n - M, C_n - C, g_n - g \)</strong>. Under mild assumptions
+        and sufficiently large gains, the nominal controller renders the origin
+        <strong>\( e=\dot e=0 \)</strong> input-to-state stable (ISS) with
+        respect to <strong>\( \Delta \)</strong>. Thus, if
+        <strong>\( \|\Delta\| \)</strong> is small, the tracking error remains
+        small; but if modeling errors are large, performance is limited.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Residual Dynamics Model and Closed-Loop Structure -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Residual Dynamics Model and Closed-Loop Structure</h2>
+    <div class="down-content">
+      <p>
+        We introduce a <em>residual torque</em> map
+        <strong>\( r^\star(z) \in \mathbb{R}^n \)</strong> that approximates the
+        unknown lumped disturbance <strong>\( \Delta \)</strong>. The feature
+        vector <strong>\( z \)</strong> is built from the measured state and
+        desired motion:
+      </p>
+      <h4 class="mathJax">
+        \[ z = \phi(q, \dot q, \ddot q_d) = \begin{bmatrix} q \\ \dot q \\ \ddot
+        q_d \end{bmatrix} \in \mathbb{R}^{3n}. \]
+      </h4>
+      <p>
+        During learning, we estimate a parameterized model
+        <strong>\( \hat r_\theta(z) \)</strong> and define the
+        learning-augmented control law
+      </p>
+      <h4 class="mathJax">
+        \[ &bsol;tau(t) = &bsol;tau_{\mathrm{nom}}(t) + \hat
+        r_\theta\bigl(z(t)\bigr). \]
+      </h4>
+      <p>A reasonable target for the residual is the <em>torque error</em>:</p>
+      <h4 class="mathJax">
+        \[ y_k = &bsol;tau_k - &bsol;tau_{\mathrm{nom}}(z_k) \approx
+        r^\star(z_k) \]
+      </h4>
+      <p>
+        obtained from experiments with the baseline controller. After fitting
+        <strong>\( \hat r_\theta \)</strong> on the dataset
+        <strong>\( \{(z_k,y_k)\}_{k=1}^N \)</strong>, we use it online to
+        augment the control.
+      </p>
+      <p>
+        To reason about stability, let
+        <strong>\( \tilde r(z) = r^\star(z) - \hat r_\theta(z) \)</strong>. The
+        error dynamics become
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} M(q)\ddot e + C(q,\dot q)\dot e + K_d M_n(q)\dot e +
+        K_p M_n(q) e = \tilde r(z). \end{aligned} \]
+      </h4>
+      <p>Using the Lyapunov candidate</p>
+      <h4 class="mathJax">
+        \[ V(e,\dot e) = \tfrac{1}{2}\dot e^\top M(q)\dot e + \tfrac{1}{2}
+        e^\top K_p e, \]
+      </h4>
+      <p>
+        one obtains (using standard manipulator properties and the skew-symmetry
+        of <strong>\( \dot M - 2C \)</strong>) an inequality of the form
+      </p>
+      <h4 class="mathJax">
+        \[ \dot V \leq -\alpha_1 \|\dot e\|^2 - \alpha_2 \|e\|^2 + \beta \|\dot
+        e\| \,\|\tilde r(z)\|, \]
+      </h4>
+      <p>
+        for some positive constants
+        <strong>\( \alpha_1, \alpha_2, \beta \)</strong>. If we enforce a bound
+        on the residual error
+        <strong>\( \|\tilde r(z)\| \leq \bar r \)</strong> for all reachable
+        <strong>\( z \)</strong> (e.g., by gain scheduling, filtering, or
+        saturation of <strong>\( \hat r_\theta \)</strong>), then the origin is
+        ISS with respect to <strong>\( \bar r \)</strong>. This motivates
+        <em>conservative residual usage</em> in the lab.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Data Collection Protocol -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Data Collection Protocol</h2>
+    <div class="down-content">
+      <p>
+        We now describe the procedure to generate training data for the residual
+        model in simulation (and analogously on real hardware). We assume sensor
+        access to <strong>\( q(t), \dot q(t) \)</strong> and the applied torque
+        <strong>\( &bsol;tau(t) \)</strong>.
+      </p>
+      <ol>
+        <li>
+          Choose a rich set of reference trajectories
+          <strong>\( q_d^{(j)}(t) \)</strong>, for
+          <strong>\( j = 1,\dots,J \)</strong>, that sufficiently excite the
+          dynamics (e.g., sinusoids with different frequencies, chirps).
+        </li>
+        <li>
+          For each trajectory, run the nominal controller
+          <strong>\( &bsol;tau_{\mathrm{nom}}(t) \)</strong> without residuals
+          and log
+          <strong
+            >\( \{q(t_k), \dot q(t_k), \ddot q_d(t_k), &bsol;tau(t_k)\}
+            \)</strong
+          >
+          at sampling times <strong>\( t_k \)</strong>.
+        </li>
+        <li>
+          For each sample, construct
+          <strong>\( z_k = \phi(q(t_k),\dot q(t_k),\ddot q_d(t_k)) \)</strong>
+          and target
+          <strong
+            >\( y_k = &bsol;tau(t_k) - &bsol;tau_{\mathrm{nom}}(z_k) \)</strong
+          >.
+        </li>
+        <li>
+          Aggregate the dataset
+          <strong>\( \mathcal{D} = \{(z_k,y_k)\}_{k=1}^N \)</strong> and use it
+          to fit a regression model
+          <strong>\( \hat r_\theta \)</strong> (Gaussian Process, kernel ridge
+          regression, small neural network, etc.).
+        </li>
+        <li>
+          Validate on held-out trajectories and quantify prediction error versus
+          torque magnitude to choose safe bounds for online compensation.
+        </li>
+      </ol>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Run nominal controller"] --> B["Log (q, qdot, qd_ddot, tau)"]
+  B --> C["Build features z_k and targets y_k"]
+  C --> D["Fit regressor hat r_theta(z)"]
+  D --> E["Validate and bound residual error"]
+  E --> F["Deploy in closed loop with saturation"]
+        </pre>
+      </div>
+      <p>
+        In the remainder of the lab, we will instantiate this procedure first in
+        Python, then sketch implementations in C++, Java, MATLAB/Simulink, and
+        Mathematica.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Python Implementation (1-DOF Residual Learning Lab) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Python Implementation: 1-DOF Residual Learning Lab</h2>
+    <div class="down-content">
+      <p>We consider a 1-DOF rotary joint with true dynamics</p>
+      <h4 class="mathJax">
+        \[ m_{\mathrm{true}} \ddot q + b_{\mathrm{true}} \dot q +
+        g_{\mathrm{true}}\sin(q) + d(q,\dot q) = &bsol;tau, \]
+      </h4>
+      <p>
+        and a nominal model that ignores nonlinear friction and uses slightly
+        wrong parameters. We implement:
+      </p>
+      <ul>
+        <li>Nominal computed-torque tracking.</li>
+        <li>
+          Data collection and Gaussian Process regression of the residual.
+        </li>
+        <li>Closed-loop evaluation with the learned residual.</li>
+      </ul>
+      <pre><code class="language-python">
+import numpy as np
+
+# Optional: scikit-learn for Gaussian Processes
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+
+# True parameters
+m_true = 1.2
+b_true = 0.3
+g_true = 9.81
+
+# Nominal parameters (slightly wrong)
+m_nom = 1.0
+b_nom = 0.1
+g_nom = 9.81
+
+# Unknown disturbance term (unmodeled dynamics)
+def disturbance(q, qd):
+    # Smooth but nonlinear "extra" friction and flex effect
+    return 0.4 * np.sin(2.0 * q) + 0.05 * qd**3
+
+def true_dynamics(q, qd, tau):
+    d = disturbance(q, qd)
+    qdd = (tau - b_true * qd - g_true * np.sin(q) - d) / m_true
+    return qdd, d
+
+def nominal_torque(q, qd, qd_des, qdd_des, Kp, Kd):
+    e = q - qd_des
+    edot = qd - (qd_des)  # qd_des is dot(q_d); passed in explicitly
+    v = qdd_des - Kd * edot - Kp * e
+    tau_nom = m_nom * v + b_nom * qd + g_nom * np.sin(q)
+    return tau_nom
+
+# Desired trajectory (moderately rich)
+def desired_trajectory(t):
+    # q_d(t), qd_d(t), qdd_d(t)
+    A = 0.7
+    w = 0.7
+    qd = A * np.sin(w * t)
+    qd_dot = A * w * np.cos(w * t)
+    qd_ddot = -A * w**2 * np.sin(w * t)
+    return qd, qd_dot, qd_ddot
+
+# Simulation parameters
+dt = 0.002
+T = 12.0
+N = int(T / dt)
+
+Kp = 25.0
+Kd = 10.0
+
+def rollout(with_residual=False, gpr=None, r_max=2.0, collect_data=False):
+    q = 0.0
+    qd = 0.0
+    qs = []
+    qds = []
+    qd_des_list = []
+    qdd_des_list = []
+    taus = []
+    Z = []
+    Y = []
+
+    for k in range(N):
+        t = k * dt
+        qd_des, qd_dot_des, qdd_des = desired_trajectory(t)
+        tau_nom = nominal_torque(q, qd, qd_des, qdd_des, Kp, Kd)
+
+        z = np.array([q, qd, qd_des, qdd_des], dtype=float)
+
+        if with_residual and gpr is not None:
+            # Predict residual and saturate
+            r_hat = gpr.predict(z.reshape(1, -1))[0]
+            r_hat = float(np.clip(r_hat, -r_max, r_max))
+        else:
+            r_hat = 0.0
+
+        tau = tau_nom + r_hat
+
+        # True dynamics integration (semi-implicit Euler)
+        qdd, d_true = true_dynamics(q, qd, tau)
+        qd = qd + dt * qdd
+        q = q + dt * qd
+
+        # Store logs
+        qs.append(q)
+        qds.append(qd)
+        qd_des_list.append(qd_des)
+        qdd_des_list.append(qdd_des)
+        taus.append(tau)
+
+        if collect_data:
+            y = tau - tau_nom   # target residual
+            Z.append(z)
+            Y.append(y)
+
+    result = {
+        "q": np.array(qs),
+        "qd": np.array(qds),
+        "q_d": np.array(qd_des_list),
+        "qd_d": np.gradient(np.array(qd_des_list), dt),
+        "qdd_d": np.array(qdd_des_list),
+        "tau": np.array(taus),
+    }
+    if collect_data:
+        result["Z"] = np.array(Z)
+        result["Y"] = np.array(Y)
+    return result
+
+# 1) Collect data under nominal controller
+nominal_run = rollout(with_residual=False, collect_data=True)
+Z_train = nominal_run["Z"]
+Y_train = nominal_run["Y"]
+
+# 2) Fit a scalar-output GP residual model
+kernel = 1.0 * RBF(length_scale=0.5) + WhiteKernel(noise_level=1e-4)
+gpr = GaussianProcessRegressor(kernel=kernel, alpha=0.0, normalize_y=True)
+gpr.fit(Z_train, Y_train)
+
+print("Fitted GP kernel:", gpr.kernel_)
+
+# 3) Evaluate tracking with and without residual
+baseline = rollout(with_residual=False, collect_data=False)
+augmented = rollout(with_residual=True, gpr=gpr, r_max=2.0, collect_data=False)
+
+# 4) Compute RMS tracking error
+def rms(x):
+    return np.sqrt(np.mean(x**2))
+
+err_base = baseline["q"] - baseline["q_d"]
+err_aug = augmented["q"] - augmented["q_d"]
+
+print("RMS error baseline :", rms(err_base))
+print("RMS error augmented:", rms(err_aug))
+      </code></pre>
+      <p>In a full lab, the students should:</p>
+      <ul>
+        <li>
+          Plot <strong>\( q(t) \)</strong> versus
+          <strong>\( q_d(t) \)</strong> for both controllers.
+        </li>
+        <li>
+          Plot the learned residual
+          <strong>\( \hat r_\theta(z_k) \)</strong> against the true lumped
+          disturbance (which is known in simulation).
+        </li>
+        <li>
+          Experiment with different kernels, data lengths, and saturation levels
+          <strong>\( r_{\max} \)</strong> to observe tracking vs safety
+          trade-offs.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: C++ Implementation Sketch with Eigen -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. C++ Implementation Sketch with Eigen</h2>
+    <div class="down-content">
+      <p>
+        In C++, we typically rely on a robotics dynamics library (e.g., RBDL,
+        Pinocchio) to compute the nominal torque and use <code>Eigen</code> for
+        linear algebra. Here is a minimal sketch for a 1-DOF joint using an RBF
+        (Radial Basis Function) residual model implemented from scratch.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+
+struct RBFResidual {
+    // phi(z) = exp(-gamma * ||z - c_j||^2) for j = 1..M
+    std::vector&lt;Eigen::VectorXd&gt; centers;
+    Eigen::VectorXd weights;
+    double gamma;
+
+    double predict(const Eigen::VectorXd&amp; z) const {
+        const int M = static_cast&lt;int&gt;(centers.size());
+        Eigen::VectorXd phi(M);
+        for (int j = 0; j &lt; M; ++j) {
+            double r2 = (z - centers[j]).squaredNorm();
+            phi(j) = std::exp(-gamma * r2);
+        }
+        return weights.dot(phi);
+    }
+};
+
+double nominal_torque(double q, double qd, double qd_des,
+                      double qdd_des, double Kp, double Kd,
+                      double m_nom, double b_nom, double g_nom)
+{
+    double e = q - qd_des;
+    double edot = qd - qd_des; // qd_des is dot(q_d)
+    double v = qdd_des - Kd * edot - Kp * e;
+    double tau_nom = m_nom * v + b_nom * qd + g_nom * std::sin(q);
+    return tau_nom;
+}
+
+double saturate(double x, double r_max) {
+    if (x &gt; r_max) return r_max;
+    if (x &lt; -r_max) return -r_max;
+    return x;
+}
+
+// In the control loop (pseudo-code):
+// 1. Build feature vector z = [q, qd, qd_des, qdd_des]^T
+// 2. Compute tau_nom
+// 3. Compute residual r_hat = saturate(rbf.predict(z), r_max)
+// 4. Apply tau = tau_nom + r_hat
+void controller_step(double q, double qd,
+                     double qd_des, double qdd_des,
+                     const RBFResidual&amp; rbf,
+                     double Kp, double Kd,
+                     double m_nom, double b_nom, double g_nom,
+                     double r_max,
+                     double&amp; tau_out)
+{
+    Eigen::VectorXd z(4);
+    z &lt;&lt; q, qd, qd_des, qdd_des;
+
+    double tau_nom = nominal_torque(q, qd, qd_des, qdd_des,
+                                    Kp, Kd, m_nom, b_nom, g_nom);
+    double r_hat = saturate(rbf.predict(z), r_max);
+    tau_out = tau_nom + r_hat;
+}
+      </code></pre>
+      <p>
+        In a full implementation, the centers and weights of
+        <code>RBFResidual</code> are learned offline by solving a regularized
+        least-squares problem using the dataset
+        <strong>\( \{(z_k,y_k)\} \)</strong> collected under the nominal
+        controller.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Java Implementation Sketch with EJML -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Java Implementation Sketch with EJML</h2>
+    <div class="down-content">
+      <p>
+        Java is less common for low-level robot control, but libraries like
+        <code>EJML</code> provide matrix support. Below is a conceptual sketch
+        using a simple linear residual model
+        <strong>\( \hat r_\theta(z) = w^\top z \)</strong> that has been learned
+        offline.
+      </p>
+      <pre><code class="language-java">
+import org.ejml.simple.SimpleMatrix;
+
+public class ResidualController1DOF {
+    private final double mNom;
+    private final double bNom;
+    private final double gNom;
+    private final double Kp;
+    private final double Kd;
+    private final SimpleMatrix w; // 4x1 vector of learned weights
+    private final double rMax;
+
+    public ResidualController1DOF(double mNom, double bNom, double gNom,
+                                  double Kp, double Kd,
+                                  SimpleMatrix w, double rMax) {
+        this.mNom = mNom;
+        this.bNom = bNom;
+        this.gNom = gNom;
+        this.Kp = Kp;
+        this.Kd = Kd;
+        this.w = w;
+        this.rMax = rMax;
+    }
+
+    private double nominalTorque(double q, double qd,
+                                 double qdDes, double qddDes) {
+        double e = q - qdDes;
+        double edot = qd - qdDes;
+        double v = qddDes - Kd * edot - Kp * e;
+        return mNom * v + bNom * qd + gNom * Math.sin(q);
+    }
+
+    private double saturate(double x) {
+        if (x &gt; rMax) return rMax;
+        if (x &lt; -rMax) return -rMax;
+        return x;
+    }
+
+    public double computeTorque(double q, double qd,
+                                double qdDes, double qddDes) {
+        // z = [q, qd, qdDes, qddDes]^T
+        double[] zArr = new double[] { q, qd, qdDes, qddDes };
+        SimpleMatrix z = new SimpleMatrix(4, 1, true, zArr);
+
+        double tauNom = nominalTorque(q, qd, qdDes, qddDes);
+        double rHat = w.dot(z);
+        rHat = saturate(rHat);
+
+        return tauNom + rHat;
+    }
+}
+      </code></pre>
+      <p>
+        The weight vector <code>w</code> is obtained by solving a ridge
+        regression problem on <strong>\( (z_k,y_k) \)</strong>. In a teaching
+        lab, students can implement the least-squares solution
+        <strong>\( w = (Z^\top Z + \lambda I)^{-1} Z^\top y \)</strong> using
+        EJML.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is widely used for control and Simulink is convenient for
+        simulation. We outline:
+      </p>
+      <ul>
+        <li>
+          A MATLAB script to simulate the nominal controller and collect data.
+        </li>
+        <li>
+          Residual learning via <code>fitrgp</code> (Gaussian Process
+          regression).
+        </li>
+        <li>
+          Integration of the learned residual into a Simulink model via a MATLAB
+          Function block.
+        </li>
+      </ul>
+      <pre><code class="language-matlab">
+% Parameters
+m_true = 1.2; b_true = 0.3; g_true = 9.81;
+m_nom  = 1.0; b_nom  = 0.1; g_nom  = 9.81;
+Kp = 25; Kd = 10;
+
+dt = 0.002;
+T  = 12.0;
+t  = 0:dt:T;
+N  = numel(t);
+
+q  = 0;
+qd = 0;
+
+Z = zeros(N,4);
+Y = zeros(N,1);
+
+disturbance = @(q, qd) 0.4 * sin(2*q) + 0.05 * qd.^3;
+
+for k = 1:N
+    tk = t(k);
+    A = 0.7; w = 0.7;
+    qd_des    = A * sin(w * tk);
+    qd_dotdes = A * w * cos(w * tk);
+    qdd_des   = -A * w^2 * sin(w * tk);
+
+    e    = q - qd_des;
+    edot = qd - qd_dotdes;
+    v    = qdd_des - Kd * edot - Kp * e;
+    tau_nom = m_nom * v + b_nom * qd + g_nom * sin(q);
+
+    d_true = disturbance(q, qd);
+    qdd    = (tau_nom - b_true * qd - g_true * sin(q) - d_true) / m_true;
+
+    % Euler integration
+    qd = qd + dt * qdd;
+    q  = q  + dt * qd;
+
+    Z(k,:) = [q, qd, qd_des, qdd_des];
+    Y(k)   = tau_nom - (m_nom * v + b_nom * qd + g_nom * sin(q)); % torque error
+end
+
+% Fit a GP residual model
+gprMdl = fitrgp(Z, Y, "BasisFunction", "none", ...
+                       "KernelFunction", "squaredexponential", ...
+                       "Sigma", 1e-3);
+
+% Save the model for Simulink
+save("residualGP.mat", "gprMdl");
+      </code></pre>
+      <p>In Simulink:</p>
+      <ol>
+        <li>
+          Create a block diagram with a plant block representing the joint
+          dynamics and a nominal computed-torque controller.
+        </li>
+        <li>
+          Add a MATLAB Function block that:
+          <ul>
+            <li>Loads <code>gprMdl</code> from the workspace.</li>
+            <li>Builds the feature vector <strong>\( z \)</strong>.</li>
+            <li>
+              Calls <code>predict(gprMdl, z')</code> to compute the residual.
+            </li>
+            <li>Saturates the residual and adds it to <code>tau_nom</code>.</li>
+          </ul>
+        </li>
+        <li>
+          Run the simulation with and without enabling the residual for
+          comparison.
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Mathematica has built-in Gaussian Process and regression capabilities.
+        The following code shows how to fit a residual model from simulated data
+        (generation analogous to the Python or MATLAB script) and use it for
+        closed-loop simulation.
+      </p>
+      <pre><code class="language-mathematica">
+(* Assume data has been generated in some way as lists qList, qdList,
+   qdDesList, qddDesList, tauList, tauNomList of equal length. *)
+
+zData = Transpose[{qList, qdList, qdDesList, qddDesList}];
+yData = tauList - tauNomList;
+
+trainData = Thread[zData -&gt; yData];
+
+(* Gaussian process regression model *)
+gpModel = GaussianProcessRegression[trainData];
+
+(* Residual-augmented torque function *)
+tauAugmented[q_, qd_, qdDes_, qddDes_] := Module[
+  {z, tauNom, rHat, rMax = 2.0},
+  z = {q, qd, qdDes, qddDes};
+  tauNom = tauNominal[q, qd, qdDes, qddDes]; (* user-defined nominal torque *)
+  rHat = Mean[gpModel[z]];
+  rHat = Clip[rHat, {-rMax, rMax}];
+  tauNom + rHat
+];
+
+(* Example of numerical simulation using NDSolve *)
+mTrue = 1.2; bTrue = 0.3; gTrue = 9.81;
+disturbance[q_, qd_] := 0.4*Sin[2 q] + 0.05*qd^3;
+
+eqns = {
+  q''[t] == (tauAugmented[q[t], q'[t], qdDes[t], qddDes[t]] -
+              bTrue*q'[t] - gTrue*Sin[q[t]] -
+              disturbance[q[t], q'[t]])/mTrue,
+  q[0] == 0, q'[0] == 0
+};
+
+sol = NDSolve[eqns, {q}, {t, 0, 12}];
+      </code></pre>
+      <p>
+        Here <code>qdDes[t]</code> and <code>qddDes[t]</code> are symbolic
+        definitions of the desired trajectory and its derivatives, and
+        <code>tauNominal</code> is the nominal computed-torque controller.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Residual Target Derivation):</strong>
+        Consider the true dynamics
+        <strong
+          >\( M(q)\ddot q + C(q,\dot q)\dot q + g(q) + d(q,\dot q,\ddot q) =
+          &bsol;tau \)</strong
+        >
+        and the nominal model-based controller
+        <strong>\( &bsol;tau_{\mathrm{nom}}(z) \)</strong> built from
+        <strong>\( (q,\dot q,\ddot q_d) \)</strong>. Show that the ideal
+        residual torque <strong>\( r^\star(z_k) \)</strong> at time
+        <strong>\( t_k \)</strong> can be expressed as
+        <strong
+          >\( r^\star(z_k) = &bsol;tau_k - &bsol;tau_{\mathrm{nom}}(z_k)
+          \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        From the true dynamics at time <strong>\( t_k \)</strong> we have
+      </p>
+      <h4 class="mathJax">
+        \[ M(q_k)\ddot q_k + C(q_k,\dot q_k)\dot q_k + g(q_k) + d(q_k,\dot
+        q_k,\ddot q_k) = &bsol;tau_k. \]
+      </h4>
+      <p>
+        Suppose we use the control law
+        <strong
+          >\( &bsol;tau_k = &bsol;tau_{\mathrm{nom}}(z_k) + r^\star(z_k)
+          \)</strong
+        >, where <strong>\( &bsol;tau_{\mathrm{nom}} \)</strong> is computed
+        from the nominal model. Solving for
+        <strong>\( r^\star(z_k) \)</strong> gives
+      </p>
+      <h4 class="mathJax">
+        \[ r^\star(z_k) = &bsol;tau_k - &bsol;tau_{\mathrm{nom}}(z_k), \]
+      </h4>
+      <p>
+        which is precisely the quantity we can form from logged data. Thus the
+        supervised learning regression target is the torque discrepancy between
+        true and nominal models.
+      </p>
+
+      <p>
+        <strong>Problem 2 (ISS Bound with Residual):</strong>
+        Using the Lyapunov function
+        <strong
+          >\( V(e,\dot e) = \tfrac{1}{2}\dot e^\top M(q)\dot e +
+          \tfrac{1}{2}e^\top K_p e \)</strong
+        >, show that if the residual modeling error satisfies
+        <strong>\( \|\tilde r(z)\| \leq \bar r \)</strong> and gains
+        <strong>\( K_p, K_d \)</strong> are large enough, then the tracking
+        error <strong>\( e(t) \)</strong> is ultimately bounded by a ball whose
+        radius is proportional to <strong>\( \bar r \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        From Section 3, the closed-loop error dynamics with residual are
+      </p>
+      <h4 class="mathJax">
+        \[ M(q)\ddot e + C(q,\dot q)\dot e + K_d M_n(q)\dot e + K_p M_n(q)e =
+        \tilde r(z). \]
+      </h4>
+      <p>
+        Differentiating <strong>\( V \)</strong> and using standard manipulator
+        identities, we obtain
+      </p>
+      <h4 class="mathJax">
+        \[ \dot V \leq -\alpha_1 \|\dot e\|^2 - \alpha_2 \|e\|^2 + \beta \|\dot
+        e\| \,\|\tilde r(z)\|, \]
+      </h4>
+      <p>
+        where <strong>\( \alpha_1, \alpha_2, \beta &gt; 0 \)</strong> depend on
+        bounds on <strong>\( M, M_n, K_p, K_d \)</strong>. Using Young&apos;s
+        inequality
+        <strong
+          >\( \beta \|\dot e\| \,\|\tilde r\| \leq \tfrac{\alpha_1}{2}\|\dot
+          e\|^2 + \tfrac{\beta^2}{2\alpha_1}\|\tilde r\|^2 \)</strong
+        >, we get
+      </p>
+      <h4 class="mathJax">
+        \[ \dot V \leq -\tfrac{\alpha_1}{2}\|\dot e\|^2 - \alpha_2\|e\|^2 +
+        \tfrac{\beta^2}{2\alpha_1} \|\tilde r\|^2. \]
+      </h4>
+      <p>
+        If <strong>\( \|\tilde r(z)\| \leq \bar r \)</strong>, then
+        <strong>\( \dot V \leq -\lambda V + \gamma \bar r^2 \)</strong> for some
+        <strong>\( \lambda, \gamma &gt; 0 \)</strong>, which implies that
+        <strong>\( V(t) \)</strong> (and hence <strong>\( \|e(t)\| \)</strong>)
+        converges to a ball whose radius is proportional to
+        <strong>\( \bar r \)</strong>. This is the standard ISS ultimate
+        boundedness result.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Choice of Features):</strong>
+        Explain why using only <strong>\( q \)</strong> as the feature vector
+        <strong>\( z \)</strong> is typically insufficient for residual dynamics
+        learning, and argue why including <strong>\( \dot q \)</strong> and
+        <strong>\( \ddot q_d \)</strong> is beneficial.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The disturbance term <strong>\( d(q,\dot q,\ddot q) \)</strong> often
+        depends on velocities and accelerations (e.g. viscous or Coulomb
+        friction, actuator dynamics). If the residual model only sees
+        <strong>\( q \)</strong>, it cannot distinguish cases with identical
+        positions but different velocities or accelerations, so the learned map
+        will blur together distinct regimes and perform poorly. Including
+        <strong>\( \dot q \)</strong> captures velocity-dependent effects, and
+        including information related to the commanded acceleration (e.g.
+        <strong>\( \ddot q_d \)</strong>) captures acceleration-dependent
+        unmodeled dynamics. This leads to a better approximation of
+        <strong>\( d \)</strong> and thus better compensation.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Regularization in Residual Learning):</strong>
+        Consider linear residual regression
+        <strong>\( \hat r_\theta(z) = w^\top z \)</strong> with ridge penalty
+        <strong>\( \lambda \|w\|^2 \)</strong>. Write the closed-form solution
+        for <strong>\( w \)</strong> in terms of the data matrix
+        <strong>\( Z \in \mathbb{R}^{N \times p} \)</strong> and target vector
+        <strong>\( y \in \mathbb{R}^N \)</strong>, and explain how increasing
+        <strong>\( \lambda \)</strong> interacts with robustness of the
+        learning-augmented controller.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The ridge regression problem is
+      </p>
+      <h4 class="mathJax">\[ \min_w \|Z w - y\|^2 + \lambda \|w\|^2. \]</h4>
+      <p>The solution is</p>
+      <h4 class="mathJax">
+        \[ w^\star = (Z^\top Z + \lambda I)^{-1} Z^\top y. \]
+      </h4>
+      <p>
+        Larger <strong>\( \lambda \)</strong> shrinks
+        <strong>\( w \)</strong> towards zero, which reduces overfitting and
+        limits the magnitude of the residual corrections. In the closed loop,
+        this corresponds to a more conservative learning augmentation that is
+        less sensitive to noise and model mismatch but may under-compensate the
+        disturbance. From a robustness viewpoint, increasing
+        <strong>\( \lambda \)</strong> often helps maintain stability by
+        bounding the residual torque.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Data Coverage for Safety):</strong>
+        Suppose the operational region of the robot is specified by
+        <strong>\( \|q\| \leq q_{\max}, \|\dot q\| \leq v_{\max} \)</strong>.
+        Describe a strategy to design the data-collection trajectories
+        <strong>\( q_d^{(j)}(t) \)</strong> so that the training dataset
+        sufficiently covers this region, and explain how this impacts the
+        confidence in the learned residual when deployed online.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        To cover the operational region, one can design a
+        <em>trajectory ensemble</em> consisting of:
+      </p>
+      <ul>
+        <li>
+          Multiple sinusoids with different frequencies and phases so that their
+          superposition visits a dense set of positions and velocities in
+          <strong
+            >\( [-q_{\max}, q_{\max}] \times [-v_{\max}, v_{\max}] \)</strong
+          >.
+        </li>
+        <li>Chirp signals that sweep through relevant frequency bands.</li>
+        <li>
+          Step-like segments (with smooth transitions) to probe
+          acceleration-rich regimes.
+        </li>
+      </ul>
+      <p>
+        By covering the state space region where the controller will be used,
+        the regression model <strong>\( \hat r_\theta \)</strong> is trained on
+        representative data, reducing extrapolation when deployed. Extrapolation
+        is dangerous because prediction errors can be large and poorly
+        characterized, leading to unforeseen residual torques. Hence coverage of
+        the operational set is critical for safety and performance.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lab, we implemented a learning-augmented robot controller based
+        on residual dynamics modeling. Starting from a nominal computed-torque
+        controller, we:
+      </p>
+      <ul>
+        <li>
+          Derived the error dynamics and identified the lumped disturbance term
+          that limits tracking performance.
+        </li>
+        <li>
+          Formulated a residual torque model
+          <strong>\( \hat r_\theta(z) \)</strong> and showed how to construct
+          supervised learning targets from experimental data.
+        </li>
+        <li>
+          Implemented a complete Python simulation with Gaussian Process
+          residuals and sketched C++, Java, MATLAB/Simulink, and Mathematica
+          implementations.
+        </li>
+        <li>
+          Discussed Lyapunov-based ISS arguments that justify bounded residual
+          usage and posed problems emphasizing stability and data coverage.
+        </li>
+      </ul>
+      <p>
+        This lab connects the abstract ideas of residual / delta-model learning
+        from previous lessons with concrete control code, highlighting the
+        trade-offs between tracking accuracy, data requirements, and robustness.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. References</h2>
+    <ol>
+      <li>
+        Ljung, L. (1978). Convergence analysis of parametric identification
+        methods. <em>IEEE Transactions on Automatic Control</em>, 23(5),
+        770–783.
+      </li>
+      <li>
+        Narendra, K. S., &amp; Annaswamy, A. M. (1987). A new adaptive law for
+        robust adaptation without persistent excitation.
+        <em>IEEE Transactions on Automatic Control</em>, 32(2), 134–145.
+      </li>
+      <li>
+        Campi, M. C., &amp; Kumar, P. R. (1998). Adaptive linear systems:
+        identification, stability, and robustness.
+        <em>SIAM Journal on Control and Optimization</em>, 36(6), 1889–1920.
+      </li>
+      <li>
+        Sch&ouml;lkopf, B., &amp; Smola, A. J. (2002). Learning with Kernels:
+        Support Vector Machines, Regularization, Optimization, and Beyond.
+        <em>MIT Press</em>.
+      </li>
+      <li>
+        Rasmussen, C. E., &amp; Williams, C. K. I. (2006). Gaussian Processes
+        for Machine Learning. <em>MIT Press</em>.
+      </li>
+      <li>
+        Deisenroth, M. P., Rasmussen, C. E., &amp; Peters, J. (2009). Gaussian
+        process dynamic models for control.
+        <em
+          >Proceedings of the 26th International Conference on Machine
+          Learning</em
+        >, 225–232.
+      </li>
+      <li>
+        Berkenkamp, F., Schoellig, A. P., &amp; Krause, A. (2015). Safe and
+        robust learning control with Gaussian processes.
+        <em>European Control Conference</em>, 2501–2506.
+      </li>
+      <li>
+        Khansari-Zadeh, S. M., &amp; Billard, A. (2011). Learning stable
+        nonlinear dynamical systems with Gaussian mixture models.
+        <em>IEEE Transactions on Robotics</em>, 27(5), 943–957.
+      </li>
+      <li>
+        Hjalmarsson, H. (2005). From experiment design to closed-loop control.
+        <em>Automatica</em>, 41(3), 393–438.
+      </li>
+      <li>
+        Gevers, M. (2002). A personal view of the development of system
+        identification: A 30-year journey through an exciting field.
+        <em>IEEE Control Systems Magazine</em>, 22(6), 93–105.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter15/Lesson4.html">
+          Lesson 4: Stability-Preserving Learning Wrappers
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter16/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Problem Definition and Metrics
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="active-lesson" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

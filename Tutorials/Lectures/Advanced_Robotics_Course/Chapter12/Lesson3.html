@@ -1,0 +1,2089 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: Reinforcement Learning for Robotics - Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts) | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: Reinforcement Learning for Robotics</h1>
+    <h3><strong>Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)</strong></h3>
+    <p>
+      This lesson introduces modern off-policy deep reinforcement learning (RL)
+      algorithms for continuous robotic control: Deep Deterministic Policy
+      Gradient (DDPG), Twin Delayed DDPG (TD3), and Soft Actor-Critic (SAC). We
+      emphasize their mathematical foundations (Bellman operators, deterministic
+      policy gradients, maximum-entropy RL), and show how they are instantiated
+      in robotic torque/velocity control with multi-language code sketches
+      (Python, C++, Java, MATLAB/Simulink, Wolfram Mathematica).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview of Off-Policy RL in Robotics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview of Off-Policy RL in Robotics</h2>
+    <div class="down-content">
+      <p>
+        In previous lessons, you saw Markov Decision Processes (MDPs) and
+        actor–critic methods for continuous control. Robotic manipulators and
+        mobile platforms typically have continuous action spaces (joint torques,
+        joint velocities, or Cartesian twists), making value-based tabular
+        algorithms inapplicable. Off-policy actor–critic algorithms enable
+        <em>sample reuse</em> via replay buffers and separate
+        <strong>behavior policies</strong> from the
+        <strong>target policy</strong> being optimized.
+      </p>
+      <p>
+        Consider an MDP \( (\mathcal{S},\mathcal{A},P,r,\gamma) \). For a target
+        (possibly deterministic) policy <strong>\( \pi \)</strong>, the
+        action-value function is
+      </p>
+      <h4 class="mathJax">
+        \[ Q^{\pi}(s,a) = \mathbb{E}\!\left[ \sum_{t=0}^{\infty} \gamma^{t}
+        r(s_t,a_t) \,\bigg|\, s_0 = s,\ a_0 = a,\ a_t \sim \pi(\cdot|s_t)
+        \right]. \]
+      </h4>
+      <p>
+        An off-policy method collects transitions using a behavior policy
+        <strong>\( \mu \)</strong> (e.g., exploratory actor with added noise),
+        stores them in a replay buffer, and updates
+        <strong>\( Q^{\pi} \)</strong> and <strong>\( \pi \)</strong> using this
+        experience even when <strong>\( \mu \neq \pi \)</strong>. This
+        decoupling is crucial in robotics, where simulator runs are expensive
+        but can be reused many times.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  ENV["Robot + Environment"] --> EXP["Transitions (s,a,r,s_next)"]
+  EXP --> BUF["Replay buffer"]
+  BUF --> CRIT["Critic update: fit Q(s,a)"]
+  CRIT --> ACT["Actor update: improve policy pi(a|s)"]
+  ACT --> EXPL["Behavior mu = pi + exploration noise"]
+  EXPL --> ENV
+        </pre>
+      </div>
+      <p>
+        The three algorithms we study share this overall structure, but differ
+        in: (i) policy class (deterministic vs stochastic), (ii) how they
+        mitigate overestimation bias in the critic, and (iii) whether they
+        directly optimize expected return or an entropy-augmented objective.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Off-Policy Bellman Operators and Distribution Mismatch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Off-Policy Bellman Operators and Distribution Mismatch</h2>
+    <div class="down-content">
+      <p>
+        For a fixed target policy <strong>\( \pi \)</strong>, define the Bellman
+        operator <strong>\( \mathcal{T}^{\pi} \)</strong> on action-value
+        functions:
+      </p>
+      <h4 class="mathJax">
+        \[ (\mathcal{T}^{\pi} Q)(s,a) = r(s,a) + \gamma\, \mathbb{E}_{s' \sim
+        P(\cdot|s,a),\, a' \sim \pi(\cdot|s')} \big[ Q(s',a') \big]. \]
+      </h4>
+      <p>
+        The fixed point of <strong>\( \mathcal{T}^{\pi} \)</strong> is
+        <strong>\( Q^{\pi} \)</strong>, and for any two functions
+        <strong>\( Q_1, Q_2 \)</strong> we have the contraction property
+      </p>
+      <h4 class="mathJax">
+        \[ \big\| \mathcal{T}^{\pi} Q_1 - \mathcal{T}^{\pi} Q_2 \big\|_{\infty}
+        \leq \gamma \big\| Q_1 - Q_2 \big\|_{\infty}. \]
+      </h4>
+      <p>
+        In <em>on-policy</em> algorithms, samples are drawn from state–action
+        visitation of the current policy, matching the distribution used in
+        theoretical convergence proofs. In off-policy deep RL, however, we
+        approximate expectations using transitions
+        <strong>\( (s,a,r,s') \sim \rho^{\mu} \)</strong>, where
+        <strong>\( \rho^{\mu} \)</strong> is the stationary distribution under
+        behavior policy <strong>\( \mu \)</strong>. The critic is trained by
+        minimizing (stochastic) mean-squared Bellman error
+      </p>
+      <h4 class="mathJax">
+        \[ L(\theta_Q) = \mathbb{E}_{(s,a,r,s') \sim \rho^{\mu}}\! \left[ \big(
+        Q_{\theta_Q}(s,a) - y(s,a,r,s') \big)^2 \right], \]
+      </h4>
+      <p>
+        where the target <strong>\( y \)</strong> involves the target policy
+        (and possibly target networks). This off-policy approximation is biased
+        but dramatically improves sample efficiency, which is a key constraint
+        in robotics.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Deterministic Policy Gradient Theorem -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Deterministic Policy Gradient Theorem</h2>
+    <div class="down-content">
+      <p>
+        Deterministic policies are particularly convenient for continuous
+        control: an actor outputs a single action per state,
+        <strong>\( \mu_{\theta} : \mathcal{S} \to \mathcal{A} \)</strong>. Let
+        the performance objective be
+      </p>
+      <h4 class="mathJax">
+        \[ J(\theta) = \mathbb{E}_{s \sim \rho^{\mu_{\theta}}} \big[
+        Q^{\mu_{\theta}}(s, \mu_{\theta}(s)) \big], \]
+      </h4>
+      <p>
+        where <strong>\( \rho^{\mu_{\theta}} \)</strong> is the discounted state
+        distribution induced by the deterministic policy.
+      </p>
+      <p>
+        The <em>deterministic policy gradient theorem</em> states that under
+        mild regularity conditions,
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} J(\theta) = \mathbb{E}_{s \sim \rho^{\mu_{\theta}}}
+        \Big[ \nabla_{\theta}\mu_{\theta}(s)\, \nabla_{a}
+        Q^{\mu_{\theta}}(s,a)\big|_{a = \mu_{\theta}(s)} \Big]. \]
+      </h4>
+      <p><strong>Sketch of proof.</strong></p>
+      <ol>
+        <li>
+          Write
+          <strong
+            >\( J(\theta) = \sum_{s} \rho^{\mu_{\theta}}(s)\,
+            Q^{\mu_{\theta}}(s,\mu_{\theta}(s)) \)</strong
+          >
+          in discrete form.
+        </li>
+        <li>
+          Differentiate using the product rule. The derivative of
+          <strong>\( \rho^{\mu_{\theta}} \)</strong> w.r.t.
+          <strong>\( \theta \)</strong> can be expressed via the policy gradient
+          theorem; its contribution cancels with the explicit dependence of
+          <strong>\( Q^{\mu_{\theta}} \)</strong> on
+          <strong>\( \theta \)</strong> through future states when the Bellman
+          equation holds.
+        </li>
+        <li>
+          The remaining term involves only the explicit dependence of the
+          <em>current</em> action on <strong>\( \theta \)</strong>, yielding the
+          expectation above.
+        </li>
+      </ol>
+      <p>
+        In practice, DDPG approximates
+        <strong>\( Q^{\mu_{\theta}} \)</strong> by a neural critic
+        <strong>\( Q_{\theta_Q}(s,a) \)</strong>, and replaces
+        <strong>\( \rho^{\mu_{\theta}} \)</strong> with the empirical replay
+        distribution. The resulting gradient estimator is biased but effective
+        for high-DOF robotic arms and legged robots.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Deep Deterministic Policy Gradient (DDPG) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Deep Deterministic Policy Gradient (DDPG)</h2>
+    <div class="down-content">
+      <p>
+        DDPG is an off-policy actor–critic algorithm that combines deterministic
+        policy gradients with deep Q-learning ideas (replay buffer and target
+        networks). It maintains:
+      </p>
+      <ul>
+        <li>
+          An <strong>actor</strong> \( \mu_{\theta_{\mu}}(s) \) (e.g., MLP or
+          CNN) that outputs continuous actions.
+        </li>
+        <li>
+          A <strong>critic</strong> \( Q_{\theta_Q}(s,a) \) approximating
+          <strong>\( Q^{\mu} \)</strong>.
+        </li>
+        <li>
+          Slowly updated <strong>target networks</strong>
+          \( \mu_{\theta_{\mu}'} \) and \( Q_{\theta_Q'} \) for stable targets.
+        </li>
+      </ul>
+      <p>
+        For transitions <strong>\( (s,a,r,s') \)</strong> from the replay
+        buffer, the critic target is
+      </p>
+      <h4 class="mathJax">
+        \[ y = r + \gamma\, Q_{\theta_Q'}\!\big( s', \mu_{\theta_{\mu}'}(s')
+        \big), \]
+      </h4>
+      <p>and the critic loss is</p>
+      <h4 class="mathJax">
+        \[ L(\theta_Q) = \mathbb{E}_{(s,a,r,s')} \left[ \big( Q_{\theta_Q}(s,a)
+        - y \big)^2 \right]. \]
+      </h4>
+      <p>
+        The actor is updated by ascending an estimate of the deterministic
+        policy gradient:
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta_{\mu}} J(\theta_{\mu}) \approx \mathbb{E}_{s \sim
+        \rho^{\mu}} \Big[ \nabla_{\theta_{\mu}}\mu_{\theta_{\mu}}(s)\,
+        \nabla_{a} Q_{\theta_Q}(s,a)\big|_{a = \mu_{\theta_{\mu}}(s)} \Big]. \]
+      </h4>
+      <p>
+        Target networks are updated by Polyak averaging with parameter
+        <strong>\( &bsol;tau \in (0,1) \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \theta_Q' \leftarrow (1 - &bsol;tau)\,\theta_Q' +
+        &bsol;tau\,\theta_Q, \quad \theta_{\mu}' \leftarrow (1 -
+        &bsol;tau)\,\theta_{\mu}' + &bsol;tau\,\theta_{\mu}. \]
+      </h4>
+      <p>
+        For robotics, the actor usually outputs a bounded action via a
+        <strong>\( \tanh \)</strong> output layer, then linearly maps it to
+        torque or velocity limits. Exploration is implemented with additive
+        noise: Ornstein–Uhlenbeck (OU) or Gaussian noise to encourage temporally
+        correlated control signals.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Twin Delayed DDPG (TD3) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Twin Delayed DDPG (TD3)</h2>
+    <div class="down-content">
+      <p>
+        DDPG suffers from <em>overestimation bias</em> in the critic due to
+        bootstrapping with a max-like structure over continuous actions embedded
+        in the actor. TD3 introduces three key modifications:
+      </p>
+      <ol>
+        <li><strong>Clipped double Q-learning.</strong></li>
+        <li><strong>Delayed policy updates.</strong></li>
+        <li><strong>Target policy smoothing.</strong></li>
+      </ol>
+      <p>
+        TD3 uses two critics \( Q_{\theta_{Q_1}} \) and \( Q_{\theta_{Q_2}} \).
+        The target employs their <em>minimum</em>:
+      </p>
+      <h4 class="mathJax">
+        \[ y = r + \gamma\, \min_{i \in \{1,2\}} Q_{\theta_{Q_i}'}\!\big( s',
+        \tilde{a}' \big), \]
+      </h4>
+      <p>where \( \tilde{a}' \) is a <em>smoothed</em> target action:</p>
+      <h4 class="mathJax">
+        \[ \tilde{a}' = \mathrm{clip}\!\big( \mu_{\theta_{\mu}'}(s') + \epsilon,
+        a_{\min}, a_{\max} \big), \quad \epsilon \sim
+        \mathcal{N}(0,\sigma_{\text{targ}}^2), \ \ |\epsilon| \leq c. \]
+      </h4>
+      <p>
+        The smoothing noise prevents the critic from exploiting sharp peaks in
+        the Q-function that correspond to narrow, unrealistic action choices.
+        Delayed policy updates mean that the actor and target networks are
+        updated only every <strong>\( d \)</strong> critic updates, allowing
+        critics to track the value landscape more accurately before changing the
+        policy.
+      </p>
+      <p>
+        In high-DOF robotics, TD3 tends to be more stable than DDPG because:
+      </p>
+      <ul>
+        <li>
+          The minimum of two critics reduces optimistic bias, especially in
+          regions of sparse data.
+        </li>
+        <li>
+          Smoothing roughly corresponds to injecting robustness over a
+          neighborhood of actions, beneficial when torque commands are quantized
+          or noisy.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Soft Actor-Critic (SAC) and Maximum-Entropy RL -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Soft Actor-Critic (SAC) and Maximum-Entropy RL</h2>
+    <div class="down-content">
+      <p>
+        SAC departs from deterministic policies and optimizes a
+        <em>maximum-entropy</em> objective. Instead of maximizing expected
+        return alone, we consider
+      </p>
+      <h4 class="mathJax">
+        \[ J(\pi) = \mathbb{E}_{\pi}\!\left[ \sum_{t=0}^{\infty} \gamma^{t}\big(
+        r(s_t,a_t) + \alpha\, \mathcal{H}(\pi(\cdot|s_t)) \big) \right], \]
+      </h4>
+      <p>
+        where \( \mathcal{H}(\pi(\cdot|s)) \) is the Shannon entropy and
+        <strong>\( \alpha &gt; 0 \)</strong> trades off reward and exploration.
+        High entropy encourages stochastic, exploratory policies, which can help
+        manipulators escape local minima in complex contact-rich tasks.
+      </p>
+      <p>Define the <em>soft</em> Q- and V-functions:</p>
+      <h4 class="mathJax">
+        \[ Q^{\pi}(s,a) = \mathbb{E}_{\pi}\!\left[ \sum_{t=0}^{\infty}
+        \gamma^{t}\big( r(s_t,a_t) + \alpha\, \mathcal{H}(\pi(\cdot|s_t)) \big)
+        \,\bigg|\, s_0 = s,\ a_0 = a \right], \]
+      </h4>
+      <h4 class="mathJax">
+        \[ V^{\pi}(s) = \mathbb{E}_{a \sim \pi(\cdot|s)}\! \big[ Q^{\pi}(s,a) -
+        \alpha \log \pi(a|s) \big]. \]
+      </h4>
+      <p>The soft Bellman backup for \( Q \) is</p>
+      <h4 class="mathJax">
+        \[ Q(s,a) = r(s,a) + \gamma\, \mathbb{E}_{s' \sim P(\cdot|s,a)}[ V(s')
+        ]. \]
+      </h4>
+      <p>
+        For a parameterized stochastic policy \( \pi_{\theta}(a|s) \) (e.g.
+        Gaussian with mean and log-variance from a neural network), SAC uses the
+        following losses:
+      </p>
+      <ul>
+        <li>
+          <strong>Critic loss</strong> (often two critics as in TD3):
+          <h4 class="mathJax">
+            \[ L_Q(\theta_Q) = \mathbb{E}_{(s,a,r,s')} \left[ \big(
+            Q_{\theta_Q}(s,a) - y \big)^2 \right], \]
+          </h4>
+          where
+          <h4 class="mathJax">
+            \[ y = r + \gamma\, \mathbb{E}_{a' \sim \pi_{\theta}(\cdot|s')}
+            \big[ \min_i Q_{\theta_{Q_i}'}(s',a') - \alpha \log
+            \pi_{\theta}(a'|s') \big]. \]
+          </h4>
+        </li>
+        <li>
+          <strong>Policy loss</strong> (reparameterization trick):
+          <h4 class="mathJax">
+            \[ L_{\pi}(\theta) = \mathbb{E}_{s \sim \rho^{\mu},\, \epsilon \sim
+            \mathcal{N}(0,I)} \Big[ \alpha \log
+            \pi_{\theta}(f_{\theta}(s,\epsilon)|s) - Q_{\bar{\theta}_Q}\big(s,
+            f_{\theta}(s,\epsilon)\big) \Big], \]
+          </h4>
+          where \( f_{\theta} \) is the differentiable mapping from noise \(
+          \epsilon \) to actions (e.g. squashed Gaussian).
+        </li>
+      </ul>
+      <p>
+        In robotics, SAC is often preferred because its stochasticity leads to
+        robust behaviors that tolerate model mismatch between simulator and real
+        robot, and automatic temperature tuning can adapt exploration to the
+        difficulty of the task.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart LR
+  ALG["Off-policy RL algorithms"] --> DDPG["DDPG: deterministic actor, \n1 critic, target nets"]
+  ALG --> TD3["TD3: twin critics, \ndelayed actor, smoothing"]
+  ALG --> SAC["SAC: stochastic actor, \nentropy bonus, twin critics"]
+  DDPG --> PROP1["Pros: simple, \nsample-efficient"]
+  DDPG --> CONS1["Cons: brittle, \noverestimation"]
+  TD3 --> PROP2["Pros: more stable, \nless bias"]
+  TD3 --> CONS2["Cons: more parameters, \nslower updates"]
+  SAC --> PROP3["Pros: robustness via entropy, \ngood in robotics"]
+  SAC --> CONS3["Cons: temperature tuning, \nstochastic actions"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Practical Considerations for Robotic Control -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Practical Considerations for Robotic Control</h2>
+    <div class="down-content">
+      <p>
+        When applying DDPG/TD3/SAC to robots, one must respect the kinematics
+        and dynamics you already know from earlier courses. Some important
+        design choices:
+      </p>
+      <ul>
+        <li>
+          <strong>Action parameterization.</strong> Actions should correspond to
+          feasible low-level commands: joint torques, desired joint velocities,
+          or short-horizon position increments. Saturation limits should match
+          physical actuator bounds.
+        </li>
+        <li>
+          <strong>State normalization.</strong> Normalize joint angles,
+          velocities, and end-effector positions to comparable scales to avoid
+          ill-conditioned gradients in the critic.
+        </li>
+        <li>
+          <strong>Reward shaping.</strong> Typical rewards include negative
+          distance to a target pose, control effort penalties \( \|a\|^2 \), and
+          terminal bonuses for successful grasping or reaching. Careful shaping
+          is required to avoid local minima.
+        </li>
+        <li>
+          <strong>Safety in real robots.</strong> During sim-to-real transfer,
+          clip actions and use safety monitors at the control layer to prevent
+          joint limit violations or self-collisions.
+        </li>
+      </ul>
+      <p>
+        The underlying gradient-based updates are agnostic to robot dynamics
+        modeling, but training is greatly improved when the observation space
+        encodes relevant dynamic quantities (e.g. joint velocities and contact
+        flags) rather than purely geometric states.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Python Implementation Sketch (DDPG / TD3 / SAC for Robotics) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Python Implementation Sketch (Robot Arm Environment)</h2>
+    <div class="down-content">
+      <p>
+        Below is a compact Python sketch of a TD3-like agent controlling a 6-DOF
+        manipulator in a Gym-style environment. In practice you would use
+        libraries such as <code class="language-python">gymnasium</code>,
+        <code class="language-python">pybullet</code>, or
+        <code class="language-python">mujoco</code> for simulation.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Simple MLP networks for actor and critic
+class Actor(nn.Module):
+    def __init__(self, state_dim, action_dim, max_action):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, action_dim), nn.Tanh()
+        )
+        self.max_action = max_action
+
+    def forward(self, state):
+        return self.max_action * self.net(state)
+
+class Critic(nn.Module):
+    # Twin critics Q1 and Q2
+    def __init__(self, state_dim, action_dim):
+        super().__init__()
+        self.q1 = nn.Sequential(
+            nn.Linear(state_dim + action_dim, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+        self.q2 = nn.Sequential(
+            nn.Linear(state_dim + action_dim, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+
+    def forward(self, state, action):
+        x = torch.cat([state, action], dim=-1)
+        q1 = self.q1(x)
+        q2 = self.q2(x)
+        return q1, q2
+
+    def q1_only(self, state, action):
+        x = torch.cat([state, action], dim=-1)
+        return self.q1(x)
+
+class ReplayBuffer:
+    def __init__(self, max_size, state_dim, action_dim):
+        self.max_size = max_size
+        self.ptr = 0
+        self.size = 0
+        self.state = np.zeros((max_size, state_dim), dtype=np.float32)
+        self.action = np.zeros((max_size, action_dim), dtype=np.float32)
+        self.next_state = np.zeros((max_size, state_dim), dtype=np.float32)
+        self.reward = np.zeros((max_size, 1), dtype=np.float32)
+        self.done = np.zeros((max_size, 1), dtype=np.float32)
+
+    def add(self, s, a, r, s_next, d):
+        self.state[self.ptr] = s
+        self.action[self.ptr] = a
+        self.next_state[self.ptr] = s_next
+        self.reward[self.ptr] = r
+        self.done[self.ptr] = d
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def sample(self, batch_size):
+        idx = np.random.randint(0, self.size, size=batch_size)
+        return (
+            torch.tensor(self.state[idx]),
+            torch.tensor(self.action[idx]),
+            torch.tensor(self.reward[idx]),
+            torch.tensor(self.next_state[idx]),
+            torch.tensor(self.done[idx])
+        )
+
+class TD3Agent:
+    def __init__(self, state_dim, action_dim, max_action,
+                 gamma=0.99, tau=0.005,
+                 policy_noise=0.2, noise_clip=0.5,
+                 policy_delay=2, lr=3e-4):
+        self.actor = Actor(state_dim, action_dim, max_action)
+        self.actor_target = Actor(state_dim, action_dim, max_action)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+
+        self.critic = Critic(state_dim, action_dim)
+        self.critic_target = Critic(state_dim, action_dim)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
+        self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr)
+
+        self.gamma = gamma
+        self.tau = tau
+        self.policy_noise = policy_noise
+        self.noise_clip = noise_clip
+        self.policy_delay = policy_delay
+        self.total_it = 0
+        self.max_action = max_action
+
+    def select_action(self, state, noise_std=0.1):
+        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            action = self.actor(state_t).cpu().numpy()[0]
+        if noise_std is not None:
+            action += np.random.normal(0.0, noise_std, size=action.shape)
+        return np.clip(action, -self.max_action, self.max_action)
+
+    def train(self, replay, batch_size=256):
+        if replay.size &lt; batch_size:
+            return
+
+        self.total_it += 1
+        state, action, reward, next_state, done = replay.sample(batch_size)
+
+        with torch.no_grad():
+            # Target policy smoothing
+            noise = torch.normal(0.0, self.policy_noise,
+                                 size=action.shape)
+            noise = torch.clamp(noise, -self.noise_clip, self.noise_clip)
+
+            next_action = self.actor_target(next_state)
+            next_action = torch.clamp(
+                next_action + noise,
+                -self.max_action,
+                self.max_action
+            )
+
+            q1_targ, q2_targ = self.critic_target(next_state, next_action)
+            q_min = torch.min(q1_targ, q2_targ)
+            target_q = reward + self.gamma * (1.0 - done) * q_min
+
+        # Critic update
+        q1, q2 = self.critic(state, action)
+        critic_loss = nn.MSELoss()(q1, target_q) + nn.MSELoss()(q2, target_q)
+
+        self.critic_opt.zero_grad()
+        critic_loss.backward()
+        self.critic_opt.step()
+
+        # Delayed policy update
+        if self.total_it % self.policy_delay == 0:
+            actor_loss = -self.critic.q1_only(state, self.actor(state)).mean()
+            self.actor_opt.zero_grad()
+            actor_loss.backward()
+            self.actor_opt.step()
+
+            # Polyak averaging for target networks
+            with torch.no_grad():
+                for p, p_targ in zip(self.critic.parameters(),
+                                     self.critic_target.parameters()):
+                    p_targ.data.mul_(1.0 - self.tau)
+                    p_targ.data.add_(self.tau * p.data)
+                for p, p_targ in zip(self.actor.parameters(),
+                                     self.actor_target.parameters()):
+                    p_targ.data.mul_(1.0 - self.tau)
+                    p_targ.data.add_(self.tau * p.data)
+      </code></pre>
+      <p>
+        You can integrate this agent with a robotic simulator environment whose
+        state is composed of joint positions and velocities, and whose action is
+        a vector of joint torque commands. The same structure can be adapted to
+        DDPG (single critic, no smoothing) or SAC (stochastic actor, entropy
+        regularization).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: C++ Implementation Sketch with Eigen and ROS -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. C++ Implementation Sketch (Eigen + ROS)</h2>
+    <div class="down-content">
+      <p>
+        In C++, we often use <code class="language-cpp">Eigen</code> for linear
+        algebra and <code class="language-cpp">roscpp</code> to communicate with
+        the robot or a Gazebo simulation. Below is a minimal skeleton of a DDPG
+        style critic and training step (without full neural network details).
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;Eigen/Dense&gt;
+
+// Simple fully-connected layer
+struct LinearLayer {
+    Eigen::MatrixXf W;
+    Eigen::VectorXf b;
+
+    LinearLayer(int in_dim, int out_dim) {
+        W.setRandom(out_dim, in_dim);
+        b.setZero(out_dim);
+    }
+
+    Eigen::MatrixXf forward(const Eigen::MatrixXf&amp; x) const {
+        return (W * x.transpose()).transpose().rowwise() + b.transpose();
+    }
+};
+
+// Very simplified critic: Q(s,a) = f([s,a])
+struct Critic {
+    LinearLayer l1, l2, l3;
+
+    Critic(int state_dim, int action_dim)
+        : l1(state_dim + action_dim, 256),
+          l2(256, 256),
+          l3(256, 1) {}
+
+    Eigen::VectorXf forward(const Eigen::MatrixXf&amp; state,
+                            const Eigen::MatrixXf&amp; action) const {
+        Eigen::MatrixXf x(state.rows(), state.cols() + action.cols());
+        x &lt;&lt; state, action;
+        auto h1 = l1.forward(x).unaryExpr([](float v){ return std::max(0.0f, v); });
+        auto h2 = l2.forward(h1).unaryExpr([](float v){ return std::max(0.0f, v); });
+        auto q  = l3.forward(h2);
+        return q.col(0); // shape: batch_size
+    }
+};
+
+// Example update step (pseudo-code, no autodiff)
+void updateCritic(Critic&amp; critic,
+                  const Eigen::MatrixXf&amp; s_batch,
+                  const Eigen::MatrixXf&amp; a_batch,
+                  const Eigen::VectorXf&amp; y_target,
+                  float lr) {
+    // In practice use a deep learning library (PyTorch C++ frontend,
+    // TensorFlow C API, or custom autodiff) to compute gradients.
+    // Here we only outline the interface.
+    // 1. Compute q_pred = critic.forward(s_batch, a_batch);
+    // 2. Compute loss = mean((q_pred - y_target)^2);
+    // 3. Backpropagate to get dW, db for each layer.
+    // 4. Apply gradient descent: W -= lr * dW; b -= lr * db;
+}
+
+// ROS node skeleton to interact with a robot
+int main(int argc, char** argv) {
+    // ros::init(argc, argv, "ddpg_controller");
+    // ros::NodeHandle nh;
+    int state_dim = 14;  // e.g. 7 joint angles + 7 velocities
+    int action_dim = 7;  // torques for 7 joints
+    Critic critic(state_dim, action_dim);
+
+    // In a training loop:
+    //  - subscribe to joint states
+    //  - compute action from actor network
+    //  - publish torque commands
+    //  - store (s,a,r,s_next,done) in replay buffer
+    //  - sample minibatches and call updateCritic(...)
+    std::cout &lt;&lt; "DDPG critic initialized." &lt;&lt; std::endl;
+    return 0;
+}
+      </code></pre>
+      <p>
+        For a full implementation, you would replace the manual neural network
+        and backpropagation with a C++ deep learning framework such as the
+        PyTorch C++ frontend, and use ROS topics or services for interaction
+        with the robot hardware or simulator.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Java Implementation Sketch (RL4J + Robotics) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Java Implementation Sketch (RL4J + Robotics)</h2>
+    <div class="down-content">
+      <p>
+        In Java, the <code class="language-java">deeplearning4j</code> ecosystem
+        provides <code class="language-java">RL4J</code> for RL. Below is a
+        conceptual outline for building a continuous control agent for a robotic
+        environment exposed through a Java interface or a ROS bridge.
+      </p>
+      <pre><code class="language-java">
+import org.deeplearning4j.rl4j.mdp.MDP;
+import org.deeplearning4j.rl4j.space.ObservationSpace;
+import org.deeplearning4j.rl4j.space.ActionSpace;
+import org.deeplearning4j.rl4j.observation.Observation;
+import org.nd4j.linalg.api.ndarray.INDArray;
+
+// Custom MDP for a robotic arm
+public class ArmContinuousMDP implements MDP&lt;Observation, double[], ArmState&gt; {
+    private boolean done = false;
+
+    @Override
+    public Observation reset() {
+        // Reset simulator or real robot to a safe home configuration
+        // Read joint states, end-effector pose, etc.
+        ArmState state = readStateFromRobot();
+        return new Observation(state.toINDArray());
+    }
+
+    @Override
+    public void close() {
+        // Cleanup connections
+    }
+
+    @Override
+    public StepReply&lt;Observation&gt; step(double[] action) {
+        // Send torque or velocity command to robot
+        sendActionToRobot(action);
+        ArmState nextState = readStateFromRobot();
+        double reward = computeReward(nextState);
+        done = checkTermination(nextState);
+        return new StepReply&lt;&gt;(
+            new Observation(nextState.toINDArray()),
+            reward,
+            done,
+            null
+        );
+    }
+
+    @Override
+    public boolean isDone() {
+        return done;
+    }
+
+    @Override
+    public ObservationSpace&lt;Observation&gt; getObservationSpace() {
+        // Define dimension and bounds of state vector
+        return null; // implement
+    }
+
+    @Override
+    public ActionSpace&lt;double[]&gt; getActionSpace() {
+        // Define action dimension and bounds for torques
+        return null; // implement
+    }
+
+    // ... other required methods ...
+}
+
+// High-level: configure a continuous actor-critic agent (DDPG/TD3 style)
+// through RL4J's policy interfaces, and train in the above MDP.
+      </code></pre>
+      <p>
+        While RL4J focuses more on discrete control out of the box, the general
+        pattern is the same: wrap the robotics interface as an MDP and plug in a
+        continuous control agent based on DDPG/TD3/SAC principles.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: MATLAB/Simulink and Wolfram Mathematica -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. MATLAB/Simulink and Wolfram Mathematica Implementations</h2>
+    <div class="down-content">
+      <h3>11.1 MATLAB/Simulink with Reinforcement Learning Toolbox</h3>
+      <p>
+        MATLAB's Reinforcement Learning Toolbox provides ready-made agents such
+        as <code class="language-matlab">rlDDPGAgent</code> and
+        <code class="language-matlab">rlSACAgent</code>. You can connect them to
+        a Simulink model of a robot arm built with Simscape Multibody.
+      </p>
+      <pre><code class="language-matlab">
+% Define observation and action specifications
+obsDim = 14;  % joint angles + velocities
+actDim = 7;   % joint torques
+
+obsInfo = rlNumericSpec([obsDim 1], ...
+    'LowerLimit', -ones(obsDim,1), ...
+    'UpperLimit',  ones(obsDim,1));
+obsInfo.Name = 'observations';
+
+actInfo = rlNumericSpec([actDim 1], ...
+    'LowerLimit', -ones(actDim,1), ...
+    'UpperLimit',  ones(actDim,1));
+actInfo.Name = 'torques';
+
+% Create Simulink environment
+mdl = 'RobotArmTD3Model';
+load_system(mdl);
+env = rlSimulinkEnv(mdl, 'RobotArmTD3Model/RL Agent', obsInfo, actInfo);
+
+% Actor and critic networks (deep neural networks)
+statePath = featureInputLayer(obsDim, 'Normalization', 'none', 'Name', 'state');
+actionPath = featureInputLayer(actDim, 'Normalization', 'none', 'Name', 'action');
+
+criticNetwork = [
+    concatenationLayer(1, 2, 'Name', 'concat')
+    fullyConnectedLayer(256, 'Name', 'fc1')
+    reluLayer('Name', 'relu1')
+    fullyConnectedLayer(256, 'Name', 'fc2')
+    reluLayer('Name', 'relu2')
+    fullyConnectedLayer(1, 'Name', 'q')];
+
+criticGraph = layerGraph(criticNetwork);
+criticGraph = addLayers(criticGraph, statePath);
+criticGraph = addLayers(criticGraph, actionPath);
+criticGraph = connectLayers(criticGraph, 'state', 'concat/in1');
+criticGraph = connectLayers(criticGraph, 'action', 'concat/in2');
+
+criticOpts = rlRepresentationOptions('LearnRate',1e-3,'GradientThreshold',1);
+critic = rlQValueRepresentation(criticGraph, obsInfo, actInfo, ...
+    'Observation', {'state'}, 'Action', {'action'}, criticOpts);
+
+actorNetwork = [
+    featureInputLayer(obsDim, 'Normalization', 'none', 'Name', 'state')
+    fullyConnectedLayer(256, 'Name', 'fc1')
+    reluLayer('Name', 'relu1')
+    fullyConnectedLayer(256, 'Name', 'fc2')
+    reluLayer('Name', 'relu2')
+    fullyConnectedLayer(actDim, 'Name', 'fc3')
+    tanhLayer('Name', 'tanh1')];
+
+actorOpts = rlRepresentationOptions('LearnRate',1e-4,'GradientThreshold',1);
+actor = rlDeterministicActorRepresentation(actorNetwork, obsInfo, actInfo, ...
+    'Observation', {'state'}, 'Action', {'tanh1'}, actorOpts);
+
+agentOpts = rlDDPGAgentOptions(...
+    'SampleTime', 0.02, ...
+    'TargetSmoothFactor', 5e-3, ...
+    'DiscountFactor', 0.99, ...
+    'MiniBatchSize', 256);
+
+agent = rlDDPGAgent(actor, critic, agentOpts);
+
+% Train the agent
+trainOpts = rlTrainingOptions(...
+    'MaxEpisodes', 1000, ...
+    'MaxStepsPerEpisode', 1000, ...
+    'StopTrainingCriteria', 'AverageReward', ...
+    'StopTrainingValue', 200);
+
+trainingStats = train(agent, env, trainOpts);
+      </code></pre>
+      <p>
+        The same environment can be used to train SAC agents by replacing
+        <code class="language-matlab">rlDDPGAgent</code> with
+        <code class="language-matlab">rlSACAgent</code> and adjusting the
+        options to include entropy temperature and stochastic actor structures.
+      </p>
+
+      <h3>11.2 Wolfram Mathematica (Symbolic Soft Bellman Backup)</h3>
+      <p>
+        Mathematica can be used to manipulate symbolic Bellman equations and
+        verify properties of the soft value operator used in SAC.
+      </p>
+      <pre><code class="language-mathematica">
+(* Define symbolic soft Q and V for a finite state-action set *)
+Clear[gamma, alpha, Q, V, P, r, pi];
+gamma = Symbol["\[Gamma]"];
+alpha = Symbol["\[Alpha]"];
+
+(* Soft Bellman backup for V given Q and policy pi *)
+softV[s_] := Sum[
+  pi[s, a] * (Q[s, a] - alpha * Log[pi[s, a]]),
+  {a, Actions}
+];
+
+(* Soft Bellman backup for Q given V *)
+softTQ[s_, a_] := r[s, a] + gamma * Sum[
+  P[s, a, sNext] * softV[sNext],
+  {sNext, States}
+];
+
+(* Verify contraction property numerically for a simple MDP *)
+States = {s1, s2};
+Actions = {a1, a2};
+
+(* Example numeric instantiation *)
+P[s1, a1, s1] = 0.5; P[s1, a1, s2] = 0.5;
+P[s1, a2, s1] = 0.3; P[s1, a2, s2] = 0.7;
+P[s2, a1, s1] = 0.4; P[s2, a1, s2] = 0.6;
+P[s2, a2, s1] = 0.2; P[s2, a2, s2] = 0.8;
+
+r[s_, a_] := 0.0;
+pi[s_, a_] := 0.5;
+gammaVal = 0.9;
+alphaVal = 0.1;
+
+(* Represent Q as a vector and iterate softTQ *)
+qVec0 = {0.0, 0.0, 0.0, 0.0}; (* Q(s1,a1), Q(s1,a2), Q(s2,a1), Q(s2,a2) *)
+
+SoftBackup[q_List] := Module[
+  {qs, v1, v2, qNew},
+  qs[s1, a1] = q[[1]];
+  qs[s1, a2] = q[[2]];
+  qs[s2, a1] = q[[3]];
+  qs[s2, a2] = q[[4]];
+
+  softVNum[s_] := Sum[
+    pi[s, a] * (qs[s, a] - alphaVal * Log[pi[s, a]]),
+    {a, Actions}
+  ];
+
+  softTQNum[s_, a_] := gammaVal * Sum[
+    P[s, a, sNext] * softVNum[sNext],
+    {sNext, States}
+  ];
+
+  qNew = {
+    softTQNum[s1, a1],
+    softTQNum[s1, a2],
+    softTQNum[s2, a1],
+    softTQNum[s2, a2]
+  };
+  qNew
+];
+
+NestList[SoftBackup, qVec0, 10] // MatrixForm
+      </code></pre>
+      <p>
+        This code shows how to construct and iterate a soft Bellman backup in a
+        toy MDP, illustrating convergence numerically and providing a symbolic
+        playground to understand maximum-entropy RL before deploying SAC in
+        high-dimensional robotic tasks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Deterministic Policy Gradient Theorem):</strong>
+        Starting from the performance objective
+        <strong
+          >\( J(\theta) = \mathbb{E}_{s \sim \rho^{\mu_{\theta}}} [
+          Q^{\mu_{\theta}}(s,\mu_{\theta}(s)) ] \)</strong
+        >, derive the deterministic policy gradient expression
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla_{\theta} J(\theta) = \mathbb{E}_{s \sim \rho^{\mu_{\theta}}}
+        \Big[ \nabla_{\theta}\mu_{\theta}(s)\, \nabla_{a}
+        Q^{\mu_{\theta}}(s,a)\big|_{a = \mu_{\theta}(s)} \Big]. \]
+      </h4>
+      <p><strong>Solution:</strong></p>
+      <ol>
+        <li>
+          Expand the objective:
+          <strong
+            >\( J(\theta) = \sum_{s} \rho^{\mu_{\theta}}(s)\,
+            Q^{\mu_{\theta}}(s,\mu_{\theta}(s)) \)</strong
+          >.
+        </li>
+        <li>
+          Differentiate:
+          <strong
+            >\( \nabla_{\theta} J = \sum_{s}
+            \nabla_{\theta}\rho^{\mu_{\theta}}(s)\,
+            Q^{\mu_{\theta}}(s,\mu_{\theta}(s)) + \rho^{\mu_{\theta}}(s)\,
+            \nabla_{\theta} Q^{\mu_{\theta}}(s,\mu_{\theta}(s)) \)</strong
+          >.
+        </li>
+        <li>
+          Use the Bellman equation to express
+          <strong>\( \nabla_{\theta} Q^{\mu_{\theta}} \)</strong> recursively
+          and collect terms; the contribution from
+          <strong>\( \nabla_{\theta}\rho^{\mu_{\theta}} \)</strong> cancels with
+          future-state contributions, exactly as in the standard policy gradient
+          theorem.
+        </li>
+        <li>
+          The remaining term is the immediate dependence of the action on
+          <strong>\( \theta \)</strong>, giving
+          <strong
+            >\( \rho^{\mu_{\theta}}(s)\, \nabla_{\theta}\mu_{\theta}(s)\,
+            \nabla_{a} Q^{\mu_{\theta}}(s,a) \big|_{a = \mu_{\theta}(s)}
+            \)</strong
+          >, and taking expectation over
+          <strong>\( s \sim \rho^{\mu_{\theta}} \)</strong> yields the result.
+        </li>
+      </ol>
+
+      <p>
+        <strong>Problem 2 (Overestimation Bias and Double Critics):</strong>
+        Assume a critic approximation error \( \epsilon(s,a) \) with zero mean
+        but nonzero variance. Show heuristically why the single-critic target in
+        DDPG,
+        <strong
+          >\( y = r + \gamma Q_{\theta'}(s',\mu_{\theta_{\mu}'}(s')) \)</strong
+        >, tends to overestimate the true value, and why TD3's target using \(
+        \min(Q_1,Q_2) \) reduces this bias.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <ul>
+        <li>
+          Let the true value be \( Q^{\ast}(s',a') \) and the critic be \(
+          Q_{\theta'}(s',a') = Q^{\ast}(s',a') + \epsilon(s',a') \), with \(
+          \mathbb{E}[\epsilon] = 0 \) but \( \epsilon \) varying with \( a' \).
+        </li>
+        <li>
+          The actor \( \mu_{\theta_{\mu}'} \) is trained to maximize the
+          approximate critic, so at convergence \( a' = \mu_{\theta_{\mu}'}(s')
+          \) tends to select actions where \( \epsilon(s',a') \) is positive.
+          Hence \( \mathbb{E}[Q_{\theta'}(s',a')] \geq Q^{\ast}(s',a') \).
+        </li>
+        <li>
+          With two independent critics \( Q_i = Q^{\ast} + \epsilon_i \), the
+          expected minimum satisfies \( \mathbb{E}[\min(Q_1,Q_2)] \leq Q^{\ast}
+          \), but the negative bias is smaller in magnitude than the positive
+          bias of the maximum. Empirically, the minimum of two critics provides
+          a conservative but less biased target than a single optimistic critic.
+        </li>
+        <li>
+          Thus TD3's target \( y = r + \gamma \min(Q_1',Q_2') \) mitigates the
+          overestimation that destabilizes DDPG in continuous robotic tasks.
+        </li>
+      </ul>
+
+      <p>
+        <strong>Problem 3 (Soft Bellman Optimality and Policy Form):</strong>
+        Consider a single-state MDP with finite actions and soft Q-function \(
+        Q(a) \). Show that the policy that maximizes
+        <strong
+          >\( V = \mathbb{E}_{a \sim \pi} [ Q(a) - \alpha \log \pi(a) ]
+          \)</strong
+        >
+        over distributions \( \pi \) on actions has the Boltzmann form
+      </p>
+      <h4 class="mathJax">
+        \[ \pi^{\ast}(a) = \frac{\exp\big( Q(a) / \alpha \big)} {\sum_{a'}
+        \exp\big( Q(a') / \alpha \big)}. \]
+      </h4>
+      <p><strong>Solution:</strong></p>
+      <ol>
+        <li>
+          Form the Lagrangian with normalization constraint \( \sum_{a} \pi(a) =
+          1 \):
+          <strong
+            >\( \mathcal{L}(\pi,\lambda) = \sum_{a} \pi(a)\big( Q(a) - \alpha
+            \log \pi(a) \big) + \lambda\big(1 - \sum_{a} \pi(a)\big). \)</strong
+          >
+        </li>
+        <li>
+          Take partial derivatives:
+          <strong
+            >\( \frac{\partial \mathcal{L}}{\partial \pi(a)} = Q(a) - \alpha(1 +
+            \log \pi(a)) - \lambda = 0. \)</strong
+          >
+        </li>
+        <li>
+          Solve for \( \log \pi(a) \):
+          <strong
+            >\( \log \pi(a) = \frac{Q(a)}{\alpha} - 1 - \frac{\lambda}{\alpha}.
+            \)</strong
+          >
+          Thus
+          <strong>\( \pi(a) \propto \exp(Q(a)/\alpha). \)</strong>
+        </li>
+        <li>
+          Enforcing normalization yields the Boltzmann distribution stated.
+        </li>
+      </ol>
+
+      <p>
+        <strong>Problem 4 (Off-Policy Bellman Operator Contraction):</strong>
+        Let \( \mathcal{T}^{\pi} \) be the Bellman operator for a fixed target
+        policy \( \pi \). Prove that for any functions \( Q_1, Q_2 \),
+        <strong
+          >\( \| \mathcal{T}^{\pi} Q_1 - \mathcal{T}^{\pi} Q_2 \|_{\infty} \leq
+          \gamma \| Q_1 - Q_2 \|_{\infty} \)</strong
+        >, independent of the behavior policy.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <ol>
+        <li>
+          For any \( (s,a) \),
+          <strong
+            >\( (\mathcal{T}^{\pi} Q_1)(s,a) - (\mathcal{T}^{\pi} Q_2)(s,a) =
+            \gamma \mathbb{E}_{s',a'}\big[ Q_1(s',a') - Q_2(s',a') \big].
+            \)</strong
+          >
+        </li>
+        <li>
+          Take absolute value and apply Jensen's inequality:
+          <strong
+            >\( \big| (\mathcal{T}^{\pi} Q_1)(s,a) - (\mathcal{T}^{\pi}
+            Q_2)(s,a) \big| \leq \gamma \mathbb{E}_{s',a'}\big[ | Q_1(s',a') -
+            Q_2(s',a') | \big]. \)</strong
+          >
+        </li>
+        <li>
+          Bound by the sup norm:
+          <strong
+            >\( \mathbb{E}[ | Q_1 - Q_2 | ] \leq \| Q_1 - Q_2 \|_{\infty}.
+            \)</strong
+          >
+        </li>
+        <li>
+          Taking the supremum over \( (s,a) \) yields the desired contraction.
+          Note that the expectation is over \( P \) and \( \pi \) only; the
+          behavior policy does not appear, so the contraction holds in the
+          off-policy case where samples are drawn from another distribution.
+        </li>
+      </ol>
+
+      <p>
+        <strong>Problem 5 (Action Squashing and Torque Limits):</strong>
+        A DDPG actor outputs \( u(s) \in \mathbb{R}^n \) which is squashed
+        through a \( \tanh \) and scaled to torque limits \( a_{\max} \in
+        \mathbb{R}^n \):
+        <strong>\( a(s) = a_{\max} \odot \tanh(u(s)) \)</strong>. Derive \(
+        \nabla_{\theta} a(s) \) in terms of \( \nabla_{\theta} u(s) \), and
+        explain why very large \( \|u(s)\| \) can slow learning.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <ol>
+        <li>
+          For each component,
+          <strong>\( a_i(s) = a_{\max,i} \tanh(u_i(s)) \)</strong>, so
+          <strong
+            >\( \frac{\partial a_i}{\partial u_i} = a_{\max,i} (1 -
+            \tanh^2(u_i(s))). \)</strong
+          >
+        </li>
+        <li>
+          By the chain rule,
+          <strong
+            >\( \nabla_{\theta} a_i(s) = a_{\max,i} (1 - \tanh^2(u_i(s)))
+            \nabla_{\theta} u_i(s). \)</strong
+          >
+        </li>
+        <li>
+          When \( |u_i(s)| \) is large, \( \tanh(u_i(s)) \) saturates near \(
+          \pm 1 \), so \( 1 - \tanh^2(u_i(s)) \approx 0 \), and the gradient \(
+          \nabla_{\theta} a_i(s) \) becomes small even if \( \nabla_{\theta}
+          u_i(s) \) is large.
+        </li>
+        <li>
+          This gradient saturation slows learning, especially for outer regions
+          of the torque space. In practice one keeps network outputs in a
+          moderate range and uses appropriate initialization to avoid immediate
+          saturation.
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson, we formalized off-policy actor–critic methods for
+        continuous robotic control. Starting from the Bellman operator and the
+        deterministic policy gradient theorem, we derived the core updates of
+        DDPG, TD3, and SAC. We highlighted how double critics, delayed policy
+        updates, and entropy regularization address overestimation, instability,
+        and exploration in high-DOF robotic systems. Finally, we sketched
+        implementations across Python, C++, Java, MATLAB/Simulink, and
+        Mathematica, providing a bridge from theoretical constructs to practical
+        controllers for real robots.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical and Algorithmic Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Silver, D., Lever, G., Heess, N., Degris, T., Wierstra, D., &amp;
+        Riedmiller, M. (2014). Deterministic Policy Gradient Algorithms.
+        <em
+          >Proceedings of the 31st International Conference on Machine Learning
+          (ICML)</em
+        >, 387–395.
+      </li>
+      <li>
+        Lillicrap, T. P., Hunt, J. J., Pritzel, A., et al. (2016). Continuous
+        Control with Deep Reinforcement Learning.
+        <em>International Conference on Learning Representations (ICLR)</em>.
+      </li>
+      <li>
+        Fujimoto, S., van Hoof, H., &amp; Meger, D. (2018). Addressing Function
+        Approximation Error in Actor–Critic Methods.
+        <em
+          >Proceedings of the 35th International Conference on Machine Learning
+          (ICML)</em
+        >, 1587–1596.
+      </li>
+      <li>
+        Haarnoja, T., Zhou, A., Abbeel, P., &amp; Levine, S. (2018). Soft
+        Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning
+        with a Stochastic Actor.
+        <em
+          >Proceedings of the 35th International Conference on Machine Learning
+          (ICML)</em
+        >, 1861–1870.
+      </li>
+      <li>
+        Haarnoja, T., Tang, H., Abbeel, P., &amp; Levine, S. (2017).
+        Reinforcement Learning with Deep Energy-Based Policies.
+        <em>International Conference on Machine Learning (ICML)</em>, 1352–1361.
+      </li>
+      <li>
+        Sutton, R. S., McAllester, D., Singh, S., &amp; Mansour, Y. (2000).
+        Policy Gradient Methods for Reinforcement Learning with Function
+        Approximation.
+        <em>Advances in Neural Information Processing Systems (NeurIPS)</em>,
+        1057–1063.
+      </li>
+      <li>
+        Munos, R. (2003). Error Bounds for Approximate Policy Iteration.
+        <em
+          >Proceedings of the 20th International Conference on Machine Learning
+          (ICML)</em
+        >, 560–567.
+      </li>
+      <li>
+        Van Hasselt, H. (2010). Double Q-learning.
+        <em>Advances in Neural Information Processing Systems (NeurIPS)</em>,
+        2613–2621.
+      </li>
+      <li>
+        Baird, L. (1995). Residual Algorithms: Reinforcement Learning with
+        Function Approximation.
+        <em
+          >Proceedings of the 12th International Conference on Machine Learning
+          (ICML)</em
+        >, 30–37.
+      </li>
+      <li>
+        Bertsekas, D. P., &amp; Tsitsiklis, J. N. (1996).
+        <em>Neuro-Dynamic Programming</em>. Athena Scientific.
+      </li>
+    </ol>
+  </div>
+</section>
+
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter12/Lesson2.html">
+          Lesson 2: Policy Gradients and Actor–Critic Methods
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter12/Lesson4.html">
+          Lesson 4: Reward Design and Sparse-Reward Tricks
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1883 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Navigation Architecture for AMR - Lesson 2: Costmaps and Inflation Concepts | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 14: Navigation Architecture for AMR</h1>
+    <h3><strong>Lesson 2: Costmaps and Inflation Concepts</strong></h3>
+    <p>
+      This lesson builds the mathematical and algorithmic foundations of
+      costmaps used in layered AMR navigation stacks. We formalize (i) how
+      probabilistic occupancy grids are converted into discrete cost fields,
+      (ii) how robot footprint geometry induces configuration-space obstacle
+      expansion via Minkowski sums, and (iii) how inflation produces smooth,
+      tunable safety margins through distance transforms and decay kernels. The
+      result is a rigorous view of what the local navigation layer actually
+      “sees” when it evaluates trajectories.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        A <em>costmap</em> is a discrete scalar field defined over a 2D grid
+        (typically aligned with the ground plane). Each cell stores a cost that
+        encodes traversal risk. Formally, let the grid index set be
+        <strong
+          >\( \mathcal{G}=\{(i,j)\mid 0\le i &lt; W,\; 0\le j &lt; H\}
+          \)</strong
+        >
+        and define a cost function
+        <strong>\( C:\mathcal{G}\to \{0,1,\dots,255\} \)</strong>. Typical
+        semantics are:
+      </p>
+      <ul>
+        <li><strong>\( C=0 \)</strong>: free space (preferred).</li>
+        <li>
+          <strong>\( C\approx 255 \)</strong>: lethal obstacle (collision if
+          entered).
+        </li>
+        <li>
+          <strong>\( 0 &lt; C &lt; 255 \)</strong>: inflated/penalized region
+          near obstacles (discourages proximity).
+        </li>
+      </ul>
+
+      <p>
+        In layered navigation, the master costmap is produced by composing
+        multiple layers (static map, sensor obstacles, inflation, etc.). The
+        local navigation module then evaluates candidate motions using this cost
+        field.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  M["Static map layer (prior)"] --> MC["Master costmap C(i,j)"]
+  S["Sensors (LiDAR/Depth)"] --> O["Obstacle layer (dynamic)"]
+  O --> MC
+  MC --> D["Distance field d(i,j)"]
+  D --> I["Inflation (decay cost around obstacles)"]
+  I --> MC
+  MC --> L["Local navigation evaluates trajectories"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: From Occupancy Probability to Discrete Cost -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. From Occupancy Probability to Discrete Cost</h2>
+    <div class="down-content">
+      <p>
+        Earlier (Chapter 9), you learned occupancy grids as probabilistic maps.
+        Each cell stores an occupancy probability
+        <strong>\( p_{ij} \in (0,1) \)</strong>, interpreted as
+        <strong>\( p_{ij} = \Pr(m_{ij}=\text{occ}\mid z_{1:t}) \)</strong>
+        given sensor data <strong>\( z_{1:t} \)</strong>. A numerically stable
+        representation uses log-odds:
+        <strong>\( L_{ij}=\log\!\frac{p_{ij}}{1-p_{ij}} \)</strong>.
+      </p>
+
+      <p>
+        For an inverse sensor model producing an increment
+        <strong>\( \ell(z_t,ij) \)</strong>, the standard additive log-odds
+        update is:
+      </p>
+      <h4 class="mathJax">
+        \[ L_{ij}^{(t)} = L_{ij}^{(t-1)} + \ell(z_t,ij). \]
+      </h4>
+
+      <p>
+        Converting probabilities to costs is a
+        <em>decision-and-scaling</em> step. A common threshold model is:
+      </p>
+      <h4 class="mathJax">
+        \[ C_{\text{base}}(i,j)= \begin{cases} C_{\text{lethal}} & \text{if }
+        p_{ij} \ge p_{\text{occ}}, \\ C_{\text{unknown}} & \text{if }
+        p_{\text{free}} &lt; p_{ij} &lt; p_{\text{occ}}, \\ 0 & \text{if }
+        p_{ij} \le p_{\text{free}}. \end{cases} \]
+      </h4>
+
+      <p>
+        Here <strong>\(p_{\text{occ}}\)</strong> and
+        <strong>\(p_{\text{free}}\)</strong> implement a hysteresis band to
+        avoid flicker under noise. The inflation layer then transforms the
+        sparse obstacle set into a smooth safety buffer by assigning a graded
+        penalty to cells near obstacles.
+      </p>
+
+      <p>
+        <strong>Important modeling note.</strong> The costmap is not a
+        probability distribution; it is a control-oriented surrogate objective
+        that trades off safety and efficiency. Its calibration depends on
+        footprint geometry, dynamics margins, and the local navigation
+        controller.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Footprint Geometry, Minkowski Sums, and Why Inflation Exists -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Footprint Geometry, Minkowski Sums, and Why Inflation Exists</h2>
+    <div class="down-content">
+      <p>
+        Let the robot footprint in its body frame be a compact set
+        <strong>\( \mathcal{R}\subset\mathbb{R}^2 \)</strong> (polygon or circle
+        approximation). Let workspace obstacles be
+        <strong>\( \mathcal{O}\subset\mathbb{R}^2 \)</strong>. A robot center
+        position <strong>\( \mathbf{x}\in\mathbb{R}^2 \)</strong> is in
+        collision iff:
+      </p>
+      <h4 class="mathJax">
+        \[ (\mathbf{x}+\mathcal{R}) \cap \mathcal{O} \ne \emptyset. \]
+      </h4>
+
+      <p>
+        Define the reflected footprint
+        <strong
+          >\( -\mathcal{R}=\{-\mathbf{r}\mid \mathbf{r}\in\mathcal{R}\}
+          \)</strong
+        >. The configuration-space obstacle set for the robot center is:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{O}_{\text{cs}} = \mathcal{O} \oplus (-\mathcal{R})
+        \;=\;\{\mathbf{o}-\mathbf{r}\mid
+        \mathbf{o}\in\mathcal{O},\;\mathbf{r}\in\mathcal{R}\}. \]
+      </h4>
+
+      <p>
+        This is the <em>Minkowski sum dilation</em> viewpoint: planning for the
+        robot center is equivalent to planning a point robot among dilated
+        obstacles. On a grid, inflation approximates this dilation plus an
+        additional safety margin <strong>\(d_{\text{safe}}\)</strong>.
+      </p>
+
+      <p>
+        <strong>Proposition (safety via inflated obstacles).</strong> Suppose
+        the footprint is contained in a circle of radius
+        <strong>\(r_c\)</strong> (circumscribed radius), i.e.
+        <strong
+          >\( \mathcal{R} \subset \{\mathbf{r}:\|\mathbf{r}\|_2 \le r_c\}
+          \)</strong
+        >. If we mark all cells whose center is within distance
+        <strong>\( r_c + d_{\text{safe}} \)</strong> of any obstacle as
+        “forbidden,” then any path for the robot center that stays outside this
+        forbidden set has clearance at least
+        <strong>\(d_{\text{safe}}\)</strong>.
+      </p>
+
+      <p>
+        <strong>Proof.</strong> Let <strong>\( \mathbf{x} \)</strong> be a robot
+        center on the path and let <strong>\( \mathbf{o} \)</strong> be the
+        closest obstacle point so that
+        <strong
+          >\( \|\mathbf{x}-\mathbf{o}\|_2 =
+          \operatorname{dist}(\mathbf{x},\mathcal{O}) \)</strong
+        >. If the path stays outside the forbidden set, then
+        <strong
+          >\( \operatorname{dist}(\mathbf{x},\mathcal{O}) &gt; r_c +
+          d_{\text{safe}} \)</strong
+        >. For any footprint point
+        <strong>\( \mathbf{r}\in\mathcal{R} \)</strong>, we have
+        <strong>\( \|\mathbf{r}\|_2 \le r_c \)</strong>. By triangle inequality:
+      </p>
+      <h4 class="mathJax">
+        \[ \|\mathbf{x}+\mathbf{r}-\mathbf{o}\|_2 \ge
+        \|\mathbf{x}-\mathbf{o}\|_2 - \|\mathbf{r}\|_2 &gt; (r_c +
+        d_{\text{safe}}) - r_c = d_{\text{safe}}. \]
+      </h4>
+      <p>
+        Hence every point of the footprint stays at least
+        <strong>\(d_{\text{safe}}\)</strong> away from obstacles. □
+      </p>
+
+      <p>
+        Practical stacks refine this using an <em>inscribed radius</em>
+        <strong>\(r_{\text{in}}\)</strong> (largest circle contained inside the
+        footprint) and a graded penalty between
+        <strong>\(r_{\text{in}}\)</strong> and an <em>inflation radius</em>
+        <strong>\(r_{\text{inf}}\)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Inflation as a Distance-Transform + Decay Kernel -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Inflation as a Distance-Transform + Decay Kernel</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( d(i,j) \)</strong> be the Euclidean distance (in meters)
+        from cell center <strong>\((i,j)\)</strong>
+        to the nearest obstacle cell (or obstacle boundary, depending on
+        convention). Inflation computes a cost
+        <strong>\( C_{\text{infl}}(i,j) \)</strong> from
+        <strong>\( d(i,j) \)</strong>.
+      </p>
+
+      <p>A standard piecewise model (used widely in practice) is:</p>
+      <h4 class="mathJax">
+        \[ C_{\text{infl}}(i,j)= \begin{cases} C_{\text{lethal}} & \text{if }
+        d(i,j)=0,\\ C_{\text{ins}} & \text{if } 0 &lt; d(i,j) \le
+        r_{\text{in}},\\ \Big\lfloor
+        (C_{\text{ins}}-1)\exp\!\big(-k(d(i,j)-r_{\text{in}})\big)+1 \Big\rceil
+        & \text{if } r_{\text{in}} &lt; d(i,j) \le r_{\text{inf}},\\ 0 &
+        \text{if } d(i,j) &gt; r_{\text{inf}}, \end{cases} \]
+      </h4>
+
+      <p>
+        where <strong>\(k&gt;0\)</strong> is a scaling factor controlling how
+        fast cost decays with distance, and
+        <strong>\(\lfloor \cdot \rceil\)</strong> denotes rounding to an integer
+        cost. The “inscribed” band enforces a hard safety core near obstacles
+        for the footprint’s guaranteed inner circle.
+      </p>
+
+      <p>
+        <strong>Lemma (monotonicity).</strong> For
+        <strong>\( r_{\text{in}} &lt; d \le r_{\text{inf}} \)</strong>, the
+        continuous (pre-rounded) inflation cost
+        <strong
+          >\( \tilde{C}(d)=(C_{\text{ins}}-1)\exp(-k(d-r_{\text{in}}))+1
+          \)</strong
+        >
+        is strictly decreasing in <strong>\(d\)</strong>.
+      </p>
+      <p>
+        <strong>Proof.</strong>
+        Differentiate:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{d\tilde{C}}{dd} = -(C_{\text{ins}}-1)k
+        \exp\!\big(-k(d-r_{\text{in}})\big) &lt; 0 \quad \text{for } k&gt;0. \]
+      </h4>
+      <p>
+        Thus increasing clearance strictly reduces penalty (before
+        discretization/rounding). □
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  O["Obstacle cells (binary grid)"] --> DT["Compute distance field d(i,j)"]
+  DT --> B1["If d == 0 \nthen lethal"]
+  DT --> B2["If d in (0, r_in] \nthen inscribed"]
+  DT --> B3["If d in (r_in, r_inf] \nthen cost=(Cins-1)*exp(-k*(d-r_in))+1"]
+  DT --> B4["If d in (r_inf, +inf) \nthen 0"]
+  B1 --> C["Inflated costmap layer"]
+  B2 --> C
+  B3 --> C
+  B4 --> C
+</pre
+        >
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Computing the Distance Field on a Grid -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Computing the Distance Field on a Grid</h2>
+    <div class="down-content">
+      <p>
+        Let grid resolution be <strong>\( \Delta \)</strong> meters/cell. The
+        distance field ideally is:
+        <strong
+          >\( d(i,j)=\min_{(u,v)\in\mathcal{O}} \Delta\sqrt{(i-u)^2+(j-v)^2}
+          \)</strong
+        >, where <strong>\(\mathcal{O}\subset\mathcal{G}\)</strong> is the
+        obstacle cell set.
+      </p>
+
+      <p>
+        Exact Euclidean distance transforms can be computed in linear time in
+        the number of cells, but many practical implementations use approximate
+        multi-source wavefront propagation (often called “brushfire”) with 4- or
+        8-neighborhood updates. With 8-neighborhood steps of length
+        <strong>\(\Delta\)</strong> and <strong>\(\sqrt{2}\Delta\)</strong>, you
+        obtain a tight approximation suitable for inflation.
+      </p>
+
+      <p>
+        <strong>Discretization bound (clearance error).</strong>
+        If obstacle boundaries are represented at cell centers, the true
+        continuous clearance differs from the grid distance by at most about
+        half a cell diagonal:
+        <strong>\( \epsilon \le \tfrac{\sqrt{2}}{2}\Delta \)</strong>. This
+        motivates choosing <strong>\(\Delta\)</strong> small enough that
+        <strong>\(\epsilon\)</strong> is below the safety margin.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Layer Composition and Parameter Coupling -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Layer Composition and Parameter Coupling</h2>
+    <div class="down-content">
+      <p>
+        A common master costmap composition is the cellwise maximum:
+        <strong>\( C(i,j)=\max_\ell C_\ell(i,j) \)</strong> over layers
+        <strong>\(\ell\)</strong>. This is conservative: any layer can veto
+        traversal.
+      </p>
+
+      <p>Key parameters (conceptually; naming varies across stacks):</p>
+      <ul>
+        <li>
+          <strong>\( \Delta \)</strong> (resolution): smaller improves geometric
+          fidelity but increases computation.
+        </li>
+        <li>
+          <strong>\( r_{\text{in}} \)</strong> (inscribed radius): footprint
+          inner safety core.
+        </li>
+        <li>
+          <strong>\( r_{\text{inf}} \)</strong> (inflation radius): how far
+          penalty spreads into free space.
+        </li>
+        <li>
+          <strong>\( k \)</strong> (cost scaling): larger makes a steeper
+          “repulsive wall”; smaller is smoother but may allow close passes.
+        </li>
+      </ul>
+
+      <p>
+        Practical tuning rule: pick
+        <strong>\( r_{\text{inf}} \ge r_c + d_{\text{safe}} \)</strong> for a
+        desired clearance, then adjust <strong>\(k\)</strong> so that the cost
+        at clearance distance is below the “acceptable” threshold used by the
+        local navigation evaluator.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation (Grid + Inflation) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation — Build and Inflate a Costmap</h2>
+    <div class="down-content">
+      <p><strong>Chapter14_Lesson2.py</strong></p>
+      <pre><code class="language-python">
+"""
+Chapter14_Lesson2.py
+Costmaps and Inflation Concepts — reference implementation (grid + inflation).
+This script builds a toy occupancy grid, computes an approximate Euclidean distance
+field via an 8-connected brushfire, and produces an inflated costmap.
+"""
+
+from collections import deque
+import math
+from typing import List, Tuple
+
+Grid = List[List[int]]  # 0 free, 1 obstacle
+
+def make_toy_map(w: int = 60, h: int = 40) -> Grid:
+    g = [[0 for _ in range(w)] for _ in range(h)]
+    # border
+    for x in range(w):
+        g[0][x] = 1
+        g[h-1][x] = 1
+    for y in range(h):
+        g[y][0] = 1
+        g[y][w-1] = 1
+    # internal obstacles
+    for x in range(10, 50):
+        g[12][x] = 1
+    for y in range(18, 33):
+        g[y][28] = 1
+    for x in range(35, 55):
+        g[28][x] = 1
+    return g
+
+def brushfire_distance(obstacles: Grid, resolution: float) -> List[List[float]]:
+    """
+    Approximate Euclidean distance transform using multi-source BFS.
+    8-neighborhood with step costs {1, sqrt(2)} * resolution.
+    """
+    h = len(obstacles)
+    w = len(obstacles[0])
+    INF = 1e9
+    dist = [[INF for _ in range(w)] for _ in range(h)]
+    q = deque()
+
+    # initialize all obstacle cells
+    for y in range(h):
+        for x in range(w):
+            if obstacles[y][x] == 1:
+                dist[y][x] = 0.0
+                q.append((x, y))
+
+    nbrs = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+            (-1, -1, math.sqrt(2)), (1, -1, math.sqrt(2)),
+            (-1, 1, math.sqrt(2)), (1, 1, math.sqrt(2))]
+
+    while q:
+        x, y = q.popleft()
+        dxy = dist[y][x]
+        for dx, dy, step in nbrs:
+            nx, ny = x + dx, y + dy
+            if 0 &lt;= nx &lt; w and 0 &lt;= ny &lt; h:
+                nd = dxy + step * resolution
+                if nd &lt; dist[ny][nx]:
+                    dist[ny][nx] = nd
+                    q.append((nx, ny))
+    return dist
+
+def inflation_cost_from_distance(d: float, r_inscribed: float, r_inflation: float,
+                                cost_scaling: float,
+                                lethal_cost: int = 254,
+                                inscribed_cost: int = 253) -&gt; int:
+    """
+    Common inflation cost model:
+      - obstacle cell: lethal_cost
+      - 0 &lt; d &lt;= r_inscribed: inscribed_cost
+      - r_inscribed &lt; d &lt;= r_inflation: exponential decay
+      - d &gt; r_inflation: 0
+    """
+    if d &lt;= 0.0:
+        return lethal_cost
+    if d &lt;= r_inscribed:
+        return inscribed_cost
+    if d &gt; r_inflation:
+        return 0
+
+    # decay from (inscribed_cost-1) down to 1, then clamp
+    c = (inscribed_cost - 1) * math.exp(-cost_scaling * (d - r_inscribed)) + 1.0
+    c_int = int(max(1, min(inscribed_cost - 1, round(c))))
+    return c_int
+
+def build_inflated_costmap(obstacles: Grid, resolution: float,
+                           r_inscribed: float, r_inflation: float,
+                           cost_scaling: float) -&gt; List[List[int]]:
+    dist = brushfire_distance(obstacles, resolution)
+    h = len(obstacles)
+    w = len(obstacles[0])
+    cm = [[0 for _ in range(w)] for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            cm[y][x] = inflation_cost_from_distance(
+                dist[y][x], r_inscribed, r_inflation, cost_scaling
+            )
+    return cm
+
+def ascii_render_costmap(costmap: List[List[int]]) -&gt; str:
+    """
+    Render costmap with ASCII characters:
+      '#' lethal, '+' high, '.' low, ' ' free
+    """
+    lines = []
+    for row in costmap:
+        s = []
+        for c in row:
+            if c &gt;= 254:
+                s.append('#')
+            elif c &gt;= 200:
+                s.append('X')
+            elif c &gt;= 120:
+                s.append('+')
+            elif c &gt;= 40:
+                s.append('.')
+            else:
+                s.append(' ')
+        lines.append(''.join(s))
+    return "\n".join(lines)
+
+def main():
+    resolution = 0.05  # m/cell
+    r_inscribed = 0.25 # m
+    r_inflation = 0.60 # m
+    cost_scaling = 6.0 # 1/m
+
+    obs = make_toy_map()
+    costmap = build_inflated_costmap(obs, resolution, r_inscribed, r_inflation, cost_scaling)
+    print("Inflated costmap (ASCII preview):")
+    print(ascii_render_costmap(costmap))
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <p>
+        This script is intentionally “stack-agnostic”: it isolates the
+        mathematics of distance fields + decay costs. In a full AMR system, the
+        obstacle grid would be updated by the sensor pipeline, and the inflated
+        layer would be recomputed in a local rolling window around the robot.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation (Grid + Inflation) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation — Brushfire Distance + Inflation</h2>
+    <div class="down-content">
+      <p><strong>Chapter14_Lesson2.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter14_Lesson2.cpp
+// Costmaps and Inflation Concepts — simple grid + brushfire inflation (no ROS deps).
+#include &lt;cmath&gt;
+#include &lt;cstdint&gt;
+#include &lt;deque&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;vector&gt;
+
+struct Cell { int x, y; };
+
+static std::vector&lt;std::vector&lt;int&gt;&gt; makeToyMap(int w=60, int h=40) {
+    std::vector&lt;std::vector&lt;int&gt;&gt; g(h, std::vector&lt;int&gt;(w, 0));
+    for (int x=0; x&lt;w; ++x) { g[0][x]=1; g[h-1][x]=1; }
+    for (int y=0; y&lt;h; ++y) { g[y][0]=1; g[y][w-1]=1; }
+    for (int x=10; x&lt;50; ++x) g[12][x]=1;
+    for (int y=18; y&lt;33; ++y) g[y][28]=1;
+    for (int x=35; x&lt;55; ++x) g[28][x]=1;
+    return g;
+}
+
+static std::vector&lt;std::vector&lt;double&gt;&gt; brushfireDistance(
+    const std::vector&lt;std::vector&lt;int&gt;&gt;&amp; obs, double resolution)
+{
+    const int h = (int)obs.size();
+    const int w = (int)obs[0].size();
+    const double INF = std::numeric_limits&lt;double&gt;::infinity();
+
+    std::vector&lt;std::vector&lt;double&gt;&gt; dist(h, std::vector&lt;double&gt;(w, INF));
+    std::deque&lt;Cell&gt; q;
+
+    for (int y=0; y&lt;h; ++y) for (int x=0; x&lt;w; ++x) {
+        if (obs[y][x] == 1) { dist[y][x] = 0.0; q.push_back({x,y}); }
+    }
+
+    struct Nbr { int dx, dy; double step; };
+    const double s2 = std::sqrt(2.0);
+    const Nbr nbrs[8] = {
+        {-1,0,1.0},{1,0,1.0},{0,-1,1.0},{0,1,1.0},
+        {-1,-1,s2},{1,-1,s2},{-1,1,s2},{1,1,s2}
+    };
+
+    while (!q.empty()) {
+        Cell c = q.front(); q.pop_front();
+        const double dxy = dist[c.y][c.x];
+        for (const auto&amp; nb : nbrs) {
+            const int nx = c.x + nb.dx;
+            const int ny = c.y + nb.dy;
+            if (0 &lt;= nx &amp;&amp; nx &lt; w &amp;&amp; 0 &lt;= ny &amp;&amp; ny &lt; h) {
+                const double nd = dxy + nb.step * resolution;
+                if (nd &lt; dist[ny][nx]) { dist[ny][nx] = nd; q.push_back({nx,ny}); }
+            }
+        }
+    }
+    return dist;
+}
+
+static int inflationCost(double d, double r_inscribed, double r_inflation, double cost_scaling,
+                         int lethal_cost=254, int inscribed_cost=253)
+{
+    if (d &lt;= 0.0) return lethal_cost;
+    if (d &lt;= r_inscribed) return inscribed_cost;
+    if (d &gt; r_inflation) return 0;
+
+    const double c = (inscribed_cost - 1) * std::exp(-cost_scaling * (d - r_inscribed)) + 1.0;
+    int ci = (int)std::llround(c);
+    if (ci &lt; 1) ci = 1;
+    if (ci &gt; inscribed_cost - 1) ci = inscribed_cost - 1;
+    return ci;
+}
+
+static std::vector&lt;std::vector&lt;int&gt;&gt; buildInflatedCostmap(
+    const std::vector&lt;std::vector&lt;int&gt;&gt;&amp; obs,
+    double resolution, double r_inscribed, double r_inflation, double cost_scaling)
+{
+    auto dist = brushfireDistance(obs, resolution);
+    const int h = (int)obs.size();
+    const int w = (int)obs[0].size();
+    std::vector&lt;std::vector&lt;int&gt;&gt; cm(h, std::vector&lt;int&gt;(w, 0));
+    for (int y=0; y&lt;h; ++y) for (int x=0; x&lt;w; ++x)
+        cm[y][x] = inflationCost(dist[y][x], r_inscribed, r_inflation, cost_scaling);
+    return cm;
+}
+
+static void asciiRender(const std::vector&lt;std::vector&lt;int&gt;&gt;&amp; cm) {
+    for (const auto&amp; row : cm) {
+        for (int c : row) {
+            char ch = ' ';
+            if (c &gt;= 254) ch = '#';
+            else if (c &gt;= 200) ch = 'X';
+            else if (c &gt;= 120) ch = '+';
+            else if (c &gt;= 40)  ch = '.';
+            std::cout &lt;&lt; ch;
+        }
+        std::cout &lt;&lt; "\n";
+    }
+}
+
+int main() {
+    const double resolution = 0.05;
+    const double r_inscribed = 0.25;
+    const double r_inflation = 0.60;
+    const double cost_scaling = 6.0;
+
+    auto obs = makeToyMap();
+    auto cm = buildInflatedCostmap(obs, resolution, r_inscribed, r_inflation, cost_scaling);
+    std::cout &lt;&lt; "Inflated costmap (ASCII preview):\n";
+    asciiRender(cm);
+    return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation (Grid + Inflation) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation — Brushfire Distance + Inflation</h2>
+    <div class="down-content">
+      <p><strong>Chapter14_Lesson2.java</strong></p>
+      <pre><code class="language-java">
+// Chapter14_Lesson2.java
+// Costmaps and Inflation Concepts — grid + brushfire inflation (pure Java).
+import java.util.ArrayDeque;
+import java.util.Arrays;
+
+public class Chapter14_Lesson2 {
+
+    static int[][] makeToyMap(int w, int h) {
+        int[][] g = new int[h][w];
+        for (int x=0; x&lt;w; x++) { g[0][x]=1; g[h-1][x]=1; }
+        for (int y=0; y&lt;h; y++) { g[y][0]=1; g[y][w-1]=1; }
+        for (int x=10; x&lt;50; x++) g[12][x]=1;
+        for (int y=18; y&lt;33; y++) g[y][28]=1;
+        for (int x=35; x&lt;55; x++) g[28][x]=1;
+        return g;
+    }
+
+    static double[][] brushfireDistance(int[][] obs, double resolution) {
+        int h = obs.length, w = obs[0].length;
+        double INF = 1e18;
+        double[][] dist = new double[h][w];
+        for (int y=0; y&lt;h; y++) Arrays.fill(dist[y], INF);
+
+        ArrayDeque&lt;int[]&gt; q = new ArrayDeque&lt;&gt;();
+        for (int y=0; y&lt;h; y++) for (int x=0; x&lt;w; x++) {
+            if (obs[y][x] == 1) { dist[y][x] = 0.0; q.add(new int[]{x,y}); }
+        }
+
+        int[] dx = {-1,1,0,0,-1,1,-1,1};
+        int[] dy = {0,0,-1,1,-1,-1,1,1};
+        double[] step = {1,1,1,1,Math.sqrt(2),Math.sqrt(2),Math.sqrt(2),Math.sqrt(2)};
+
+        while (!q.isEmpty()) {
+            int[] c = q.removeFirst();
+            int x = c[0], y = c[1];
+            double dxy = dist[y][x];
+            for (int k=0; k&lt;8; k++) {
+                int nx = x + dx[k], ny = y + dy[k];
+                if (0 &lt;= nx &amp;&amp; nx &lt; w &amp;&amp; 0 &lt;= ny &amp;&amp; ny &lt; h) {
+                    double nd = dxy + step[k]*resolution;
+                    if (nd &lt; dist[ny][nx]) {
+                        dist[ny][nx] = nd;
+                        q.add(new int[]{nx, ny});
+                    }
+                }
+            }
+        }
+        return dist;
+    }
+
+    static int inflationCost(double d, double rInscribed, double rInflation, double costScaling) {
+        int lethal = 254, inscribed = 253;
+        if (d &lt;= 0.0) return lethal;
+        if (d &lt;= rInscribed) return inscribed;
+        if (d &gt; rInflation) return 0;
+        double c = (inscribed - 1) * Math.exp(-costScaling * (d - rInscribed)) + 1.0;
+        long ci = Math.round(c);
+        if (ci &lt; 1) ci = 1;
+        if (ci &gt; inscribed - 1) ci = inscribed - 1;
+        return (int)ci;
+    }
+
+    static int[][] buildInflatedCostmap(int[][] obs, double resolution,
+                                       double rInscribed, double rInflation, double costScaling) {
+        double[][] dist = brushfireDistance(obs, resolution);
+        int h = obs.length, w = obs[0].length;
+        int[][] cm = new int[h][w];
+        for (int y=0; y&lt;h; y++) for (int x=0; x&lt;w; x++)
+            cm[y][x] = inflationCost(dist[y][x], rInscribed, rInflation, costScaling);
+        return cm;
+    }
+
+    static void asciiRender(int[][] cm) {
+        for (int y=0; y&lt;cm.length; y++) {
+            StringBuilder sb = new StringBuilder();
+            for (int x=0; x&lt;cm[0].length; x++) {
+                int c = cm[y][x];
+                char ch = ' ';
+                if (c &gt;= 254) ch = '#';
+                else if (c &gt;= 200) ch = 'X';
+                else if (c &gt;= 120) ch = '+';
+                else if (c &gt;= 40)  ch = '.';
+                sb.append(ch);
+            }
+            System.out.println(sb.toString());
+        }
+    }
+
+    public static void main(String[] args) {
+        double resolution = 0.05;
+        double rInscribed = 0.25;
+        double rInflation = 0.60;
+        double costScaling = 6.0;
+
+        int[][] obs = makeToyMap(60, 40);
+        int[][] cm = buildInflatedCostmap(obs, resolution, rInscribed, rInflation, costScaling);
+
+        System.out.println("Inflated costmap (ASCII preview):");
+        asciiRender(cm);
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      10. MATLAB/Simulink Implementation — Distance Transform via
+      <code>bwdist</code>
+    </h2>
+    <div class="down-content">
+      <p><strong>Chapter14_Lesson2.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter14_Lesson2.m
+% Costmaps and Inflation Concepts — build inflated costmap using bwdist.
+
+clear; clc;
+
+resolution = 0.05;      % m/cell
+r_inscribed = 0.25;     % m
+r_inflation = 0.60;     % m
+cost_scaling = 6.0;     % 1/m
+
+w = 60; h = 40;
+obs = zeros(h, w);
+obs(1,:) = 1; obs(end,:) = 1;
+obs(:,1) = 1; obs(:,end) = 1;
+obs(13, 11:50) = 1;         % MATLAB is 1-indexed
+obs(19:33, 29) = 1;
+obs(29, 36:55) = 1;
+
+% Euclidean distance to nearest obstacle cell (in cells)
+d_cells = bwdist(obs &gt; 0);
+d = d_cells * resolution;    % meters
+
+lethal = 254;
+inscribed = 253;
+
+costmap = zeros(h, w);
+
+% lethal cells
+costmap(d &lt;= 0) = lethal;
+
+% inside inscribed radius
+mask_in = (d &gt; 0) &amp; (d &lt;= r_inscribed);
+costmap(mask_in) = inscribed;
+
+% inflation band
+mask_inf = (d &gt; r_inscribed) &amp; (d &lt;= r_inflation);
+c = (inscribed - 1) .* exp(-cost_scaling .* (d(mask_inf) - r_inscribed)) + 1;
+c = round(c);
+c = max(1, min(inscribed-1, c));
+costmap(mask_inf) = c;
+
+% display
+figure;
+imagesc(costmap);
+axis image; colorbar;
+title('Inflated Costmap (0..254)');
+      </code></pre>
+
+      <p>
+        In Simulink, the same concept is realized by (i) generating a binary
+        obstacle raster, (ii) applying a distance transform (or chamfer
+        approximation), and (iii) mapping distance to cost via a Lookup Table
+        block implementing the exponential decay.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      11. Wolfram Mathematica Implementation — <code>DistanceTransform</code>
+    </h2>
+    <div class="down-content">
+      <p><strong>Chapter14_Lesson2.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter14_Lesson2.nb
+   Costmaps and Inflation Concepts — minimal Mathematica notebook expression. *)
+
+Notebook[{
+  Cell["Chapter 14 — Lesson 2: Costmaps and Inflation Concepts", "Title"],
+  Cell["Toy occupancy grid -> distance transform -> inflated costmap.", "Text"],
+  Cell[BoxData[
+    ToBoxes@Module[
+      {w=60, h=40, resolution=0.05, rIns=0.25, rInf=0.60, k=6.0,
+       obs, dist, cost},
+      obs = ConstantArray[0, {h,w}];
+      obs[[1, All]] = 1; obs[[h, All]] = 1;
+      obs[[All, 1]] = 1; obs[[All, w]] = 1;
+      obs[[13, 11 ;; 50]] = 1;
+      obs[[19 ;; 33, 29]] = 1;
+      obs[[29, 36 ;; 55]] = 1;
+
+      (* Euclidean distance (in cells) to nearest obstacle *)
+      dist = DistanceTransform[obs, WorkingPrecision -> MachinePrecision] * resolution;
+
+      cost[d_] := Which[
+        d <= 0, 254,
+        d <= rIns, 253,
+        d > rInf, 0,
+        True, Round[(253 - 1) Exp[-k (d - rIns)] + 1]
+      ];
+
+      ArrayPlot[cost /@ dist,
+        PlotRange -> {0, 254},
+        Frame -> True,
+        PlotLabel -> "Inflated Costmap (0..254)"
+      ]
+    ]
+  ], "Input"]
+}]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Log-odds update derivation):</strong>
+        Let <strong>\(p_t=\Pr(m=\text{occ}\mid z_{1:t})\)</strong>. Show that
+        under conditional independence of measurements given
+        <strong>\(m\)</strong>, the log-odds satisfy an additive update
+        <strong>\(L_t = L_{t-1} + \ell(z_t)\)</strong>
+        for an appropriate <strong>\(\ell(z_t)\)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Bayes rule gives
+        <strong
+          >\( \Pr(m\mid z_{1:t}) \propto \Pr(z_t\mid m)\Pr(m\mid z_{1:t-1})
+          \)</strong
+        >. Taking odds:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{p_t}{1-p_t} = \frac{\Pr(z_t\mid m=\text{occ})}{\Pr(z_t\mid
+        m=\text{free})} \cdot \frac{p_{t-1}}{1-p_{t-1}}. \]
+      </h4>
+      <p>
+        Taking log yields
+        <strong
+          >\( L_t = \log\!\frac{p_t}{1-p_t} = \log\!\frac{p_{t-1}}{1-p_{t-1}} +
+          \log\!\frac{\Pr(z_t\mid \text{occ})}{\Pr(z_t\mid \text{free})}
+          \)</strong
+        >. Hence
+        <strong>\( L_t = L_{t-1} + \ell(z_t) \)</strong>
+        with
+        <strong
+          >\( \ell(z_t)=\log\!\frac{\Pr(z_t\mid \text{occ})}{\Pr(z_t\mid
+          \text{free})} \)</strong
+        >. □
+      </p>
+
+      <p>
+        <strong>Problem 2 (Inflation monotonicity and sensitivity):</strong>
+        For <strong>\( d \in (r_{\text{in}}, r_{\text{inf}}] \)</strong>, define
+        <strong
+          >\( \tilde{C}(d)=(C_{\text{ins}}-1)\exp(-k(d-r_{\text{in}}))+1
+          \)</strong
+        >. (a) Prove it is strictly decreasing in <strong>\(d\)</strong>. (b)
+        Show that increasing <strong>\(k\)</strong> makes the decay “steeper” by
+        proving
+        <strong>\( \frac{\partial \tilde{C}}{\partial k} &lt; 0 \)</strong> for
+        <strong>\(d&gt;r_{\text{in}}\)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        (a) From Section 4:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{d\tilde{C}}{dd} = -(C_{\text{ins}}-1)k\exp(-k(d-r_{\text{in}}))
+        &lt; 0. \]
+      </h4>
+      <p>(b) Differentiate w.r.t. <strong>\(k\)</strong>:</p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \tilde{C}}{\partial k} =
+        (C_{\text{ins}}-1)\exp(-k(d-r_{\text{in}}))\cdot (-(d-r_{\text{in}}))
+        &lt; 0 \quad \text{for } d&gt;r_{\text{in}}. \]
+      </h4>
+      <p>
+        Thus larger <strong>\(k\)</strong> reduces costs faster away from
+        obstacles (a sharper penalty wall). □
+      </p>
+
+      <p>
+        <strong>Problem 3 (Choosing inflation radius for clearance):</strong>
+        The robot footprint is bounded by a circumscribed radius
+        <strong>\(r_c\)</strong>. You want a guaranteed clearance
+        <strong>\(d_{\text{safe}}\)</strong> from obstacles. What condition
+        should <strong>\(r_{\text{inf}}\)</strong> satisfy so that “avoiding
+        inflated lethal cells” ensures clearance at least
+        <strong>\(d_{\text{safe}}\)</strong> (ignoring discretization)?
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        From the Proposition in Section 3, mark forbidden all cells whose
+        centers are within
+        <strong>\(r_c+d_{\text{safe}}\)</strong> of obstacles. Therefore choose
+      </p>
+      <h4 class="mathJax">\[ r_{\text{inf}} \ge r_c + d_{\text{safe}}. \]</h4>
+      <p>
+        Then any robot-center path that stays outside the forbidden inflated set
+        yields clearance at least
+        <strong>\(d_{\text{safe}}\)</strong> for the entire footprint. □
+      </p>
+
+      <p>
+        <strong>Problem 4 (Resolution vs clearance error):</strong>
+        Assume obstacle boundaries are represented at cell centers and the grid
+        resolution is <strong>\(\Delta\)</strong>. Give a conservative bound on
+        the maximum error between the true continuous distance-to-obstacle and
+        the distance computed between cell centers.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The farthest point in a cell from its center is half the diagonal
+        length:
+        <strong>\( \tfrac{\sqrt{2}}{2}\Delta \)</strong>. Therefore a
+        conservative bound on distance error is
+      </p>
+      <h4 class="mathJax">\[ \epsilon \le \frac{\sqrt{2}}{2}\Delta. \]</h4>
+      <p>
+        In practice, to maintain an effective safety margin
+        <strong>\(d_{\text{safe}}\)</strong>, choose
+        <strong>\(\Delta\)</strong> so that <strong>\(\epsilon\)</strong> is
+        small relative to <strong>\(d_{\text{safe}}\)</strong>, and inflate
+        accordingly. □
+      </p>
+
+      <p>
+        <strong>Programming Exercise (monotonicity test):</strong>
+        Write a script that computes <strong>\(C_{\text{infl}}(d)\)</strong> for
+        sampled distances and verifies it is non-increasing for
+        <strong>\(d\ge r_{\text{in}}\)</strong>.
+      </p>
+      <p><strong>Solution code:</strong></p>
+      <p><strong>Chapter14_Lesson2_Ex1.py</strong></p>
+      <pre><code class="language-python">
+"""
+Chapter14_Lesson2_Ex1.py
+Exercise: empirically verify monotonicity of the inflation cost and visualize cost(d).
+"""
+
+import math
+
+def inflation_cost(d: float, r_inscribed: float, r_inflation: float, k: float,
+                   inscribed_cost: int = 253) -&gt; int:
+    if d &lt;= 0.0:
+        return 254
+    if d &lt;= r_inscribed:
+        return inscribed_cost
+    if d &gt; r_inflation:
+        return 0
+    c = (inscribed_cost - 1) * math.exp(-k * (d - r_inscribed)) + 1.0
+    return int(max(1, min(inscribed_cost - 1, round(c))))
+
+def main():
+    r_ins, r_inf, k = 0.25, 0.60, 6.0
+    ds = [i * 0.01 for i in range(0, 121)]
+    cs = [inflation_cost(d, r_ins, r_inf, k) for d in ds]
+
+    # check monotone non-increasing for d &gt;= r_ins
+    ok = True
+    for i in range(1, len(ds)):
+        if ds[i] &gt;= r_ins and cs[i] &gt; cs[i-1]:
+            ok = False
+            print("Violation at d=", ds[i-1], "-&gt;", ds[i], "cost", cs[i-1], "-&gt;", cs[i])
+            break
+    print("Monotone non-increasing beyond inscribed radius:", ok)
+
+    # print a small table
+    for d in [0.0, 0.1, 0.25, 0.30, 0.40, 0.60, 0.80]:
+        print(f"d={d:0.2f} m -&gt; cost={inflation_cost(d, r_ins, r_inf, k)}")
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formalized costmaps as discrete risk fields, connected them to
+        probabilistic occupancy estimates, and derived the geometric reason for
+        inflation through Minkowski sums (configuration-space dilation). We then
+        modeled inflation as a distance transform followed by a monotone decay
+        kernel, proving key properties (monotonicity and parameter sensitivity)
+        and discussing discretization error. These concepts are the bridge
+        between perception/mapping and the decision logic of local navigation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Moravec, H.P., &amp; Elfes, A. (1985). High resolution maps from wide
+        angle sonar.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >.
+      </li>
+      <li>
+        Elfes, A. (1989). Using occupancy grids for mobile robot perception and
+        navigation.
+        <em>Computer</em>, 22(6), 46–57.
+      </li>
+      <li>
+        Lozano-P&eacute;rez, T. (1983). Spatial planning: A configuration space
+        approach.
+        <em>IEEE Transactions on Computers</em>, C-32(2), 108–120.
+      </li>
+      <li>
+        Felzenszwalb, P.F., &amp; Huttenlocher, D.P. (2004). Distance transforms
+        of sampled functions.
+        <em>Theory of Computing</em>, 8(19), 415–428.
+      </li>
+      <li>
+        Thrun, S., Burgard, W., &amp; Fox, D. (2005). Probabilistic robotics:
+        occupancy grids and mapping foundations.
+        <em>Communications of the ACM</em>, 45(3), 52–57. (Foundational
+        treatment; see also the monograph.)
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter14/Lesson1.html">
+          Lesson 1: Global–Local–Reactive Navigation Layers
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson3.html">
+          Lesson 3: Behavior Trees / State Machines for Navigation
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

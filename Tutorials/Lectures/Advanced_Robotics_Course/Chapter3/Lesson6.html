@@ -1,0 +1,2152 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 3: Sampling-Based Motion Planning - Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 3: Sampling-Based Motion Planning</h1>
+    <h3><strong>Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm</strong></h3>
+    <p>
+      In this lab you will implement asymptotically optimal sampling-based
+      motion planners (RRT* and PRM) for a 6-DOF serial manipulator in joint
+      space. Building on your knowledge of kinematics and dynamics, and on the
+      theoretical properties of PRM and RRT* from previous lessons, you will
+      construct the configuration space, implement collision checking, and
+      realize planners in Python, C++, Java, MATLAB/Simulink, and Wolfram
+      Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Goals and High-Level Pipeline -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Goals and High-Level Pipeline</h2>
+    <div class="down-content">
+      <p>
+        We consider a 6-DOF revolute manipulator with joint vector
+        <strong>\( q \in \mathbb{R}^6 \)</strong>, joint limits
+        <strong>\( q_i^{\min}, q_i^{\max} \)</strong>, a known forward
+        kinematics mapping from previous courses, and a static workspace with
+        obstacles. The objective is to compute a collision-free, near-optimal
+        joint-space path connecting a start configuration
+        <strong>\( q_{\mathrm{start}} \)</strong> to a goal configuration
+        <strong>\( q_{\mathrm{goal}} \)</strong>.
+      </p>
+      <p>The lab decomposes into the following stages:</p>
+      <ul>
+        <li>
+          Define the configuration space and joint limits for the 6-DOF arm.
+        </li>
+        <li>
+          Implement forward kinematics and collision checking for robot vs.
+          obstacles.
+        </li>
+        <li>
+          Implement sampling, metric, and steering primitives in configuration
+          space.
+        </li>
+        <li>Implement RRT* and PRM using these primitives.</li>
+        <li>
+          Export the resulting joint-space path to a simulator or controller.
+        </li>
+      </ul>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Define 6-DOF arm model and joint limits"] --> B["Implement forward kinematics and collision checker"]
+  B --> C["Implement C-space sampling, metric, and steering"]
+  C --> D["RRT* planner on C_free"]
+  C --> E["PRM planner on C_free"]
+  D --> F["Extract joint-space path"]
+  E --> F
+  F --> G["Time-parameterize and send to simulator/controller"]
+        </pre>
+      </div>
+      <p>
+        In all implementations, the planner operates purely in configuration
+        space; dynamics and time-parameterization can be handled subsequently by
+        your trajectory-generation or control stack.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: 6-DOF Configuration Space Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. 6-DOF Configuration Space Model</h2>
+    <div class="down-content">
+      <p>
+        Let the manipulator joint vector be
+        <strong>\( q = [q_1,\dots,q_6]^\top \)</strong> where each
+        <strong>\( q_i \)</strong> is a revolute joint angle. The nominal
+        configuration space is the 6-dimensional hyper-rectangle
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{C} = \prod_{i=1}^6 [q_i^{\min}, q_i^{\max}] \subset
+        \mathbb{R}^6. \]
+      </h4>
+      <p>The forward kinematics mapping (from your kinematics course) is</p>
+      <h4 class="mathJax">\[ f(q) = \big(T_1(q),\dots,T_L(q)\big), \]</h4>
+      <p>
+        where <strong>\( T_\ell(q) \in SE(3) \)</strong> is the homogeneous
+        transform of link <strong>\( \ell \)</strong> with respect to a world
+        frame, and <strong>\( L \)</strong> is the number of links. We assume
+        <strong>\( f \)</strong> is continuous in <strong>\( q \)</strong>.
+      </p>
+      <p>
+        Model each link by a geometric primitive (e.g., capsule or box). Let
+        <strong>\( \mathcal{B}(q) \subset \mathbb{R}^3 \)</strong> denote all
+        points occupied by the robot at configuration <strong>\( q \)</strong>,
+        and let <strong>\( \mathcal{O} \subset \mathbb{R}^3 \)</strong> be the
+        union of all obstacle solids. Then the configuration-space obstacle set
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{C}_{\mathrm{obs}} = \big\{ q \in \mathcal{C} \,\big|\,
+        \mathcal{B}(q) \cap \mathcal{O} \neq \emptyset \big\}, \]
+      </h4>
+      <p>and the free space is</p>
+      <h4 class="mathJax">
+        \[ \mathcal{C}_{\mathrm{free}} = \mathcal{C} \setminus
+        \mathcal{C}_{\mathrm{obs}}. \]
+      </h4>
+      <p>
+        A path is a continuous curve
+        <strong>\( \sigma : [0,1] \to \mathcal{C}_{\mathrm{free}} \)</strong>
+        such that <strong>\( \sigma(0) = q_{\mathrm{start}} \)</strong> and
+        <strong>\( \sigma(1) = q_{\mathrm{goal}} \)</strong>. A common choice in
+        this lab is to use piecewise-linear joint-space paths:
+      </p>
+      <h4 class="mathJax">
+        \[ \sigma(t) = (1-t)\,q_k + t\,q_{k+1} \quad \text{for } t \in [t_k,
+        t_{k+1}], \]
+      </h4>
+      <p>
+        where the breakpoints
+        <strong>\( q_k \in \mathcal{C}_{\mathrm{free}} \)</strong>
+        are nodes of the tree (RRT*) or roadmap (PRM).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Collision Checking and Clearance -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Collision Checking and Clearance</h2>
+    <div class="down-content">
+      <p>
+        Collision checking is encapsulated in a predicate
+        <strong>\( \text{Valid}(q) \)</strong> returning true if
+        <strong>\( q \in \mathcal{C}_{\mathrm{free}} \)</strong>. A useful
+        continuous quantity is the configuration clearance
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{clear}(q) = \inf_{x \in \mathcal{B}(q)} \inf_{y \in
+        \mathcal{O}} \lVert x - y \rVert_2. \]
+      </h4>
+      <p>
+        A configuration is collision-free if
+        <strong>\( \operatorname{clear}(q) \)</strong>
+        is strictly positive. In practice we use a discretized test:
+      </p>
+      <ul>
+        <li>
+          Use forward kinematics to obtain link frames for a given
+          <strong>\( q \)</strong>.
+        </li>
+        <li>Approximate each link by a small number of points or capsules.</li>
+        <li>
+          Compute distances from these primitives to each obstacle primitive.
+        </li>
+        <li>Declare collision if any signed distance is nonpositive.</li>
+      </ul>
+      <p>
+        For an edge between configurations
+        <strong>\( q, q' \in \mathcal{C}_{\mathrm{free}} \)</strong> we
+        discretize the straight-line interpolation
+      </p>
+      <h4 class="mathJax">
+        \[ \sigma(t) = (1-t)\,q + t\,q',\quad t \in [0,1], \]
+      </h4>
+      <p>into samples <strong>\( \sigma(t_k) \)</strong> at</p>
+      <h4 class="mathJax">
+        \[ t_k = \frac{k}{K}, \quad K = \left\lceil \frac{d(q,q')}{\delta}
+        \right\rceil, \]
+      </h4>
+      <p>
+        where <strong>\( d \)</strong> is a configuration-space metric and
+        <strong>\( \delta \)</strong> is a user-chosen step limit. If all
+        intermediate samples are valid, we accept the edge.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: RRT* for a 6-DOF Arm -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. RRT* for a 6-DOF Arm</h2>
+    <div class="down-content">
+      <p>
+        RRT* maintains a tree
+        <strong>\( T_n = (V_n, E_n) \)</strong> whose vertices lie in
+        <strong>\( \mathcal{C}_{\mathrm{free}} \)</strong>, with root
+        <strong>\( q_{\mathrm{start}} \)</strong>. For node
+        <strong>\( x \in V_n \)</strong>, let
+        <strong>\( J_n(x) \)</strong> denote the cost-to-come (path length) from
+        the root along the unique tree path. Using the metric
+        <strong>\( d \)</strong>, the cost of a piecewise-linear path
+        <strong>\( \sigma \)</strong> with nodes
+        <strong>\( q_0,\dots,q_K \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ J(\sigma) = \sum_{k=0}^{K-1} d(q_k, q_{k+1}). \]
+      </h4>
+      <p>As in previous lessons, the RRT* connection radius is chosen as</p>
+      <h4 class="mathJax">
+        \[ r_n = \min\Big\{ \eta,\; \gamma_{\mathrm{RRT*}} \big( \tfrac{\log
+        n}{n} \big)^{1/6} \Big\}, \]
+      </h4>
+      <p>
+        where <strong>\( n = |V_n| \)</strong>, <strong>\( \eta \)</strong> is a
+        maximum steering length, and
+        <strong>\( \gamma_{\mathrm{RRT*}} \)</strong> is a constant chosen
+        larger than the critical threshold from the RRT* convergence theorem.
+      </p>
+      <p>For each iteration:</p>
+      <ol>
+        <li>
+          Sample
+          <strong>\( q_{\mathrm{rand}} \sim \mathcal{U}(\mathcal{C}) \)</strong
+          >.
+        </li>
+        <li>
+          Find nearest vertex <strong>\( x_{\mathrm{near}} \in V_n \)</strong>.
+        </li>
+        <li>
+          Steer from <strong>\( q_{\mathrm{near}} \)</strong> toward
+          <strong>\( q_{\mathrm{rand}} \)</strong> with step limit
+          <strong>\( \eta \)</strong> to obtain
+          <strong>\( q_{\mathrm{new}} \)</strong>.
+        </li>
+        <li>
+          If the edge from <strong>\( q_{\mathrm{near}} \)</strong> to
+          <strong>\( q_{\mathrm{new}} \)</strong> is collision-free, compute the
+          neighbor set
+          <strong>\( \mathcal{X}_{\mathrm{near}} \subset V_n \)</strong> within
+          radius <strong>\( r_n \)</strong>.
+        </li>
+        <li>
+          Choose as parent the neighbor minimizing
+          <strong>\( J_n(x) + c(x,q_{\mathrm{new}}) \)</strong>, where
+          <strong>\( c \)</strong> is edge cost. Insert
+          <strong>\( q_{\mathrm{new}} \)</strong> accordingly.
+        </li>
+        <li>
+          Rewire neighbors when connecting via
+          <strong>\( q_{\mathrm{new}} \)</strong> decreases their cost, subject
+          to collision checks.
+        </li>
+      </ol>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sample q_rand in C"] --> N["Nearest node x_near"]
+  N --> ST["Steer from q_near toward q_rand (step &lt;= eta)"]
+  ST --> V["Collision-free edge?"]
+  V -->|no| S
+  V -->|yes| NB["Compute neighbors within radius r_n"]
+  NB --> P["Choose parent with minimal cost-to-come"]
+  P --> INS["Insert q_new into tree"]
+  INS --> RW["Rewire cheaper neighbors through q_new"]
+  RW --> GOAL["Check if q_new is in goal region"]
+        </pre>
+      </div>
+      <p>
+        As the number of samples grows, and under the correct choice of
+        <strong>\( r_n \)</strong>, RRT* converges almost surely to an optimal
+        path in <strong>\( \mathcal{C}_{\mathrm{free}} \)</strong>, provided the
+        problem is robustly feasible.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: PRM for a 6-DOF Arm -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. PRM for a 6-DOF Arm</h2>
+    <div class="down-content">
+      <p>
+        The Probabilistic Roadmap (PRM) algorithm builds an undirected graph
+        <strong>\( G_n = (V_n, E_n) \)</strong> in
+        <strong>\( \mathcal{C}_{\mathrm{free}} \)</strong>:
+      </p>
+      <ol>
+        <li>
+          Sample <strong>\( n \)</strong> configurations
+          <strong>\( q^{(1)},\dots,q^{(n)} \)</strong>.
+        </li>
+        <li>
+          Discard samples not in
+          <strong>\( \mathcal{C}_{\mathrm{free}} \)</strong>.
+        </li>
+        <li>
+          Connect each sample to its neighbors (within radius
+          <strong>\( r_n \)</strong> or to the
+          <strong>\( k_n \)</strong> nearest) if the connecting edge is
+          collision-free.
+        </li>
+      </ol>
+      <p>With radius-based connection, one typically uses</p>
+      <h4 class="mathJax">
+        \[ r_n = \gamma_{\mathrm{PRM}} \Big( \tfrac{\log n}{n} \Big)^{1/6}, \]
+      </h4>
+      <p>
+        with <strong>\( \gamma_{\mathrm{PRM}} \)</strong> larger than the
+        theoretical threshold ensuring asymptotic optimality (see Lesson 4).
+        Given <strong>\( G_n \)</strong>, one inserts
+        <strong>\( q_{\mathrm{start}} \)</strong> and
+        <strong>\( q_{\mathrm{goal}} \)</strong>, connects them to nearby nodes,
+        and runs a graph shortest-path algorithm (e.g. Dijkstra) to obtain an
+        approximate optimal path.
+      </p>
+      <p>
+        Note that a single roadmap can be reused for many start/goal pairs as
+        long as the obstacles and joint limits remain unchanged, which is useful
+        for repetitive manipulator tasks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Shared Implementation Primitives -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Shared Implementation Primitives</h2>
+    <div class="down-content">
+      <p>Both RRT* and PRM require:</p>
+      <ul>
+        <li>Sampling <strong>\( \mathcal{C} \)</strong></li>
+        <li>Metrics and steering</li>
+        <li>Collision checking for configurations and edges</li>
+      </ul>
+      <p>A weighted Euclidean metric in joint space is</p>
+      <h4 class="mathJax">
+        \[ d(q,q') = \Bigg( \sum_{i=1}^6 w_i^2 (q_i - q_i')^2 \Bigg)^{1/2},
+        \quad w_i \gt 0. \]
+      </h4>
+      <p>
+        Here the weights <strong>\( w_i \)</strong> compensate for different
+        joint ranges or for how much a joint influences end-effector motion. A
+        straight-line steering function in joint space is
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{Steer}(q,q',\eta) = q + \alpha (q'-q), \quad \alpha =
+        \min \Big\{ 1,\; \frac{\eta}{d(q,q')} \Big\}, \]
+      </h4>
+      <p>
+        where <strong>\( \eta \)</strong> is the maximum step length.
+        Discretized collision checking along this segment uses the scheme from
+        Section 3.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation (From-Scratch RRT* + Simple PRM) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation (From-Scratch RRT* and PRM)</h2>
+    <div class="down-content">
+      <p>
+        Below is a minimal from-scratch Python implementation of RRT* and a
+        basic PRM for a 6-DOF arm. To keep the code focused on planning, the
+        functions
+        <code>forward_kinematics</code> and <code>in_collision</code> are
+        placeholders where you should plug in your own manipulator model and
+        collision engine (e.g., using mesh distances or capsule approximations).
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+from dataclasses import dataclass
+
+# Joint limits for 6-DOF arm (example values, radians)
+Q_MIN = np.array([-np.pi, -np.pi, -np.pi, -np.pi, -np.pi, -np.pi])
+Q_MAX = np.array([ np.pi,  np.pi,  np.pi,  np.pi,  np.pi,  np.pi])
+
+@dataclass
+class Node:
+    q: np.ndarray
+    parent: int
+    cost: float  # cost-to-come
+
+def sample_config():
+    return Q_MIN + (Q_MAX - Q_MIN) * np.random.rand(6)
+
+def distance(q1, q2, w=None):
+    if w is None:
+        w = np.ones(6)
+    diff = (q1 - q2) * w
+    return float(np.linalg.norm(diff))
+
+def forward_kinematics(q):
+    """
+    Placeholder: return link frames or sample points on the robot.
+    Use your existing DH parameters or rigid-body model here.
+    """
+    raise NotImplementedError
+
+def in_collision(q, obstacles):
+    """
+    Placeholder: use forward_kinematics(q) and distance checks vs obstacles.
+    Return True if the robot at configuration q intersects any obstacle.
+    """
+    raise NotImplementedError
+
+def edge_collision_free(q1, q2, obstacles, step=0.05):
+    d = distance(q1, q2)
+    if d == 0.0:
+        return not in_collision(q1, obstacles)
+    steps = int(np.ceil(d / step))
+    for k in range(steps + 1):
+        alpha = k / max(steps, 1)
+        q = (1.0 - alpha) * q1 + alpha * q2
+        if in_collision(q, obstacles):
+            return False
+    return True
+
+def steer(q_from, q_to, eta):
+    d = distance(q_from, q_to)
+    if d &lt;= eta:
+        return q_to
+    alpha = eta / d
+    return q_from + alpha * (q_to - q_from)
+
+def nearest(nodes, q_rand):
+    d_min = float("inf")
+    idx_min = -1
+    for i, node in enumerate(nodes):
+        d = distance(node.q, q_rand)
+        if d &lt; d_min:
+            d_min = d
+            idx_min = i
+    return idx_min
+
+def near_indices(nodes, q_new, gamma, eta):
+    n = len(nodes)
+    if n == 0:
+        return []
+    r = min(eta, gamma * (np.log(n + 1) / (n + 1)) ** (1.0 / 6.0))
+    idxs = []
+    for i, node in enumerate(nodes):
+        if distance(node.q, q_new) &lt;= r:
+            idxs.append(i)
+    return idxs
+
+def extract_path(nodes, idx_goal):
+    path = []
+    idx = idx_goal
+    while idx != -1:
+        path.append(nodes[idx].q)
+        idx = nodes[idx].parent
+    path.reverse()
+    return np.array(path)
+
+def rrt_star(q_start, q_goal, obstacles,
+             eta=0.3, gamma=2.0,
+             max_iter=5000, goal_radius=0.1):
+    nodes = [Node(q=np.array(q_start, dtype=float), parent=-1, cost=0.0)]
+    goal_index = None
+
+    for it in range(max_iter):
+        q_rand = sample_config()
+        i_near = nearest(nodes, q_rand)
+        q_near = nodes[i_near].q
+        q_new = steer(q_near, q_rand, eta)
+
+        if in_collision(q_new, obstacles):
+            continue
+        if not edge_collision_free(q_near, q_new, obstacles):
+            continue
+
+        # Choose parent with minimal cost-to-come
+        idxs_near = near_indices(nodes, q_new, gamma, eta)
+        cost_best = nodes[i_near].cost + distance(nodes[i_near].q, q_new)
+        parent_best = i_near
+        for j in idxs_near:
+            if not edge_collision_free(nodes[j].q, q_new, obstacles):
+                continue
+            c = nodes[j].cost + distance(nodes[j].q, q_new)
+            if c &lt; cost_best:
+                cost_best = c
+                parent_best = j
+
+        nodes.append(Node(q=q_new, parent=parent_best, cost=cost_best))
+        i_new = len(nodes) - 1
+
+        # Rewire neighbors through q_new if cheaper
+        for j in idxs_near:
+            if j == parent_best:
+                continue
+            if not edge_collision_free(q_new, nodes[j].q, obstacles):
+                continue
+            c_through_new = nodes[i_new].cost + distance(q_new, nodes[j].q)
+            if c_through_new + 1e-9 &lt; nodes[j].cost:
+                nodes[j].parent = i_new
+                nodes[j].cost = c_through_new
+
+        # Check goal
+        if distance(q_new, q_goal) &lt;= goal_radius:
+            if edge_collision_free(q_new, q_goal, obstacles):
+                nodes.append(
+                    Node(q=np.array(q_goal, dtype=float),
+                         parent=i_new,
+                         cost=nodes[i_new].cost + distance(q_new, q_goal))
+                )
+                goal_index = len(nodes) - 1
+                break
+
+    if goal_index is None:
+        return None  # planning failed
+    return extract_path(nodes, goal_index)
+
+def prm(q_start, q_goal, obstacles,
+        n_samples=1000, k_neighbors=10):
+    """
+    Simple PRM: uniform sampling, k-nearest neighbors with local collision check.
+    Returns a list of configurations forming a path, or None.
+    """
+    samples = []
+    for _ in range(n_samples):
+        q = sample_config()
+        if not in_collision(q, obstacles):
+            samples.append(q)
+    samples = [np.array(q, dtype=float) for q in samples]
+
+    # build adjacency list
+    n = len(samples)
+    adj = [[] for _ in range(n)]
+
+    for i in range(n):
+        # find k nearest neighbors
+        dists = [(j, distance(samples[i], samples[j])) for j in range(n) if j != i]
+        dists.sort(key=lambda p: p[1])
+        for j, d in dists[:k_neighbors]:
+            if edge_collision_free(samples[i], samples[j], obstacles):
+                adj[i].append(j)
+                adj[j].append(i)
+
+    # include start and goal as extra nodes
+    nodes = [np.array(q_start, dtype=float)] + samples + [np.array(q_goal, dtype=float)]
+    start_idx = 0
+    goal_idx = len(nodes) - 1
+    adj_ext = [[] for _ in range(len(nodes))]
+    # copy PRM adjacency
+    for i in range(n):
+        for j in adj[i]:
+            adj_ext[i + 1].append(j + 1)
+    # connect start and goal to nearest neighbors
+    def connect_special(idx_special, q_special):
+        dists = [(i + 1, distance(q_special, samples[i])) for i in range(n)]
+        dists.sort(key=lambda p: p[1])
+        for j, d in dists[:k_neighbors]:
+            if edge_collision_free(q_special, samples[j - 1], obstacles):
+                adj_ext[idx_special].append(j)
+                adj_ext[j].append(idx_special)
+
+    connect_special(start_idx, nodes[start_idx])
+    connect_special(goal_idx, nodes[goal_idx])
+
+    # Dijkstra's algorithm
+    import heapq
+    INF = float("inf")
+    dist_arr = [INF] * len(nodes)
+    parent = [-1] * len(nodes)
+    dist_arr[start_idx] = 0.0
+    heap = [(0.0, start_idx)]
+    while heap:
+        d, u = heapq.heappop(heap)
+        if d &gt; dist_arr[u]:
+            continue
+        if u == goal_idx:
+            break
+        for v in adj_ext[u]:
+            w = distance(nodes[u], nodes[v])
+            nd = d + w
+            if nd &lt; dist_arr[v]:
+                dist_arr[v] = nd
+                parent[v] = u
+                heapq.heappush(heap, (nd, v))
+
+    if dist_arr[goal_idx] == INF:
+        return None
+
+    # reconstruct path
+    path = []
+    u = goal_idx
+    while u != -1:
+        path.append(nodes[u])
+        u = parent[u]
+    path.reverse()
+    return np.array(path)
+      </code></pre>
+      <p>
+        For a <em>real</em> manipulator, you would integrate this code with a
+        robot model (e.g., <code>pybullet</code>, <code>pinocchio</code>, or
+        your own DH-based implementation) to implement
+        <code>forward_kinematics</code> and <code>in_collision</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation with OMPL (RRT* and PRM) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation with OMPL (RRT* and PRM)</h2>
+    <div class="down-content">
+      <p>
+        In C++, the <em>Open Motion Planning Library</em> (OMPL) provides
+        efficient implementations of geometric RRT* and PRM. You only need to
+        define the configuration space, bounds, and a state-validity checker for
+        your 6-DOF arm.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;ompl/base/SpaceInformation.h&gt;
+#include &lt;ompl/base/spaces/RealVectorStateSpace.h&gt;
+#include &lt;ompl/base/ScopedState.h&gt;
+#include &lt;ompl/geometric/SimpleSetup.h&gt;
+#include &lt;ompl/geometric/planners/rrt/RRTstar.h&gt;
+#include &lt;ompl/geometric/planners/prm/PRM.h&gt;
+
+namespace ob = ompl::base;
+namespace og = ompl::geometric;
+
+struct Obstacles
+{
+    // store meshes or primitives here
+};
+
+bool isStateValid(const ob::State *state, const Obstacles &obs)
+{
+    const auto *q = state-&gt;as&lt;ob::RealVectorStateSpace::StateType&gt;();
+    // Convert OMPL state to joint vector
+    std::array&lt;double, 6&gt; q_vec;
+    for (std::size_t i = 0; i &lt; 6; ++i)
+        q_vec[i] = (*q)[i];
+
+    // TODO: forward kinematics and collision checking for q_vec vs obs
+    // return false if in collision
+    return true;
+}
+
+og::SimpleSetup makeRRTStarPlanner(const Obstacles &obs,
+                                   const std::array&lt;double, 6&gt; &qMin,
+                                   const std::array&lt;double, 6&gt; &qMax)
+{
+    auto space = std::make_shared&lt;ob::RealVectorStateSpace&gt;(6);
+    ob::RealVectorBounds bounds(6);
+    for (std::size_t i = 0; i &lt; 6; ++i)
+    {
+        bounds.setLow(i, qMin[i]);
+        bounds.setHigh(i, qMax[i]);
+    }
+    space-&gt;setBounds(bounds);
+
+    og::SimpleSetup ss(space);
+    ss.setStateValidityChecker(
+        [&obs](const ob::State *state)
+        {
+            return isStateValid(state, obs);
+        });
+
+    auto planner = std::make_shared&lt;og::RRTstar&gt;(ss.getSpaceInformation());
+    ss.setPlanner(planner);
+    return ss;
+}
+
+og::SimpleSetup makePRMPlanner(const Obstacles &obs,
+                               const std::array&lt;double, 6&gt; &qMin,
+                               const std::array&lt;double, 6&gt; &qMax)
+{
+    auto space = std::make_shared&lt;ob::RealVectorStateSpace&gt;(6);
+    ob::RealVectorBounds bounds(6);
+    for (std::size_t i = 0; i &lt; 6; ++i)
+    {
+        bounds.setLow(i, qMin[i]);
+        bounds.setHigh(i, qMax[i]);
+    }
+    space-&gt;setBounds(bounds);
+
+    og::SimpleSetup ss(space);
+    ss.setStateValidityChecker(
+        [&obs](const ob::State *state)
+        {
+            return isStateValid(state, obs);
+        });
+
+    auto planner = std::make_shared&lt;og::PRM&gt;(ss.getSpaceInformation());
+    ss.setPlanner(planner);
+    return ss;
+}
+
+int main()
+{
+    Obstacles obstacles;
+    std::array&lt;double, 6&gt; qMin;
+    std::array&lt;double, 6&gt; qMax;
+
+    auto ss = makeRRTStarPlanner(obstacles, qMin, qMax);
+
+    ob::ScopedState&lt;&gt; start(ss.getStateSpace());
+    ob::ScopedState&lt;&gt; goal(ss.getStateSpace());
+    for (std::size_t i = 0; i &lt; 6; ++i)
+    {
+        start[i] = 0.0;
+        goal[i] = 1.0; // example
+    }
+    ss.setStartAndGoalStates(start, goal);
+
+    ob::PlannerStatus solved = ss.solve(5.0); // seconds
+    if (solved)
+    {
+        og::PathGeometric path = ss.getSolutionPath();
+        path.interpolate();
+        path.printAsMatrix(std::cout);
+    }
+    return 0;
+}
+      </code></pre>
+      <p>
+        Replacing <code>og::RRTstar</code> by <code>og::PRM</code> in the setup
+        yields a PRM planner. Libraries such as MoveIt integrate OMPL planners
+        with detailed collision geometry and trajectory execution on real
+        manipulators.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation (Simple PRM Skeleton) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (Simple PRM Skeleton)</h2>
+    <div class="down-content">
+      <p>
+        While Java has fewer robotics-specific planning libraries, a PRM can be
+        implemented directly using basic data structures (e.g.,
+        <code>ArrayList</code>, adjacency lists). Below is a simplified PRM
+        skeleton for a 6-DOF arm.
+      </p>
+      <pre><code class="language-java">
+import java.util.*;
+import java.util.stream.Collectors;
+
+class Config6D {
+    double[] q = new double[6];
+
+    Config6D(double[] q) {
+        if (q.length != 6) throw new IllegalArgumentException("q must be length 6");
+        System.arraycopy(q, 0, this.q, 0, 6);
+    }
+}
+
+class Edge {
+    int u, v;
+    double w;
+    Edge(int u, int v, double w) {
+        this.u = u;
+        this.v = v;
+        this.w = w;
+    }
+}
+
+interface CollisionChecker {
+    boolean inCollision(double[] q);
+    boolean edgeCollisionFree(double[] q1, double[] q2);
+}
+
+public class PRM6D {
+    private final double[] qMin;
+    private final double[] qMax;
+    private final CollisionChecker checker;
+    private final Random rng = new Random();
+
+    public PRM6D(double[] qMin, double[] qMax, CollisionChecker checker) {
+        if (qMin.length != 6 || qMax.length != 6)
+            throw new IllegalArgumentException("Joint limits must be length 6");
+        this.qMin = qMin.clone();
+        this.qMax = qMax.clone();
+        this.checker = checker;
+    }
+
+    private double[] sampleConfig() {
+        double[] q = new double[6];
+        for (int i = 0; i &lt; 6; ++i) {
+            q[i] = qMin[i] + (qMax[i] - qMin[i]) * rng.nextDouble();
+        }
+        return q;
+    }
+
+    private double distance(double[] q1, double[] q2) {
+        double s = 0.0;
+        for (int i = 0; i &lt; 6; ++i) {
+            double d = q1[i] - q2[i];
+            s += d * d;
+        }
+        return Math.sqrt(s);
+    }
+
+    public List&lt;double[]&gt; plan(double[] qStart, double[] qGoal,
+                               int nSamples, int kNeighbors) {
+        List&lt;Config6D&gt; nodes = new ArrayList&lt;&gt;();
+        // Add PRM samples
+        for (int i = 0; i &lt; nSamples; ++i) {
+            double[] q = sampleConfig();
+            if (!checker.inCollision(q)) {
+                nodes.add(new Config6D(q));
+            }
+        }
+        // Add start and goal
+        int startIdx = nodes.size();
+        nodes.add(new Config6D(qStart.clone()));
+        int goalIdx = nodes.size();
+        nodes.add(new Config6D(qGoal.clone()));
+
+        int n = nodes.size();
+        List&lt;List&lt;Edge&gt;&gt; adj = new ArrayList&lt;&gt;(n);
+        for (int i = 0; i &lt; n; ++i) adj.add(new ArrayList&lt;&gt;());
+
+        // Connect PRM nodes
+        for (int i = 0; i &lt; n - 2; ++i) {
+            List&lt;int[]&gt; neigh = new ArrayList&lt;&gt;();
+            for (int j = 0; j &lt; n - 2; ++j) {
+                if (i == j) continue;
+                double d = distance(nodes.get(i).q, nodes.get(j).q);
+                neigh.add(new int[]{j, Double.valueOf(d).hashCode()});
+            }
+            // sort by distance
+            neigh.sort(Comparator.comparingInt(a -&gt; a[1]));
+            int count = 0;
+            for (int[] pair : neigh) {
+                if (count &gt;= kNeighbors) break;
+                int j = pair[0];
+                if (checker.edgeCollisionFree(nodes.get(i).q, nodes.get(j).q)) {
+                    double w = distance(nodes.get(i).q, nodes.get(j).q);
+                    adj.get(i).add(new Edge(i, j, w));
+                    adj.get(j).add(new Edge(j, i, w));
+                    count++;
+                }
+            }
+        }
+
+        // Connect start and goal to nearest neighbors
+        connectSpecial(nodes, adj, startIdx, kNeighbors);
+        connectSpecial(nodes, adj, goalIdx, kNeighbors);
+
+        // Dijkstra shortest path
+        double[] dist = new double[n];
+        int[] parent = new int[n];
+        Arrays.fill(dist, Double.POSITIVE_INFINITY);
+        Arrays.fill(parent, -1);
+        dist[startIdx] = 0.0;
+
+        PriorityQueue&lt;int[]&gt; pq =
+            new PriorityQueue&lt;&gt;(Comparator.comparingDouble(a -&gt; dist[a[0]]));
+        pq.add(new int[]{startIdx});
+
+        while (!pq.isEmpty()) {
+            int u = pq.poll()[0];
+            if (u == goalIdx) break;
+            for (Edge e : adj.get(u)) {
+                int v = e.v;
+                double nd = dist[u] + e.w;
+                if (nd &lt; dist[v]) {
+                    dist[v] = nd;
+                    parent[v] = u;
+                    pq.add(new int[]{v});
+                }
+            }
+        }
+
+        if (!Double.isFinite(dist[goalIdx])) {
+            return null;
+        }
+
+        List&lt;double[]&gt; path = new ArrayList&lt;&gt;();
+        int idx = goalIdx;
+        while (idx != -1) {
+            path.add(nodes.get(idx).q);
+            idx = parent[idx];
+        }
+        Collections.reverse(path);
+        return path;
+    }
+
+    private void connectSpecial(List&lt;Config6D&gt; nodes,
+                                List&lt;List&lt;Edge&gt;&gt; adj,
+                                int idxSpecial, int kNeighbors) {
+        int n = nodes.size();
+        List&lt;double[]&gt; candidates = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; n - 2; ++i) {
+            if (i == idxSpecial) continue;
+            candidates.add(new double[]{i, distance(nodes.get(idxSpecial).q, nodes.get(i).q)});
+        }
+        candidates.sort(Comparator.comparingDouble(a -&gt; a[1]));
+        int count = 0;
+        for (double[] pair : candidates) {
+            if (count &gt;= kNeighbors) break;
+            int j = (int) pair[0];
+            if (checker.edgeCollisionFree(nodes.get(idxSpecial).q, nodes.get(j).q)) {
+                double w = pair[1];
+                adj.get(idxSpecial).add(new Edge(idxSpecial, j, w));
+                adj.get(j).add(new Edge(j, idxSpecial, w));
+                count++;
+            }
+        }
+    }
+}
+      </code></pre>
+      <p>
+        The <code>CollisionChecker</code> interface allows you to plug in a Java
+        binding to an existing physics or geometry engine. This design mirrors
+        the separation between planning and environment modeling emphasized
+        throughout the course.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB's Robotics System Toolbox provides
+        <code>rigidBodyTree</code> models, collision checking, and
+        visualization, which you can combine with your own RRT*/PRM
+        implementation. The snippet below illustrates a simple PRM for a 6-DOF
+        manipulator; Simulink can then be used to execute the resulting
+        joint-space trajectory.
+      </p>
+      <pre><code class="language-matlab">
+% Define 6-DOF rigidBodyTree robot (e.g., from URDF)
+robot = importrobot("my6dof.urdf");
+robot.DataFormat = "row";
+robot.Gravity = [0 0 -9.81];
+
+% Joint limits
+qlim = robot.homeConfiguration;
+nJ = numel(qlim);
+qMin = zeros(1, nJ);
+qMax = zeros(1, nJ);
+for i = 1:nJ
+    qMin(i) = qlim(i).JointPositionLimits(1);
+    qMax(i) = qlim(i).JointPositionLimits(2);
+end
+
+% Obstacles (example: sphere at position p with radius r)
+obsCenter = [0.5 0.0 0.3];
+obsRadius = 0.15;
+
+function coll = inCollision(robot, q, obsCenter, obsRadius)
+    % Simple point-sampling collision check on end-effector
+    eePose = getTransform(robot, q, robot.BodyNames{end});
+    p = eePose(1:3, 4).';
+    coll = norm(p - obsCenter) &lt;= obsRadius;
+end
+
+function ok = edgeCollisionFree(robot, q1, q2, obsCenter, obsRadius, step)
+    if nargin &lt; 6, step = 0.05; end
+    dq = q2 - q1;
+    L = norm(dq, 2);
+    nSteps = ceil(L / step);
+    ok = true;
+    for k = 0:nSteps
+        alpha = k / max(nSteps, 1);
+        q = q1 + alpha * dq;
+        if inCollision(robot, q, obsCenter, obsRadius)
+            ok = false;
+            return;
+        end
+    end
+end
+
+% PRM parameters
+nSamples = 800;
+kNeighbors = 10;
+samples = zeros(nSamples, nJ);
+validMask = false(nSamples, 1);
+
+for i = 1:nSamples
+    q = qMin + (qMax - qMin).*rand(1, nJ);
+    if ~inCollision(robot, q, obsCenter, obsRadius)
+        samples(i, :) = q;
+        validMask(i) = true;
+    end
+end
+samples = samples(validMask, :);
+n = size(samples, 1);
+
+% Build adjacency
+adj = cell(n, 1);
+for i = 1:n
+    qi = samples(i, :);
+    d = vecnorm((samples - qi).');
+    [~, idx] = sort(d);
+    cnt = 0;
+    for j = idx(2:end)
+        if cnt &gt;= kNeighbors, break; end
+        if edgeCollisionFree(robot, qi, samples(j, :), obsCenter, obsRadius)
+            w = norm(samples(j, :) - qi);
+            adj{i}(end+1, :) = [j, w]; %#ok&lt;AGROW&gt;
+            adj{j}(end+1, :) = [i, w]; %#ok&lt;AGROW&gt;
+            cnt = cnt + 1;
+        end
+    end
+end
+
+% Start/goal and graph search omitted for brevity:
+% - Insert q_start and q_goal as additional nodes
+% - Connect to neighbors via edgeCollisionFree
+% - Run Dijkstra to get sequence of joint configurations pathQ
+
+% To execute pathQ in Simulink:
+% 1. Create a timeseries object tsQ = timeseries(pathQ, t);
+% 2. Feed tsQ into a "Joint-Space Trajectory" block driving the robot model.
+      </code></pre>
+      <p>
+        For RRT*, you would similarly implement tree expansion and rewiring in
+        MATLAB, using the same <code>inCollision</code> and
+        <code>edgeCollisionFree</code>
+        primitives. Simulink then becomes a convenient platform for testing
+        closed-loop tracking of the planned trajectories.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation (PRM) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation (PRM)</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is well suited for rapid prototyping of PRM via its graph
+        and optimization primitives. The following code constructs a simple PRM
+        in a 6D configuration space with a user-defined collision checker.
+      </p>
+      <pre><code class="language-mathematica">
+(* Joint limits *)
+qMin = {-Pi, -Pi, -Pi, -Pi, -Pi, -Pi};
+qMax = { Pi,  Pi,  Pi,  Pi,  Pi,  Pi};
+
+sampleConfig[] :=
+  Table[
+    RandomReal[{qMin[[i]], qMax[[i]]}],
+    {i, 1, 6}
+  ];
+
+distance[q1_List, q2_List] :=
+  Sqrt[Total[(q1 - q2)^2]];
+
+(* Placeholder collision tests; plug in your own robot model *)
+inCollision[q_List] := False;
+
+edgeCollisionFree[q1_List, q2_List, step_: 0.05] :=
+ Module[{d = distance[q1, q2], n, k, alpha, q},
+  If[d == 0.0, Return[Not@inCollision[q1]]];
+  n = Ceiling[d/step];
+  For[k = 0, k &lt;= n, k++,
+    alpha = N[k/Max[n, 1]];
+    q = (1.0 - alpha) q1 + alpha q2;
+    If[inCollision[q], Return[False]];
+  ];
+  True
+];
+
+buildPRM[nSamples_Integer, kNeighbors_Integer] :=
+ Module[{samples, valid, n, edges, i, j, dists, sorted, cnt, G},
+  samples = Table[sampleConfig[], {nSamples}];
+  valid = Select[samples, Not@*inCollision];
+  n = Length[valid];
+  edges = {};
+
+  For[i = 1, i &lt;= n, i++,
+    dists = Table[{j, distance[valid[[i]], valid[[j]]]},
+                  {j, 1, n}];
+    sorted = SortBy[DeleteCases[dists, {i, _}], Last];
+    cnt = 0;
+    Do[
+      If[cnt &gt;= kNeighbors, Break[]];
+      j = sorted[[m, 1]];
+      If[edgeCollisionFree[valid[[i]], valid[[j]]],
+        AppendTo[edges, UndirectedEdge[i, j]];
+        cnt++;
+      ],
+      {m, 1, Length[sorted]}
+    ];
+  ];
+  G = Graph[edges, VertexCoordinates -&gt; Automatic];
+  &lt;&lt; GraphUtilities`;
+  &lt;&lt; Combinatorica`;
+  &lt;&lt; Experimental`;
+  &lt;&lt; Statistics`DescriptiveStatistics`;
+  &lt;&lt; Statistics`MultiDescriptiveStatistics`;
+  &lt;&lt; Statistics`HypothesisTests`;
+  &lt;&lt; Statistics`NonlinearFit`;
+  &lt;&lt; Statistics`ConfidenceIntervals`;
+  &lt;&lt; Statistics`LinearRegression`;
+  &lt;&lt; LinearAlgebra`MatrixManipulation`;
+  &lt;&lt; Optimization`UnconstrainedProblems`;
+  &lt;&lt; Optimization`ConstrainedProblems`;
+  &lt;&lt; Optimization`QuadraticProgramming`;
+  &lt;&lt; Combinatorica`;
+
+  &lt;&lt; GraphUtilities`;
+  &lt;&lt; Experimental`;
+  &lt;&lt; Statistics`DescriptiveStatistics`;
+  &lt;&lt; Statistics`MultiDescriptiveStatistics`;
+
+  &lt;&lt; GraphUtilities`;
+
+  Association[
+    "Graph" -&gt; G,
+    "Samples" -&gt; valid
+  ]
+];
+
+(* After building PRM, add start and goal nodes and use FindShortestPath
+   to get the sequence of indices, which can be mapped back to joint vectors. *)
+      </code></pre>
+      <p>
+        For a complete implementation, you should replace
+        <code>inCollision</code> with a function that uses your manipulator's
+        forward kinematics and geometry, and then solve shortest paths using
+        <code>FindShortestPath</code> on the PRM graph.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (RRT* Connection Radius in 6D):</strong>
+        In general, under mild regularity assumptions on the free space,
+        asymptotically optimal RRT* in dimension
+        <strong>\( d \)</strong> chooses radius
+        <strong>\( r_n = \gamma (\log n / n)^{1/d} \)</strong> with
+        <strong>\( \gamma \)</strong> larger than a critical constant depending
+        on the volume of <strong>\( \mathcal{C}_{\mathrm{free}} \)</strong>.
+        Specialize this expression to the 6-DOF manipulator, and explain how
+        decreasing <strong>\( \gamma \)</strong> affects convergence and
+        performance.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <h4 class="mathJax">
+        \[ d = 6 \quad \Rightarrow \quad r_n = \gamma \Big( \tfrac{\log n}{n}
+        \Big)^{1/6}. \]
+      </h4>
+      <p>
+        For fixed <strong>\( n \)</strong>, a smaller
+        <strong>\( \gamma \)</strong> reduces the neighborhood radius, which
+        decreases the number of neighbors considered in each iteration, thus
+        reducing per-iteration complexity. However, if
+        <strong>\( \gamma \)</strong> is chosen below the theoretical threshold,
+        the random geometric graph induced by the RRT* rewiring may fail to
+        contain near-optimal connections with high probability, and the
+        algorithm may converge to a suboptimal path. Larger
+        <strong>\( \gamma \)</strong> improves the likelihood of asymptotically
+        optimal behavior but at the expense of more collision checks.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Continuity of Workspace Path):</strong>
+        Let <strong>\( f : \mathcal{C} \to \mathbb{R}^{3} \)</strong> be the
+        end-effector position map of a 6-DOF manipulator, assumed continuous in
+        <strong>\( q \)</strong>. Consider the joint-space interpolation
+      </p>
+      <h4 class="mathJax">
+        \[ \sigma(t) = (1-t) q_0 + t q_1,\quad t \in [0,1]. \]
+      </h4>
+      <p>
+        Show that the end-effector path
+        <strong>\( x(t) = f(\sigma(t)) \)</strong> is continuous in
+        <strong>\( t \)</strong>. Why is this property important for the
+        correctness of collision checking along straight-line segments?
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        The map <strong>\( t \mapsto \sigma(t) \)</strong> is continuous because
+        it is an affine combination of <strong>\( q_0 \)</strong> and
+        <strong>\( q_1 \)</strong>. Composition of continuous functions is
+        continuous, so <strong>\( x(t) = f(\sigma(t)) \)</strong> is continuous
+        in <strong>\( t \)</strong>. This implies that if there exist
+        <strong>\( t_a &lt; t_b \)</strong> such that
+        <strong>\( x(t_a) \)</strong> and <strong>\( x(t_b) \)</strong> are both
+        collision-free and the clearance function is continuous, then any
+        collision along the segment must occur within some intermediate
+        interval. Therefore, by sampling sufficiently densely in
+        <strong>\( t \)</strong>, we can detect collisions along the segment
+        with arbitrary precision, justifying the discretized edge checks used in
+        RRT*/PRM.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Expected Degree in 6D PRM):</strong>
+        Assume that <strong>\( \mathcal{C}_{\mathrm{free}} \)</strong> is a full
+        hyper-rectangle of volume <strong>\( V \)</strong> in
+        <strong>\( \mathbb{R}^6 \)</strong>, and that PRM samples
+        <strong>\( n \)</strong> configurations i.i.d. uniformly. Using a
+        radius-based connection strategy with radius <strong>\( r \)</strong>,
+        approximate the expected degree of a node in the roadmap. Use the volume
+        of a 6D ball
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{Vol}_6(r) = \frac{\pi^3}{6} r^6. \]
+      </h4>
+      <p><strong>Solution:</strong></p>
+      <p>
+        For large <strong>\( n \)</strong>, the expected number of neighbors of
+        a given node is approximately the number of other points that fall in
+        the 6D ball of radius <strong>\( r \)</strong> centered at that node,
+        that is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbb{E}[\deg] \approx (n - 1) \frac{\operatorname{Vol}_6(r)}{V} =
+        (n - 1) \frac{\pi^3 r^6}{6 V}. \]
+      </h4>
+      <p>
+        This shows the strong dependence of graph density on the radius
+        <strong>\( r \)</strong> in high dimensions. For fixed
+        <strong>\( n \)</strong> and <strong>\( V \)</strong>, small changes in
+        <strong>\( r \)</strong> dramatically change the expected degree and
+        thus affect connectivity and planning success.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Discretization Step Along Edges):</strong>
+        Suppose every collision-free configuration has clearance at least
+        <strong>\( \epsilon \gt 0 \)</strong> from obstacles, and the mapping
+        from configuration to any point on the robot is globally Lipschitz with
+        constant <strong>\( L \)</strong> (i.e., moving by
+        <strong>\( \Delta q \)</strong> in joint space moves any point on the
+        robot by at most <strong>\( L \lVert \Delta q \rVert_2 \)</strong> in
+        workspace). Show that if the discretization step in joint space
+        satisfies <strong>\( \delta \le \epsilon / L \)</strong>, then checking
+        collisions on each sample along a straight-line edge guarantees that the
+        entire edge is collision-free.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        Consider two consecutive configurations along the edge,
+        <strong>\( q \)</strong> and <strong>\( q' \)</strong>, such that
+        <strong>\( \lVert q - q' \rVert_2 \le \delta \)</strong>. For any
+        intermediate configuration on the segment
+        <strong>\( \tilde{q} = (1-\alpha) q + \alpha q' \)</strong>, the
+        Lipschitz property implies that each point on the robot moves by at most
+        <strong>\( L \lVert q - q' \rVert_2 \le L \delta \)</strong> from its
+        position at <strong>\( q \)</strong>. If <strong>\( q \)</strong> has
+        clearance at least <strong>\( \epsilon \)</strong>, then every
+        intermediate configuration has clearance at least
+        <strong>\( \epsilon - L \delta \)</strong>. If we enforce
+        <strong>\( \delta \le \epsilon / L \)</strong>, this quantity is
+        nonnegative, so no intermediate configuration can collide with
+        obstacles. Applying this argument segment-wise along the edge shows that
+        the entire continuous edge is collision-free if all samples are.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lab you instantiated asymptotically optimal sampling-based
+        planners (RRT* and PRM) for a 6-DOF manipulator in joint space. You
+        formulated the configuration space and free space for the arm, built
+        collision checking around your existing kinematic model, and implemented
+        the metric, sampling, and steering primitives that both planners share.
+        You then realized RRT* and PRM in several languages and toolchains
+        (Python, C++, Java, MATLAB/Simulink, Wolfram Mathematica), emphasizing
+        the separation between environment modeling and planner logic. These
+        implementations provide a foundation for integrating sampling-based
+        planners into more advanced manipulator planning pipelines in later
+        chapters.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Kavraki, L.E., Švestka, P., Latombe, J.-C., &amp; Overmars, M.H. (1996).
+        Probabilistic roadmaps for path planning in high-dimensional
+        configuration spaces.
+        <em>IEEE Transactions on Robotics and Automation</em>, 12(4), 566–580.
+      </li>
+      <li>
+        Karaman, S., &amp; Frazzoli, E. (2011). Sampling-based algorithms for
+        optimal motion planning.
+        <em>International Journal of Robotics Research</em>, 30(7), 846–894.
+      </li>
+      <li>
+        LaValle, S.M., &amp; Kuffner, J.J. (2001). Randomized kinodynamic
+        planning.
+        <em>International Journal of Robotics Research</em>, 20(5), 378–400.
+      </li>
+      <li>
+        Hsu, D., Latombe, J.-C., &amp; Motwani, R. (1999). Path planning in
+        expansive configuration spaces.
+        <em
+          >International Journal of Computational Geometry &amp;
+          Applications</em
+        >, 9(4–5), 495–512.
+      </li>
+      <li>
+        Jaillet, L., Cortés, J., &amp; Siméon, T. (2005). Sampling-based path
+        planning on configuration-space costmaps.
+        <em>IEEE Transactions on Robotics</em>, 26(4), 635–646.
+      </li>
+      <li>
+        Choset, H., Lynch, K.M., Hutchinson, S., Kantor, G., Burgard, W.,
+        Kavraki, L.E., &amp; Thrun, S. (2005).
+        <em
+          >Principles of Robot Motion: Theory, Algorithms, and
+          Implementations</em
+        >. MIT Press. (Chapters on sampling-based motion planning.)
+      </li>
+      <li>
+        LaValle, S.M. (2006).
+        <em>Planning Algorithms</em>. Cambridge University Press. (Chapters 5–7
+        on sampling-based methods.)
+      </li>
+      <li>
+        Bekris, K.E. (2012). Simple redundant manipulator path planning:
+        Feasibility and resolution completeness through search-based algorithms.
+        <em>International Journal of Robotics Research</em>, 31(4), 468–485.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter3/Lesson5.html">
+          Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter4/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Trajectory Optimization Problem Setup
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="active-lesson" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

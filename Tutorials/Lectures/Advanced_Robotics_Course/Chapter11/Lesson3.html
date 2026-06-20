@@ -1,0 +1,1807 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 11: Learning from Demonstration (Imitation) - Lesson 3: Inverse Reinforcement Learning Basics | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 11: Learning from Demonstration (Imitation)</h1>
+    <h3><strong>Lesson 3: Inverse Reinforcement Learning Basics</strong></h3>
+    <p>
+      This lesson introduces the mathematical foundations of inverse
+      reinforcement learning (IRL) for robotics. We formalize the problem of
+      recovering an unknown reward function from expert demonstrations, develop
+      feature-based IRL formulations, derive maximum entropy IRL, and sketch
+      practical implementations in Python, C++, Java, MATLAB/Simulink, and
+      Wolfram Mathematica, with a view toward high-DOF robotic manipulators and
+      mobile platforms.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Motivation and High-Level View -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Motivation and High-Level View</h2>
+    <div class="down-content">
+      <p>
+        In Learning from Demonstration (LfD), a human (or another controller)
+        provides example executions of a task. Behavior cloning directly
+        regresses a policy from states to actions, but it does not explicitly
+        model <em>why</em> an action is good, and it often suffers from
+        covariate shift when the robot leaves the demonstrated state
+        distribution.
+      </p>
+      <p>
+        Inverse reinforcement learning instead assumes demonstrations come from
+        (near-)optimal behavior under some unknown reward function
+        <strong>\( R^\star \)</strong>. The expert policy
+        <strong>\( \pi_E \)</strong> is assumed to satisfy
+      </p>
+      <h4 class="mathJax">
+        \[ \pi_E \approx \arg\max_{\pi} J(\pi; R^\star), \]
+      </h4>
+      <p>
+        where <strong>\( J(\pi; R) \)</strong> is the expected discounted return
+        of policy <strong>\( \pi \)</strong> under reward
+        <strong>\( R \)</strong>. IRL seeks to reconstruct a reward
+        <strong>\( R_\theta \)</strong> that makes the expert appear optimal,
+        and then a standard RL algorithm (to be studied systematically in
+        Chapter 12) can be used to compute a robot policy for new environments.
+      </p>
+      <p>
+        For robotics, this is compelling because a <em>reward function</em> can
+        generalize to new initial conditions, obstacles, or robot morphologies,
+        while raw action demonstrations often cannot.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  D["Expert demonstrations (state-action sequences)"] --> F["Estimate feature statistics of expert behavior"]
+  F --> IRL["Solve inverse RL optimization to find reward parameters"]
+  IRL --> RWD["Recovered reward function R_theta"]
+  RWD --> RL["Forward RL planning / control with R_theta"]
+  RL --> ROBOT["Robot executes derived policy"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: MDP Preliminaries and Occupancy Measures -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. MDP Preliminaries and Occupancy Measures</h2>
+    <div class="down-content">
+      <p>
+        We model the robot and its environment as a Markov Decision Process
+        (MDP):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{M} = (\mathcal{S}, \mathcal{A}, P, \gamma, \rho_0), \]
+      </h4>
+      <p>
+        where <strong>\( \mathcal{S} \)</strong> is the (possibly
+        high-dimensional) state space (e.g., joint configurations and object
+        poses), <strong>\( \mathcal{A} \)</strong> is the action set (e.g.,
+        end-effector twists, joint torques, or motion primitives),
+        <strong>\( P(s' \mid s, a) \)</strong> is the transition kernel,
+        <strong>\( \gamma \in [0,1) \)</strong> is the discount factor, and
+        <strong>\( \rho_0 \)</strong> is the distribution of the initial state.
+      </p>
+      <p>
+        For a stationary policy <strong>\( \pi(a \mid s) \)</strong>, the
+        discounted return under reward
+        <strong>\( R : \mathcal{S} \times \mathcal{A} \to \mathbb{R} \)</strong>
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ J(\pi; R) \;=\; \mathbb{E}\!\left[ \sum_{t=0}^{\infty} \gamma^t
+        R(s_t, a_t) \right]. \]
+      </h4>
+      <p>
+        A key quantity in IRL is the <em>discounted occupancy measure</em> of a
+        policy:
+      </p>
+      <h4 class="mathJax">
+        \[ d_\pi(s,a) \;=\; (1 - \gamma) \sum_{t=0}^{\infty} \gamma^t
+        \Pr_\pi(s_t = s, a_t = a). \]
+      </h4>
+      <p>
+        <strong>Proposition.</strong> For any bounded reward function
+        <strong>\( R \)</strong>, we have
+      </p>
+      <h4 class="mathJax">
+        \[ J(\pi; R) \;=\; \frac{1}{1 - \gamma} \sum_{s \in \mathcal{S}} \sum_{a
+        \in \mathcal{A}} d_\pi(s,a) \, R(s,a). \]
+      </h4>
+      <p><strong>Proof.</strong> Starting from the definition,</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} J(\pi; R) &= \mathbb{E}\!\left[ \sum_{t=0}^{\infty}
+        \gamma^t R(s_t, a_t) \right] \\ &= \sum_{t=0}^{\infty} \gamma^t
+        \sum_{s,a} \Pr_\pi(s_t = s, a_t = a)\, R(s,a) \\ &= \sum_{s,a} R(s,a)
+        \sum_{t=0}^{\infty} \gamma^t \Pr_\pi(s_t = s, a_t = a) \\ &= \frac{1}{1
+        - \gamma} \sum_{s,a} d_\pi(s,a) R(s,a), \end{aligned} \]
+      </h4>
+      <p>
+        where the last line uses the definition of
+        <strong>\( d_\pi(s,a) \)</strong>. This representation is central
+        because IRL often works in terms of occupancy measures rather than
+        policies directly.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: IRL as Reward Recovery from Expert Policy -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. IRL as Reward Recovery from Expert Policy</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \pi_E \)</strong> be the expert policy that generated the
+        demonstrations and <strong>\( d_E(s,a) = d_{\pi_E}(s,a) \)</strong> its
+        occupancy measure. The IRL problem assumes
+        <strong>\( P, \gamma, \rho_0 \)</strong> are known (or estimated) and
+        that the reward has a parametric form:
+      </p>
+      <h4 class="mathJax">
+        \[ R_\theta(s,a) = \boldsymbol{\theta}^\top \boldsymbol{\phi}(s,a),
+        \quad \boldsymbol{\theta} \in \mathbb{R}^k, \]
+      </h4>
+      <p>
+        where <strong>\( \boldsymbol{\phi}(s,a) \in \mathbb{R}^k \)</strong> is
+        a feature vector (e.g., distances to obstacles, joint limit penalties,
+        manipulability indices). From Section 2,
+      </p>
+      <h4 class="mathJax">
+        \[ J(\pi; R_\theta) = \frac{1}{1 - \gamma} \sum_{s,a}
+        d_\pi(s,a)\,\boldsymbol{\theta}^\top \boldsymbol{\phi}(s,a) = \frac{1}{1
+        - \gamma} \boldsymbol{\theta}^\top \boldsymbol{\mu}(\pi), \]
+      </h4>
+      <p>
+        where the <em>feature expectation</em> of policy
+        <strong>\( \pi \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\mu}(\pi) = \sum_{s,a} d_\pi(s,a)\,\boldsymbol{\phi}(s,a)
+        = \mathbb{E}_\pi \left[ \sum_{t=0}^{\infty} \gamma^t
+        \boldsymbol{\phi}(s_t,a_t) \right]. \]
+      </h4>
+      <p>
+        Given expert trajectories
+        <strong>\( \{&bsol;tau^{(i)}\}_{i=1}^N \)</strong>, we estimate
+        <strong
+          >\( \boldsymbol{\mu}_E \approx \boldsymbol{\mu}(\pi_E) \)</strong
+        >
+        via
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{\boldsymbol{\mu}}_E = \frac{1}{N} \sum_{i=1}^N \sum_{t=0}^{T_i -
+        1} \gamma^t \boldsymbol{\phi}\!\left( s_t^{(i)}, a_t^{(i)} \right). \]
+      </h4>
+      <p>
+        A generic IRL objective is to find a reward such that the expert
+        performs at least as well as any other policy:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\theta}^\star \in \arg\max_{\boldsymbol{\theta}} \Big(
+        J(\pi_E; R_{\boldsymbol{\theta}}) - \max_{\pi} J(\pi;
+        R_{\boldsymbol{\theta}}) \Big). \]
+      </h4>
+      <p>
+        This is intractable in general, but it motivates practical formulations
+        such as max-margin IRL and maximum entropy IRL, which we discuss next.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Feature Expectation Matching and Apprenticeship Learning -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Feature Expectation Matching and Apprenticeship Learning</h2>
+    <div class="down-content">
+      <p>
+        A classic IRL approach for robotics is
+        <em>apprenticeship learning</em> via feature expectation matching. We
+        maintain a set of candidate policies
+        <strong>\( \{\pi_1,\dots,\pi_K\} \)</strong> and their feature
+        expectations <strong>\( \boldsymbol{\mu}(\pi_j) \)</strong>. The reward
+        parameters are chosen to maximize the margin between the expert and all
+        current candidates:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} &\max_{\boldsymbol{\theta}, \delta} \;\; \delta \\
+        \text{s.t.}\quad &\boldsymbol{\theta}^\top \bigl(
+        \hat{\boldsymbol{\mu}}_E - \boldsymbol{\mu}(\pi_j) \bigr) \ge \delta,
+        \quad j = 1,\dots,K, \\ &\|\boldsymbol{\theta}\|_2 \le 1. \end{aligned}
+        \]
+      </h4>
+      <p>
+        <strong>Claim.</strong> The optimization above is a convex program (a
+        second-order cone program).
+      </p>
+      <p>
+        <strong>Proof sketch.</strong> The constraints
+        <strong
+          >\( \boldsymbol{\theta}^\top(\hat{\boldsymbol{\mu}}_E -
+          \boldsymbol{\mu}(\pi_j)) \ge \delta \)</strong
+        >
+        are linear in the decision variables
+        <strong>\( (\boldsymbol{\theta},\delta) \)</strong>, and the norm
+        constraint <strong>\( \|\boldsymbol{\theta}\|_2 \le 1 \)</strong> is
+        convex. The feasible set is therefore convex, and the objective
+        <strong>\( \delta \)</strong> is linear. Maximizing a linear function
+        over a convex set is a convex optimization problem.
+      </p>
+      <p>
+        Once <strong>\( \boldsymbol{\theta} \)</strong> is obtained, we solve a
+        <em>forward RL</em> problem under reward
+        <strong>\( R_{\boldsymbol{\theta}} \)</strong> to compute
+        <strong>\( \pi_{K+1} \)</strong>. If its feature expectations are
+        already close to <strong>\( \hat{\boldsymbol{\mu}}_E \)</strong>, the
+        procedure stops; otherwise, we add <strong>\( \pi_{K+1} \)</strong> to
+        the pool and resolve the max-margin problem. This yields a sequence of
+        policies that converges (under suitable assumptions) to one whose
+        feature expectations are close to those of the expert.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Maximum Entropy IRL -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Maximum Entropy IRL</h2>
+    <div class="down-content">
+      <p>
+        Max-margin IRL returns a reward that separates expert and non-expert
+        feature expectations, but it does not specify a full distribution over
+        trajectories. Maximum entropy IRL (MaxEnt IRL) instead chooses the most
+        <em>uninformative</em> distribution consistent with the expert feature
+        expectations.
+      </p>
+      <p>
+        Let <strong>\( \mathbf{f}(&bsol;tau) \)</strong> denote the discounted
+        feature sum along a trajectory:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{f}(&bsol;tau) = \sum_{t=0}^{T(&bsol;tau)-1} \gamma^t
+        \boldsymbol{\phi}(s_t, a_t). \]
+      </h4>
+      <p>MaxEnt IRL posits a Gibbs distribution over trajectories:</p>
+      <h4 class="mathJax">
+        \[ p_{\boldsymbol{\theta}}(&bsol;tau) = \frac{1}{Z(\boldsymbol{\theta})}
+        \exp\bigl(\boldsymbol{\theta}^\top \mathbf{f}(&bsol;tau)\bigr), \]
+      </h4>
+      <p>
+        where <strong>\( Z(\boldsymbol{\theta}) \)</strong> is the partition
+        function. Given demonstrations
+        <strong>\( \{&bsol;tau^{(i)}\}_{i=1}^N \)</strong>, the log-likelihood
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(\boldsymbol{\theta}) = \sum_{i=1}^{N} \log
+        p_{\boldsymbol{\theta}}(&bsol;tau^{(i)}) = \sum_{i=1}^{N}
+        \boldsymbol{\theta}^\top \mathbf{f}(&bsol;tau^{(i)}) - N \log
+        Z(\boldsymbol{\theta}). \]
+      </h4>
+      <p>
+        <strong>Proposition.</strong> The gradient of the log-likelihood is the
+        difference between expert and model feature expectations:
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla_{\boldsymbol{\theta}} \mathcal{L}(\boldsymbol{\theta}) =
+        \hat{\boldsymbol{\mu}}_E - \boldsymbol{\mu}_{\boldsymbol{\theta}}, \]
+      </h4>
+      <p>where</p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\mu}_{\boldsymbol{\theta}} =
+        \mathbb{E}_{p_{\boldsymbol{\theta}}} \bigl[\mathbf{f}(&bsol;tau)\bigr].
+        \]
+      </h4>
+      <p><strong>Proof.</strong> We compute</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \nabla_{\boldsymbol{\theta}}
+        \mathcal{L}(\boldsymbol{\theta}) &= \sum_{i=1}^{N}
+        \mathbf{f}(&bsol;tau^{(i)}) - N \frac{1}{Z(\boldsymbol{\theta})}
+        \nabla_{\boldsymbol{\theta}} Z(\boldsymbol{\theta}) \\ &= \sum_{i=1}^{N}
+        \mathbf{f}(&bsol;tau^{(i)}) - N \sum_{&bsol;tau} \mathbf{f}(&bsol;tau)
+        \frac{ \exp\bigl(\boldsymbol{\theta}^\top \mathbf{f}(&bsol;tau)\bigr) }{
+        Z(\boldsymbol{\theta}) } \\ &= N \hat{\boldsymbol{\mu}}_E - N
+        \mathbb{E}_{p_{\boldsymbol{\theta}}} \bigl[\mathbf{f}(&bsol;tau)\bigr] =
+        N\bigl( \hat{\boldsymbol{\mu}}_E -
+        \boldsymbol{\mu}_{\boldsymbol{\theta}} \bigr). \end{aligned} \]
+      </h4>
+      <p>
+        Dividing by <strong>\( N \)</strong> gives the stated expression.
+        Gradient ascent iteratively adjusts
+        <strong>\( \boldsymbol{\theta} \)</strong> to align model and expert
+        feature expectations.
+      </p>
+      <p>
+        In practice, we do not enumerate trajectories. Instead, MaxEnt IRL can
+        be implemented via
+        <em>soft value iteration</em>, where the soft value and soft Q-functions
+        satisfy
+      </p>
+      <h4 class="mathJax">
+        \[ Q_{\boldsymbol{\theta}}(s,a) = R_{\boldsymbol{\theta}}(s,a) + \gamma
+        \sum_{s'} P(s' \mid s,a) V_{\boldsymbol{\theta}}(s'), \]
+      </h4>
+      <h4 class="mathJax">
+        \[ V_{\boldsymbol{\theta}}(s) = \log \sum_{a \in \mathcal{A}}
+        \exp\bigl(Q_{\boldsymbol{\theta}}(s,a)\bigr), \]
+      </h4>
+      <p>and the induced stochastic policy is</p>
+      <h4 class="mathJax">
+        \[ \pi_{\boldsymbol{\theta}}(a \mid s) =
+        \exp\bigl(Q_{\boldsymbol{\theta}}(s,a) -
+        V_{\boldsymbol{\theta}}(s)\bigr). \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Algorithmic IRL Loop (Flowchart) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Algorithmic IRL Loop</h2>
+    <div class="down-content">
+      <p>
+        Most IRL algorithms used in robotics (for manipulators or mobile robots)
+        follow an iterative loop that alternates between
+        <em>forward</em> planning and <em>inverse</em> reward updating:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start with expert demonstrations"] --> MU["Estimate expert feature expectation mu_E"]
+  MU --> THETA0["Initialize reward parameters theta_0"]
+  THETA0 --> LOOP["Repeat: forward RL + reward update"]
+  LOOP --> FWD["Forward RL: solve MDP with current R_theta to get policy pi_k"]
+  FWD --> MU_K["Compute mu(pi_k) from induced trajectories"]
+  MU_K --> UPD["Update theta_{k+1} using mu_E - mu(pi_k)"]
+  UPD --> CHECK["Check convergence in feature space"]
+  CHECK -->|not converged| LOOP
+  CHECK -->|converged| OUT["Return R_theta and policy for deployment"]
+        </pre>
+      </div>
+      <p>
+        In a robotics system, the forward RL step is often implemented using
+        continuous-control solvers (e.g., trajectory optimization,
+        model-predictive control, or policy gradient methods) while IRL provides
+        a task-specific cost shaping signal that can generalize to new contexts.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Lab — MaxEnt IRL on a Discrete C-Space Grid -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab — MaxEnt IRL on a Discrete C-Space Grid</h2>
+    <div class="down-content">
+      <p>
+        We now sketch a compact Python implementation of MaxEnt IRL on a
+        discrete 2D configuration grid (e.g., a coarse approximation of an
+        end-effector workspace). For real robotic systems, one would typically
+        use <code>numpy</code>, <code>scipy</code>, and robotics simulators such
+        as <code>pybullet</code> or <code>mujoco</code> to generate
+        demonstrations, but the core IRL logic is similar.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+
+# Small gridworld as proxy for a low-res C-space
+side = 3
+n_states = side * side
+n_actions = 4  # 0: up, 1: right, 2: down, 3: left
+gamma = 0.9
+
+def state_to_rc(s):
+    return divmod(s, side)
+
+def rc_to_state(r, c):
+    return r * side + c
+
+def make_transition():
+    P = np.zeros((n_states, n_actions, n_states))
+    for s in range(n_states):
+        r, c = state_to_rc(s)
+        for a in range(n_actions):
+            nr, nc = r, c
+            if a == 0:
+                nr = max(r - 1, 0)
+            elif a == 1:
+                nc = min(c + 1, side - 1)
+            elif a == 2:
+                nr = min(r + 1, side - 1)
+            else:
+                nc = max(c - 1, 0)
+            s_next = rc_to_state(nr, nc)
+            P[s, a, s_next] = 1.0
+    return P
+
+P = make_transition()
+
+# Feature map: one-hot over states (k = n_states)
+k = n_states
+phi = np.eye(n_states)  # phi[s, :] is feature vector for state s
+
+def empirical_feature_counts(demos):
+    """demos: list of trajectories, each as list of states"""
+    mu_E = np.zeros(k)
+    for traj in demos:
+        for t, s in enumerate(traj):
+            mu_E += (gamma ** t) * phi[s]
+    mu_E /= len(demos)
+    return mu_E
+
+def soft_value_iteration(theta, n_iters=50):
+    # reward only depends on state here: R(s) = theta^T phi(s) = theta[s]
+    R = theta
+    V = np.zeros(n_states)
+    for _ in range(n_iters):
+        Q = np.zeros((n_states, n_actions))
+        for s in range(n_states):
+            for a in range(n_actions):
+                Q[s, a] = R[s] + gamma * np.dot(P[s, a], V)
+        # soft value function
+        V = np.log(np.exp(Q).sum(axis=1) + 1e-8)
+    # derive policy
+    Q = np.zeros((n_states, n_actions))
+    for s in range(n_states):
+        for a in range(n_actions):
+            Q[s, a] = R[s] + gamma * np.dot(P[s, a], V)
+    pi = np.exp(Q - V[:, None])
+    pi /= pi.sum(axis=1, keepdims=True)
+    return V, pi
+
+def state_visitation(pi, start_dist, horizon=20):
+    d_s = np.zeros(n_states)
+    d = start_dist.copy()
+    for t in range(horizon):
+        d_s += (gamma ** t) * d
+        d_next = np.zeros(n_states)
+        for s in range(n_states):
+            for a in range(n_actions):
+                for s2 in range(n_states):
+                    d_next[s2] += d[s] * pi[s, a] * P[s, a, s2]
+        d = d_next
+    d_s *= (1.0 - gamma)
+    return d_s
+
+def expected_features(theta, start_dist):
+    _, pi = soft_value_iteration(theta)
+    d_s = state_visitation(pi, start_dist)
+    return d_s @ phi  # (n_states,) @ (n_states, k) = (k,)
+
+# Example expert demonstrations (hand-designed "right then down" strategy)
+demos = [
+    [0, 1, 2, 5, 8],   # trajectory 1
+    [1, 2, 5, 8],      # trajectory 2
+]
+
+mu_E = empirical_feature_counts(demos)
+
+theta = np.zeros(k)
+start_dist = np.zeros(n_states)
+start_dist[0] = 1.0  # fixed start state
+
+alpha = 0.5
+for itr in range(50):
+    mu_theta = expected_features(theta, start_dist)
+    grad = mu_E - mu_theta
+    theta += alpha * grad  # gradient ascent on MaxEnt IRL objective
+
+print("Learned reward (per state):")
+print(theta.reshape((side, side)))
+      </code></pre>
+      <p>
+        In a manipulator setting, one could choose features that depend on joint
+        configurations, distances between end-effector and target, and collision
+        penalties obtained from a motion planning library (e.g., OMPL via Python
+        bindings). The IRL loop above remains unchanged; only the feature
+        extraction and transition model become more sophisticated.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Snippet — Feature Expectation Matching Skeleton -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Snippet — Feature Expectation Matching Skeleton</h2>
+    <div class="down-content">
+      <p>
+        In C++, IRL for robotics is often integrated with ROS, OMPL, and MoveIt.
+        Below is a minimal snippet computing discounted feature expectations for
+        demonstrations using <code>Eigen</code> for linear algebra. In a real
+        system, <code>phi(s,a)</code> would call into robot kinematics libraries
+        such as <code>orocos_kdl</code> or MoveIt to compute task-relevant
+        features.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;vector&gt;
+#include &lt;Eigen/Dense&gt;
+
+using Eigen::VectorXd;
+using Eigen::MatrixXd;
+
+struct Transition {
+    int s;
+    int a;
+};
+
+struct Demonstration {
+    std::vector&lt;Transition&gt; traj;
+};
+
+VectorXd phi(int s, int a, int k);
+
+// Empirical discounted feature expectation from demonstrations
+VectorXd empiricalFeatureExpectation(const std::vector&lt;Demonstration&gt;& demos,
+                                     double gamma,
+                                     int k) {
+    VectorXd mu_E = VectorXd::Zero(k);
+    for (const auto&amp; demo : demos) {
+        double discount = 1.0;
+        for (std::size_t t = 0; t &lt; demo.traj.size(); ++t) {
+            int s = demo.traj[t].s;
+            int a = demo.traj[t].a;
+            mu_E += discount * phi(s, a, k);
+            discount *= gamma;
+        }
+    }
+    mu_E /= static_cast&lt;double&gt;(demos.size());
+    return mu_E;
+}
+
+// Simple gradient update for theta in linear reward R_theta(s,a) = theta^T phi(s,a)
+void gradientUpdate(VectorXd&amp; theta,
+                    const VectorXd&amp; mu_E,
+                    const VectorXd&amp; mu_theta,
+                    double alpha) {
+    VectorXd grad = mu_E - mu_theta;
+    theta += alpha * grad;
+}
+      </code></pre>
+      <p>
+        Forward RL in C++ can be implemented using dynamic programming on
+        discretized configuration spaces, or by delegating to trajectory
+        optimizers (e.g., CHOMP, STOMP) and interpreting their costs as
+        approximations to <strong>\( J(\pi; R_\theta) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Snippet — Linear Reward IRL Skeleton -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Snippet — Linear Reward IRL Skeleton</h2>
+    <div class="down-content">
+      <p>
+        Java-based robotic systems (e.g., via ROSJava or custom industrial APIs)
+        can incorporate IRL by maintaining feature expectations and updating
+        reward parameters online. The following snippet shows a basic structure:
+      </p>
+      <pre><code class="language-java">
+import java.util.List;
+
+public class LinearIrl {
+
+    // phi(s,a) is assumed known and returns double[k]
+    public static double[] phi(int s, int a, int k) {
+        double[] f = new double[k];
+        // TODO: fill with task-specific features
+        return f;
+    }
+
+    public static double[] empiricalFeatureExpectation(List&lt;int[][]&gt; demos,
+                                                       double gamma, int k) {
+        double[] muE = new double[k];
+        for (int[][] traj : demos) {
+            double discount = 1.0;
+            for (int t = 0; t &lt; traj.length; t++) {
+                int s = traj[t][0];
+                int a = traj[t][1];
+                double[] f = phi(s, a, k);
+                for (int i = 0; i &lt; k; i++) {
+                    muE[i] += discount * f[i];
+                }
+                discount *= gamma;
+            }
+        }
+        int n = demos.size();
+        for (int i = 0; i &lt; k; i++) {
+            muE[i] /= (double) n;
+        }
+        return muE;
+    }
+
+    public static void gradientUpdate(double[] theta,
+                                      double[] muE,
+                                      double[] muTheta,
+                                      double alpha) {
+        for (int i = 0; i &lt; theta.length; i++) {
+            double grad = muE[i] - muTheta[i];
+            theta[i] += alpha * grad;
+        }
+    }
+}
+      </code></pre>
+      <p>
+        A forward planner (e.g., a lattice-based planner for mobile robots) can
+        be treated as a black-box policy generator under
+        <strong>\( R_\theta \)</strong>, from which Java code collects
+        trajectory statistics
+        <strong>\( \boldsymbol{\mu}(\pi_\theta) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink — Soft Value Iteration for IRL -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink — Soft Value Iteration for IRL</h2>
+    <div class="down-content">
+      <p>
+        MATLAB with the Reinforcement Learning Toolbox and Robotics System
+        Toolbox is widely used for robotic experiments. Below is a simplified
+        script implementing soft value iteration under a linear reward. The
+        resulting policy can be wrapped in a Simulink block to close the loop
+        with a simulated robot plant.
+      </p>
+      <pre><code class="language-matlab">
+function [V, pi] = soft_value_iteration(theta, P, gamma, nIter)
+% theta: k-by-1 reward parameters
+% P: nS-by-nA-by-nS transition probabilities
+% Here we assume state features are one-hot, so R(s) = theta(s).
+
+nS = size(P, 1);
+nA = size(P, 2);
+
+R = theta(:);          % nS-by-1
+V = zeros(nS, 1);
+
+for it = 1:nIter
+    Q = zeros(nS, nA);
+    for s = 1:nS
+        for a = 1:nA
+            Q(s,a) = R(s) + gamma * squeeze(P(s,a,:))' * V;
+        end
+    end
+    V = log(sum(exp(Q), 2) + 1e-8);
+end
+
+Q = zeros(nS, nA);
+for s = 1:nS
+    for a = 1:nA
+        Q(s,a) = R(s) + gamma * squeeze(P(s,a,:))' * V;
+    end
+end
+
+pi = exp(Q - V);
+pi = pi ./ sum(pi, 2);
+end
+      </code></pre>
+      <p>
+        In Simulink, one can implement this as a MATLAB Function block that
+        receives the current state and outputs a distribution over discrete
+        actions, or is combined with a low-level controller that maps actions to
+        joint torques.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica — MaxEnt IRL Gradient Update -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica — MaxEnt IRL Gradient Update</h2>
+    <div class="down-content">
+      <p>
+        Wolfram Mathematica is convenient for prototyping IRL with symbolic and
+        numerical tools. The following snippet performs a few gradient ascent
+        iterations on the MaxEnt IRL objective given empirical feature
+        expectations and a function that returns model feature expectations.
+      </p>
+      <pre><code class="language-mathematica">
+(* Empirical feature expectation from demonstrations *)
+gamma = 0.9;
+demos = {
+  {0, 1, 2, 5, 8},
+  {1, 2, 5, 8}
+};
+
+phi[s_] := UnitVector[9, s + 1]; (* one-hot over 9 states *)
+
+muE =
+  Mean@Table[
+    Sum[gamma^t phi[traj[[t + 1]]], {t, 0, Length[traj] - 1}],
+    {traj, demos}
+  ];
+
+(* Placeholder for model feature expectation given theta *)
+muTheta[theta_] := (* compute via soft value iteration and visitation *)
+  Module[{(* ... implementation omitted ... *)},
+    ConstantArray[0., Length[theta]]
+  ];
+
+alpha = 0.5;
+theta = ConstantArray[0., 9];
+
+Do[
+  grad = muE - muTheta[theta];
+  theta = theta + alpha grad;
+, {itr, 1, 20}];
+
+thetaMatrix = Partition[theta, 3]
+      </code></pre>
+      <p>
+        In more advanced applications, Mathematica&apos;s
+        <code>NDSolve</code> and control systems functions can be used to
+        simulate robot dynamics while IRL updates the reward shaping terms.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Occupancy Measure Representation).</strong>
+        Let <strong>\( d_\pi(s,a) \)</strong> be the discounted occupancy
+        measure as in Section 2. Prove that for any bounded reward
+        <strong>\( R \)</strong>, we have
+        <strong
+          >\( J(\pi; R) = \frac{1}{1-\gamma} \sum_{s,a} d_\pi(s,a) R(s,a)
+          \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        By definition,
+      </p>
+      <h4 class="mathJax">
+        \[ J(\pi; R) = \mathbb{E} \left[ \sum_{t=0}^{\infty} \gamma^t R(s_t,a_t)
+        \right] = \sum_{t=0}^{\infty} \gamma^t \sum_{s,a} \Pr_\pi(s_t = s,a_t =
+        a) R(s,a). \]
+      </h4>
+      <p>Rearranging the sums gives</p>
+      <h4 class="mathJax">
+        \[ J(\pi; R) = \sum_{s,a} R(s,a) \sum_{t=0}^{\infty} \gamma^t
+        \Pr_\pi(s_t = s,a_t = a). \]
+      </h4>
+      <p>
+        Multiplying and dividing by <strong>\( 1-\gamma \)</strong>, and using
+        the definition of <strong>\( d_\pi(s,a) \)</strong>, yields the desired
+        result.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Linear Reward and Feature Expectations).</strong>
+        Suppose
+        <strong
+          >\( R_\theta(s,a) = \boldsymbol{\theta}^\top \boldsymbol{\phi}(s,a)
+          \)</strong
+        >. Show that
+        <strong
+          >\( J(\pi; R_\theta) = \frac{1}{1-\gamma} \boldsymbol{\theta}^\top
+          \boldsymbol{\mu}(\pi) \)</strong
+        >, where <strong>\( \boldsymbol{\mu}(\pi) \)</strong> is the feature
+        expectation of <strong>\( \pi \)</strong>.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        Plugging the linear form into the occupancy representation,
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} J(\pi; R_\theta) &= \frac{1}{1-\gamma} \sum_{s,a}
+        d_\pi(s,a)\, \boldsymbol{\theta}^\top \boldsymbol{\phi}(s,a) \\ &=
+        \frac{1}{1-\gamma} \boldsymbol{\theta}^\top \sum_{s,a} d_\pi(s,a)\,
+        \boldsymbol{\phi}(s,a) = \frac{1}{1-\gamma} \boldsymbol{\theta}^\top
+        \boldsymbol{\mu}(\pi), \end{aligned} \]
+      </h4>
+      <p>
+        where we swapped inner products and sums, and used the definition of
+        <strong>\( \boldsymbol{\mu}(\pi) \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Gradient in MaxEnt IRL).</strong>
+        Starting from the trajectory distribution
+        <strong
+          >\( p_{\boldsymbol{\theta}}(&bsol;tau) \propto
+          \exp\bigl(\boldsymbol{\theta}^\top \mathbf{f}(&bsol;tau)\bigr)
+          \)</strong
+        >, derive the gradient of the log-likelihood and show that it equals
+        <strong
+          >\( \hat{\boldsymbol{\mu}}_E - \boldsymbol{\mu}_{\boldsymbol{\theta}}
+          \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        This is precisely the derivation in Section 5. Express the
+        log-likelihood as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(\boldsymbol{\theta}) = \sum_{i=1}^N
+        \boldsymbol{\theta}^\top \mathbf{f}(&bsol;tau^{(i)}) - N \log
+        Z(\boldsymbol{\theta}), \]
+      </h4>
+      <p>
+        differentiate with respect to
+        <strong>\( \boldsymbol{\theta} \)</strong>, and note that
+        <strong
+          >\( \nabla_{\boldsymbol{\theta}} \log Z(\boldsymbol{\theta}) =
+          \mathbb{E}_{p_{\boldsymbol{\theta}}}[\mathbf{f}(&bsol;tau)] \)</strong
+        >. Collecting terms yields the difference between empirical and model
+        feature expectations.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Max-Margin IRL as Convex Program).</strong>
+        Consider the max-margin IRL formulation
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} &\max_{\boldsymbol{\theta}, \delta} \;\; \delta \\
+        \text{s.t.}\quad &\boldsymbol{\theta}^\top \bigl(
+        \hat{\boldsymbol{\mu}}_E - \boldsymbol{\mu}(\pi_j) \bigr) \ge \delta,
+        \quad j=1,\dots,K, \\ &\|\boldsymbol{\theta}\|_2 \le 1. \end{aligned} \]
+      </h4>
+      <p>Prove that this is a convex optimization problem.</p>
+      <p>
+        <strong>Solution.</strong>
+        The feasible set is defined by linear inequalities
+        <strong
+          >\( \boldsymbol{\theta}^\top(\hat{\boldsymbol{\mu}}_E -
+          \boldsymbol{\mu}(\pi_j)) - \delta \ge 0 \)</strong
+        >, which are convex, and the norm ball
+        <strong>\( \|\boldsymbol{\theta}\|_2 \le 1 \)</strong>, which is also
+        convex. The objective <strong>\( \delta \)</strong> is linear.
+        Therefore, we are maximizing a linear function over a convex set, i.e.,
+        a convex optimization problem.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Soft Bellman Operator as Contraction).</strong>
+        Define the soft Bellman operator <strong>\( \mathcal{T} \)</strong> on
+        value functions by
+      </p>
+      <h4 class="mathJax">
+        \[ \bigl(\mathcal{T} V\bigr)(s) = \log \sum_{a \in \mathcal{A}}
+        \exp\Bigl( R(s,a) + \gamma \sum_{s'} P(s' \mid s,a) V(s') \Bigr). \]
+      </h4>
+      <p>
+        Show that <strong>\( \mathcal{T} \)</strong> is a contraction in the
+        supremum norm with modulus <strong>\( \gamma \)</strong>, hence soft
+        value iteration converges to a unique fixed point.
+      </p>
+      <p>
+        <strong>Solution sketch.</strong> One can show that for any two value
+        functions <strong>\( V_1, V_2 \)</strong>,
+      </p>
+      <h4 class="mathJax">
+        \[ \bigl| (\mathcal{T} V_1)(s) - (\mathcal{T} V_2)(s) \bigr| \le \gamma
+        \max_{s'} \bigl| V_1(s') - V_2(s') \bigr| \]
+      </h4>
+      <p>
+        for all states <strong>\( s \)</strong>, using the fact that the
+        <em>log-sum-exp</em> function is 1-Lipschitz with respect to the
+        supremum norm. Taking the supremum over <strong>\( s \)</strong> yields
+        <strong
+          >\( \|\mathcal{T} V_1 - \mathcal{T} V_2\|_\infty \le \gamma \|V_1 -
+          V_2\|_\infty \)</strong
+        >. By the Banach fixed-point theorem, a unique soft value function
+        exists and soft value iteration converges to it.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we formalized inverse reinforcement learning for
+        robotics. Starting from MDP preliminaries and occupancy measures, we
+        showed how expert demonstrations define feature expectations that
+        constrain the unknown reward function. We derived feature expectation
+        matching and max-margin IRL, as well as maximum entropy IRL with its
+        log-linear trajectory distribution and gradient structure. We also
+        sketched IRL implementations in Python, C++, Java, MATLAB/Simulink, and
+        Mathematica, emphasizing how these integrate with standard robotics
+        libraries and planners. In subsequent lessons and chapters we will build
+        on these ideas to construct full imitation and reinforcement learning
+        pipelines for advanced robotic manipulation and motion planning.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Ng, A.Y., &amp; Russell, S. (2000). Algorithms for inverse reinforcement
+        learning.
+        <em
+          >Proceedings of the 17th International Conference on Machine Learning
+          (ICML)</em
+        >, 663–670.
+      </li>
+      <li>
+        Abbeel, P., &amp; Ng, A.Y. (2004). Apprenticeship learning via inverse
+        reinforcement learning.
+        <em
+          >Proceedings of the 21st International Conference on Machine Learning
+          (ICML)</em
+        >, 1–8.
+      </li>
+      <li>
+        Ratliff, N., Bagnell, J.A., &amp; Zinkevich, M. (2006). Maximum margin
+        planning.
+        <em
+          >Proceedings of the 23rd International Conference on Machine Learning
+          (ICML)</em
+        >, 729–736.
+      </li>
+      <li>
+        Ziebart, B.D., Maas, A., Bagnell, J.A., &amp; Dey, A.K. (2008). Maximum
+        entropy inverse reinforcement learning.
+        <em
+          >Proceedings of the 23rd AAAI Conference on Artificial
+          Intelligence</em
+        >, 1433–1438.
+      </li>
+      <li>
+        Ramachandran, D., &amp; Amir, E. (2007). Bayesian inverse reinforcement
+        learning.
+        <em
+          >Proceedings of the 20th International Joint Conference on Artificial
+          Intelligence (IJCAI)</em
+        >, 2586–2591.
+      </li>
+      <li>
+        Neu, G., &amp; Szepesvári, C. (2007). Apprenticeship learning using
+        inverse reinforcement learning and gradient methods.
+        <em
+          >Proceedings of the 23rd Conference on Uncertainty in Artificial
+          Intelligence (UAI)</em
+        >, 295–302.
+      </li>
+      <li>
+        Syed, U., &amp; Schapire, R.E. (2008). A game-theoretic approach to
+        apprenticeship learning.
+        <em>Advances in Neural Information Processing Systems (NeurIPS)</em>,
+        1449–1456.
+      </li>
+      <li>
+        Levine, S., &amp; Koltun, V. (2012). Continuous inverse optimal control
+        with locally optimal examples.
+        <em
+          >Proceedings of the 29th International Conference on Machine Learning
+          (ICML)</em
+        >, 475–482.
+      </li>
+    </ol>
+  </div>
+</section>
+
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter11/Lesson2.html">
+          Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter11/Lesson4.html">
+          Lesson 4: Skill Segmentation and Library Building
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="active-lesson" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

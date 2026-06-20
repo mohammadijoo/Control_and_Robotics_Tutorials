@@ -1,0 +1,1926 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Navigation Architecture for AMR - Lesson 5: Lab: Assemble a Full Navigation Stack | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 14: Navigation Architecture for AMR</h1>
+    <h3><strong>Lesson 5: Lab: Assemble a Full Navigation Stack</strong></h3>
+    <p>
+      This lab integrates the full AMR navigation pipeline end-to-end: frames
+      and transforms, localization, layered costmaps, global planning
+      interfaces, local control interfaces, behavior-tree orchestration, and
+      recovery handling. We treat global planners as black-box plugins (no
+      re-teaching A*, RRT, or trajopt); the emphasis is on architectural
+      contracts, timing/safety constraints, and verification that the complete
+      stack is correct, observable, and robust under realistic sensor/latency
+      conditions.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Stack Contract -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Stack Contract</h2>
+    <div class="down-content">
+      <p>
+        A “full navigation stack” is not a single algorithm; it is a set of
+        <em>contracts</em>
+        between modules that operate at different rates and levels of
+        abstraction. In this lab we assemble and validate the following
+        contracts:
+      </p>
+      <ul>
+        <li>
+          <strong>Frame contract:</strong> a consistent transform chain among
+          <strong>
+            \( \{\text{map}, \text{odom}, \text{base\_link}, \text{sensors}\}
+            \)</strong
+          >
+          such that commands and observations refer to the same geometry.
+        </li>
+        <li>
+          <strong>Belief contract:</strong> localization produces a pose
+          estimate and covariance consistent with motion and sensor updates
+          (students implemented Bayes filters earlier).
+        </li>
+        <li>
+          <strong>Geometry contract:</strong> layered costmaps provide inflated
+          obstacle costs for safe motion with a tunable safety margin.
+        </li>
+        <li>
+          <strong>Planning/control contract:</strong> the global plan is a
+          geometric reference, the local controller is a tracking/avoidance
+          policy with bounded latency and bounded command outputs.
+        </li>
+        <li>
+          <strong>Orchestration contract:</strong> the behavior tree / state
+          machine selects tasks and recovery modes to preserve liveness (the
+          robot “keeps making progress”).
+        </li>
+      </ul>
+
+      <p>
+        Formally, we model the closed-loop system as a hybrid dynamical system
+        with discrete mode
+        <strong> \( q(t) \in \mathcal{Q} \)</strong> (behavior tree node state /
+        recovery mode) and continuous state
+        <strong>
+          \( \mathbf{x}(t) = [x(t), y(t), \theta(t), \mathbf{v}(t)]^\top
+          \)</strong
+        >. The module interfaces constrain how information flows:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \underbrace{\dot{\mathbf{x}}(t) = f_{q(t)}\!\left(\mathbf{x}(t),
+        \mathbf{u}(t)\right)}_{\text{robot dynamics}} \quad,\quad
+        \underbrace{\mathbf{u}(t) = \pi_{q(t)}\!\left(\hat{\mathbf{x}}(t),
+        \mathcal{C}(t), \mathcal{P}(t)\right)}_{\text{local control}} \]
+      </h4>
+
+      <p>
+        Here <strong> \( \hat{\mathbf{x}}(t) \)</strong> is the estimated
+        pose/belief, <strong> \( \mathcal{C}(t) \)</strong> is the (local)
+        costmap, and <strong> \( \mathcal{P}(t) \)</strong> is the global plan
+        (path). This lab’s success criteria are:
+      </p>
+      <ul>
+        <li>
+          <strong>Correctness:</strong> transforms are consistent, localization
+          is stable, plans are in the correct frame.
+        </li>
+        <li>
+          <strong>Safety:</strong> command outputs respect speed/acceleration
+          limits given latency and braking.
+        </li>
+        <li>
+          <strong>Liveness:</strong> recovery transitions do not deadlock; goals
+          either succeed or fail with diagnosable reasons.
+        </li>
+        <li>
+          <strong>Observability:</strong> every failure mode produces measurable
+          symptoms on topics/TF/state.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sensors (scan, imu, wheel)"] --> E["Estimator (localization)"]
+  E --> TF["TF tree: map-odom-base"]
+  TF --> CM["Costmaps (global/local)"]
+  CM --> GP["Global planner plugin (black-box)"]
+  GP --> P["Global plan (Path)"]
+  P --> LC["Local controller plugin"]
+  LC --> U["cmd_vel"]
+  U --> R["Robot base"]
+  R --> S
+  BT["Task logic (behavior tree)"] --> GP
+  BT --> LC
+  BT --> RC["Recovery modes"]
+  RC --> BT
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Frames, Transforms, and Consistency Checks -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Frames, Transforms, and Consistency Checks</h2>
+    <div class="down-content">
+      <p>
+        The navigation stack becomes ill-posed if frames are inconsistent. Let
+        <strong> \( {}^{a}\mathbf{T}_{b} \in SE(2) \)</strong> be the planar
+        transform mapping coordinates from frame <strong> \( b \)</strong> to
+        frame <strong> \( a \)</strong>. The core chain is:
+        <strong>
+          \( \text{map} \leftarrow \text{odom} \leftarrow \text{base\_link}
+          \)</strong
+        >. Any point
+        <strong> \( {}^{\text{base}}\mathbf{p} \)</strong> transforms to the map
+        frame by:
+      </p>
+
+      <h4 class="mathJax">
+        \[ {}^{\text{map}}\mathbf{p} = {}^{\text{map}}\mathbf{T}_{\text{odom}}\;
+        {}^{\text{odom}}\mathbf{T}_{\text{base}}\; {}^{\text{base}}\mathbf{p}.
+        \]
+      </h4>
+
+      <p>
+        Localization typically updates
+        <strong> \( {}^{\text{map}}\mathbf{T}_{\text{odom}} \)</strong> (global
+        drift correction), while wheel odometry integrates
+        <strong> \( {}^{\text{odom}}\mathbf{T}_{\text{base}} \)</strong> (local
+        smooth motion). A minimal consistency invariant is:
+        <strong>
+          \( {}^{\text{map}}\mathbf{T}_{\text{base}} =
+          {}^{\text{map}}\mathbf{T}_{\text{odom}}\;{}^{\text{odom}}\mathbf{T}_{\text{base}}
+          \)</strong
+        >
+        must be continuous (no implausible jumps) except when re-localization
+        explicitly resets belief.
+      </p>
+
+      <p>
+        If pose covariance is available (e.g., AMCL / EKF localization), the
+        transform uncertainty impacts safe margins. For planar pose
+        <strong>
+          \( \hat{\boldsymbol{\xi}} = [\hat{x}, \hat{y}, \hat{\theta}]^\top
+          \)</strong
+        >
+        and covariance
+        <strong> \( \mathbf{\Sigma}_{\xi} \in \mathbb{R}^{3\times 3} \)</strong
+        >, a conservative position uncertainty radius is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ r_{\text{unc}}(\alpha) =
+        \sqrt{\lambda_{\max}\!\left(\mathbf{\Sigma}_{xy}\right)}\;
+        \sqrt{\chi^2_{2,\,\alpha}}, \quad \mathbf{\Sigma}_{xy} =
+        \mathbf{\Sigma}_{\xi}[1\!:\!2,\,1\!:\!2]. \]
+      </h4>
+
+      <p>
+        This suggests a principled inflation adjustment:
+        <strong>
+          \( r_{\text{infl,eff}} = r_{\text{infl}} + r_{\text{unc}}(\alpha)
+          \)</strong
+        >
+        when localization is uncertain (e.g., kidnapped robot, sparse features,
+        glass walls).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Timing, Latency, and a Safety Inequality -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Timing, Latency, and a Safety Inequality</h2>
+    <div class="down-content">
+      <p>
+        Navigation safety is limited by how fast the stack can sense, update
+        costs, decide, and command. Let <strong> \( L \)</strong> be the
+        end-to-end latency from sensing to applied command (including
+        scheduling), and let <strong> \( a_{\text{brake}} &gt; 0 \)</strong> be
+        achievable deceleration magnitude. A conservative 1D stopping-distance
+        model is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ d_{\text{stop}}(v) = v\,L + \frac{v^2}{2a_{\text{brake}}}. \]
+      </h4>
+
+      <p>
+        If the nearest obstacle free distance along the commanded direction is
+        <strong> \( d_{\text{free}} \)</strong>, a sufficient condition for
+        collision avoidance under worst-case delay is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ d_{\text{stop}}(v) \le d_{\text{free}} \quad \Longrightarrow \quad v
+        \le v_{\max} = -a_{\text{brake}}L + \sqrt{a_{\text{brake}}^2 L^2 +
+        2a_{\text{brake}} d_{\text{free}} }. \]
+      </h4>
+
+      <p>
+        <strong>Proof sketch:</strong> During latency <strong> \( L \)</strong>,
+        the robot continues approximately at speed <strong> \( v \)</strong>,
+        covering distance <strong> \( vL \)</strong>. After a braking command is
+        applied, constant deceleration
+        <strong> \( -a_{\text{brake}} \)</strong> yields braking distance
+        <strong> \( v^2/(2a_{\text{brake}}) \)</strong>. Summing yields
+        <strong> \( d_{\text{stop}}(v) \)</strong>. Enforcing
+        <strong> \( d_{\text{stop}}(v) \le d_{\text{free}} \)</strong> and
+        solving the quadratic inequality in <strong> \( v \)</strong> gives the
+        bound.
+      </p>
+
+      <p>
+        In practice, <strong> \( L \)</strong> depends on: sensor rate, costmap
+        update rate, global replanning rate, controller frequency, and executor
+        scheduling. Your lab report should state measured rates and the
+        resulting conservative <strong> \( v_{\max} \)</strong> for your
+        platform.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Costmap Layering and Inflation Calibration -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Costmap Layering and Inflation Calibration</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 14 Lesson 2 you introduced costmaps conceptually; here we
+        calibrate them for an integrated stack. Let the obstacle distance field
+        be <strong> \( d(\mathbf{s}) \)</strong> for grid cell center
+        <strong> \( \mathbf{s} \)</strong>, and let
+        <strong> \( r_{\text{ins}} \)</strong> be the inscribed radius (robot
+        footprint) and <strong> \( r_{\text{infl}} \)</strong> the inflation
+        radius. A standard continuous inflation model is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ c(\mathbf{s}) = \begin{cases} c_{\text{lethal}} & d(\mathbf{s}) = 0
+        \\ c_{\text{inscribed}} & 0 &lt; d(\mathbf{s}) \le r_{\text{ins}} \\
+        (c_{\text{inscribed}}-1)\exp\!\big(-k(d(\mathbf{s})-r_{\text{ins}})\big)
+        + 1 & r_{\text{ins}} &lt; d(\mathbf{s}) \le r_{\text{infl}} \\ 0 &
+        d(\mathbf{s}) &gt; r_{\text{infl}} \end{cases} \]
+      </h4>
+
+      <p>
+        A practical calibration uses corridor clearance. If the minimum corridor
+        half-width is
+        <strong> \( w_{\min} \)</strong>, a conservative geometric constraint
+        is:
+        <strong>
+          \( r_{\text{ins}} + r_{\text{unc}}(\alpha) \le w_{\min} \)</strong
+        >
+        and choose <strong> \( r_{\text{infl}} \approx w_{\min} \)</strong> so
+        that the controller sees meaningful gradients without blocking feasible
+        corridors.
+      </p>
+
+      <p>
+        <strong>Lab check:</strong> if your robot refuses to pass through a
+        corridor that is physically traversable, your effective margin is too
+        large (inflate too much, uncertainty too large, footprint too big, or
+        map too conservative). If it scrapes walls, margin is too small or
+        latency bound is violated (Section 3).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Integration Procedure (ROS 2-style) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Integration Procedure (ROS 2-style Bringup)</h2>
+    <div class="down-content">
+      <p>
+        The exact commands differ by your course setup (simulation vs real
+        robot), but the integration logic is invariant:
+      </p>
+      <ol>
+        <li>
+          <strong>TF + robot description:</strong> publish robot footprint
+          frames and sensor frames (static or via robot_state_publisher).
+          Validate that <strong> \( \text{base\_link} \)</strong> to sensors is
+          correct.
+        </li>
+        <li>
+          <strong>Odometry:</strong> publish <code>/odom</code> and
+          <code>odom &larr; base_link</code> TF at high rate.
+        </li>
+        <li>
+          <strong>Localization:</strong> provide <code>/amcl_pose</code> (or EKF
+          output) and <code>map &larr; odom</code> TF.
+        </li>
+        <li>
+          <strong>Costmaps:</strong> configure global and local costmaps
+          (obstacle + inflation + optional voxel layers).
+        </li>
+        <li>
+          <strong>Planner interface:</strong> ensure global planner publishes a
+          plan in the correct global frame (<code>map</code>).
+        </li>
+        <li>
+          <strong>Controller interface:</strong> ensure controller consumes plan
+          + costmap and outputs bounded <code>/cmd_vel</code>.
+        </li>
+        <li>
+          <strong>Task logic:</strong> behavior tree activates planning,
+          following, and recovery nodes; confirm lifecycle states are ACTIVE.
+        </li>
+      </ol>
+
+      <p>
+        <strong>Minimal acceptance tests:</strong>
+      </p>
+      <ul>
+        <li>
+          <strong>TF acceptance:</strong> lookup transforms among
+          <strong> \( \{\text{map},\text{odom},\text{base\_link}\} \)</strong>
+          at runtime with no extrapolation errors.
+        </li>
+        <li>
+          <strong>Frame acceptance:</strong> a commanded goal in
+          <code>map</code> leads to motion in the correct direction in the real
+          world.
+        </li>
+        <li>
+          <strong>Costmap acceptance:</strong> a nearby obstacle increases local
+          cost and triggers avoidance or stop.
+        </li>
+        <li>
+          <strong>Recovery acceptance:</strong> forced failure (block path)
+          triggers recovery, then resumes navigation or fails cleanly.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Debugging as an Observability Problem -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Debugging as an Observability Problem</h2>
+    <div class="down-content">
+      <p>
+        Treat debugging as identifying which contract is violated, using
+        measurable signals. Common symptom-to-cause patterns:
+      </p>
+      <ul>
+        <li>
+          <strong>Robot does not move, no errors:</strong> lifecycle node not
+          ACTIVE; behavior tree stuck waiting for transform; action server
+          unreachable.
+        </li>
+        <li>
+          <strong>Robot moves in wrong direction:</strong> frame mismatch (goal
+          in <code>map</code> but controller interprets in another frame), or
+          <code>base_link</code> orientation is inconsistent.
+        </li>
+        <li>
+          <strong>Robot oscillates near obstacles:</strong> inflation too sharp
+          (large <strong> \( k \)</strong>), controller rate too low, or latency
+          too high.
+        </li>
+        <li>
+          <strong>Robot “teleports” on map:</strong> localization resets;
+          map-odom jump; inconsistent timestamps.
+        </li>
+      </ul>
+
+      <p>
+        A useful quantitative check is to compare commanded speed with the
+        conservative safe bound
+        <strong> \( v \le v_{\max} \)</strong> from Section 3 for your measured
+        latency <strong> \( L \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Lab Client + Metrics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab: Send Goals and Log Metrics</h2>
+    <div class="down-content">
+      <p>
+        This client sends a navigation goal and logs time-to-goal and odometry
+        path length. It is deliberately “architecture-first”: we test the stack
+        boundary (action goal + feedback), not planner internals.
+      </p>
+
+      <p><strong>File: Chapter14_Lesson5.py</strong></p>
+      <pre><code class="language-python">
+#!/usr/bin/env python3
+"""
+Chapter 14 - Lesson 5: Lab: Assemble a Full Navigation Stack (ROS 2 Nav2)
+
+This script demonstrates end-to-end integration testing of a navigation stack:
+- Wait for Nav2 lifecycle bringup
+- Set an initial pose (AMCL)
+- Send a NavigateToPose goal (action)
+- Log simple metrics (time-to-goal, path length from odom)
+- Optionally subscribe to a global plan topic (nav_msgs/Path) if available
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import rclpy
+from rclpy.node import Node
+
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry, Path
+
+try:
+    from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+except Exception:
+    BasicNavigator = None
+    TaskResult = None
+
+
+@dataclass
+class Metrics:
+    start_time: float = 0.0
+    end_time: float = 0.0
+    odom_path_length_m: float = 0.0
+    min_goal_dist_m: float = float("inf")
+    goal_reached: bool = False
+
+
+class NavMetricsNode(Node):
+    def __init__(self):
+        super().__init__("chapter14_lesson5_nav_metrics")
+
+        self.metrics = Metrics()
+        self._last_odom_xy: Optional[Tuple[float, float]] = None
+        self._goal_xy: Optional[Tuple[float, float]] = None
+        self._latest_plan: Optional[Path] = None
+
+        self.create_subscription(Odometry, "/odom", self._on_odom, 50)
+        self.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self._on_amcl, 20)
+        self.create_subscription(Path, "/plan", self._on_plan, 10)
+        self.create_subscription(Path, "/global_plan", self._on_plan, 10)
+
+    def set_goal_xy(self, x: float, y: float) -&gt; None:
+        self._goal_xy = (x, y)
+
+    def _on_odom(self, msg: Odometry) -&gt; None:
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        if self._last_odom_xy is not None:
+            dx = x - self._last_odom_xy[0]
+            dy = y - self._last_odom_xy[1]
+            self.metrics.odom_path_length_m += math.hypot(dx, dy)
+        self._last_odom_xy = (x, y)
+
+        if self._goal_xy is not None:
+            d = math.hypot(x - self._goal_xy[0], y - self._goal_xy[1])
+            self.metrics.min_goal_dist_m = min(self.metrics.min_goal_dist_m, d)
+
+    def _on_amcl(self, msg: PoseWithCovarianceStamped) -&gt; None:
+        pass
+
+    def _on_plan(self, msg: Path) -&gt; None:
+        self._latest_plan = msg
+
+    def report(self) -&gt; str:
+        dt = max(0.0, self.metrics.end_time - self.metrics.start_time)
+        return (
+            f"Goal reached: {self.metrics.goal_reached}\n"
+            f"Time-to-goal (s): {dt:.3f}\n"
+            f"Odom path length (m): {self.metrics.odom_path_length_m:.3f}\n"
+            f"Closest distance to goal (m): {self.metrics.min_goal_dist_m:.3f}\n"
+            f"Plan received: {self._latest_plan is not None}\n"
+        )
+
+
+def make_pose_stamped(node: Node, x: float, y: float, yaw_rad: float, frame_id: str = "map") -&gt; PoseStamped:
+    pose = PoseStamped()
+    pose.header.frame_id = frame_id
+    pose.header.stamp = node.get_clock().now().to_msg()
+    pose.pose.position.x = float(x)
+    pose.pose.position.y = float(y)
+    pose.pose.position.z = 0.0
+    pose.pose.orientation.x = 0.0
+    pose.pose.orientation.y = 0.0
+    pose.pose.orientation.z = math.sin(yaw_rad / 2.0)
+    pose.pose.orientation.w = math.cos(yaw_rad / 2.0)
+    return pose
+
+
+def main():
+    if BasicNavigator is None:
+        raise RuntimeError("nav2_simple_commander not available. Install Nav2, then source ROS 2.")
+
+    rclpy.init()
+    metrics_node = NavMetricsNode()
+    navigator = BasicNavigator()
+
+    navigator.waitUntilNav2Active(localizer="amcl")
+
+    init_pose = make_pose_stamped(metrics_node, x=0.0, y=0.0, yaw_rad=0.0, frame_id="map")
+    navigator.setInitialPose(init_pose)
+
+    goal_x, goal_y, goal_yaw = 2.0, 0.5, 0.0
+    goal_pose = make_pose_stamped(metrics_node, goal_x, goal_y, goal_yaw, frame_id="map")
+    metrics_node.set_goal_xy(goal_x, goal_y)
+
+    metrics_node.metrics.start_time = time.time()
+    navigator.goToPose(goal_pose)
+
+    while not navigator.isTaskComplete():
+        rclpy.spin_once(metrics_node, timeout_sec=0.1)
+        fb = navigator.getFeedback()
+        if fb is not None and getattr(fb, "distance_remaining", None) is not None:
+            metrics_node.get_logger().info(f"Distance remaining: {fb.distance_remaining:.3f} m")
+        time.sleep(0.05)
+
+    metrics_node.metrics.end_time = time.time()
+    result = navigator.getResult()
+    metrics_node.metrics.goal_reached = (result == TaskResult.SUCCEEDED)
+
+    for _ in range(10):
+        rclpy.spin_once(metrics_node, timeout_sec=0.1)
+
+    print("\n=== Chapter14 Lesson5 Metrics Report ===")
+    print(metrics_node.report())
+
+    metrics_node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <p>
+        <strong>Exercise file:</strong> a TF/topic health-check helps localize
+        failures to the correct contract.
+      </p>
+      <p><strong>File: Chapter14_Lesson5_Ex1.py</strong></p>
+      <pre><code class="language-python">
+#!/usr/bin/env python3
+"""
+Chapter 14 - Lesson 5 (Exercise 1): Health-check checklist for a Nav stack
+"""
+
+from __future__ import annotations
+import time
+import rclpy
+from rclpy.node import Node
+
+try:
+    from tf2_ros import Buffer, TransformListener
+except Exception:
+    Buffer = None
+    TransformListener = None
+
+REQUIRED_TOPICS = ["/tf", "/tf_static", "/odom", "/scan", "/amcl_pose", "/cmd_vel"]
+REQUIRED_FRAMES = [("map", "odom"), ("odom", "base_link"), ("base_link", "laser")]
+
+class HealthCheck(Node):
+    def __init__(self):
+        super().__init__("chapter14_lesson5_healthcheck")
+        self.buffer = Buffer() if Buffer is not None else None
+        self.listener = TransformListener(self.buffer, self) if self.buffer is not None else None
+
+    def topic_ok(self, name: str) -&gt; bool:
+        topics = [t[0] for t in self.get_topic_names_and_types()]
+        return name in topics
+
+    def tf_ok(self, parent: str, child: str, timeout_s: float = 1.0) -&gt; bool:
+        if self.buffer is None:
+            return False
+        t0 = time.time()
+        while time.time() - t0 &lt; timeout_s:
+            try:
+                self.buffer.lookup_transform(parent, child, rclpy.time.Time())
+                return True
+            except Exception:
+                rclpy.spin_once(self, timeout_sec=0.05)
+        return False
+
+def main():
+    rclpy.init()
+    node = HealthCheck()
+
+    print("\n=== Topic checks ===")
+    for t in REQUIRED_TOPICS:
+        print(f"{t:20s}: {'OK' if node.topic_ok(t) else 'MISSING'}")
+
+    print("\n=== TF checks ===")
+    for parent, child in REQUIRED_FRAMES:
+        print(f"{parent:10s} -&gt; {child:10s}: {'OK' if node.tf_ok(parent, child, 1.5) else 'FAIL'}")
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Action Client -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      8. C++ Lab: NavigateToPose Action Client (Integration Boundary Test)
+    </h2>
+    <div class="down-content">
+      <p>
+        The C++ client is the same architectural test: it validates that the
+        action server is reachable, feedback arrives, and the stack can execute
+        a goal. This is a high-signal diagnostic tool when Python tooling is not
+        available.
+      </p>
+
+      <p><strong>File: Chapter14_Lesson5.cpp</strong></p>
+      <pre><code class="language-cpp">
+/*
+Chapter 14 - Lesson 5: Lab: Assemble a Full Navigation Stack
+*/
+
+#include &lt;chrono&gt;
+#include &lt;cmath&gt;
+#include &lt;memory&gt;
+#include &lt;string&gt;
+
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
+
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav2_msgs/action/navigate_to_pose.hpp"
+
+using NavigateToPose = nav2_msgs::action::NavigateToPose;
+using GoalHandleNavigateToPose = rclcpp_action::ClientGoalHandle&lt;NavigateToPose&gt;;
+
+static geometry_msgs::msg::PoseStamped make_goal_pose(
+    rclcpp::Node* node, double x, double y, double yaw_rad, const std::string&amp; frame_id = "map")
+{
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.frame_id = frame_id;
+  pose.header.stamp = node-&gt;get_clock()-&gt;now();
+
+  pose.pose.position.x = x;
+  pose.pose.position.y = y;
+  pose.pose.position.z = 0.0;
+
+  pose.pose.orientation.z = std::sin(yaw_rad / 2.0);
+  pose.pose.orientation.w = std::cos(yaw_rad / 2.0);
+  return pose;
+}
+
+class Chapter14Lesson5NavClient : public rclcpp::Node
+{
+public:
+  Chapter14Lesson5NavClient() : Node("chapter14_lesson5_nav_client")
+  {
+    client_ = rclcpp_action::create_client&lt;NavigateToPose&gt;(this, "navigate_to_pose");
+    timer_ = this-&gt;create_wall_timer(std::chrono::milliseconds(200),
+      std::bind(&amp;Chapter14Lesson5NavClient::tick, this));
+  }
+
+private:
+  void tick()
+  {
+    if (sent_) return;
+
+    if (!client_-&gt;wait_for_action_server(std::chrono::seconds(1))) {
+      RCLCPP_INFO(this-&gt;get_logger(), "Waiting for /navigate_to_pose action server...");
+      return;
+    }
+
+    NavigateToPose::Goal goal;
+    goal.pose = make_goal_pose(this, 2.0, 0.5, 0.0, "map");
+
+    auto opts = rclcpp_action::Client&lt;NavigateToPose&gt;::SendGoalOptions();
+    opts.feedback_callback =
+      [this](GoalHandleNavigateToPose::SharedPtr,
+             const std::shared_ptr&lt;const NavigateToPose::Feedback&gt; feedback) {
+        if (feedback &amp;&amp; std::isfinite(feedback-&gt;distance_remaining)) {
+          RCLCPP_INFO(this-&gt;get_logger(), "Distance remaining: %.3f m", feedback-&gt;distance_remaining);
+        }
+      };
+    opts.result_callback =
+      [this](const GoalHandleNavigateToPose::WrappedResult &amp; result) {
+        if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+          RCLCPP_INFO(this-&gt;get_logger(), "Goal reached (SUCCEEDED).");
+        } else {
+          RCLCPP_WARN(this-&gt;get_logger(), "Navigation finished with code: %d", (int)result.code);
+        }
+        rclcpp::shutdown();
+      };
+
+    RCLCPP_INFO(this-&gt;get_logger(), "Sending NavigateToPose goal...");
+    client_-&gt;async_send_goal(goal, opts);
+    sent_ = true;
+  }
+
+  rclcpp_action::Client&lt;NavigateToPose&gt;::SharedPtr client_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  bool sent_{false};
+};
+
+int main(int argc, char** argv)
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared&lt;Chapter14Lesson5NavClient&gt;();
+  rclcpp::spin(node);
+  rclcpp::shutdown();
+  return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java (rcljava) Template -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Lab: ROS 2 Client Template (rcljava)</h2>
+    <div class="down-content">
+      <p>
+        Java integration is useful in enterprise stacks (fleet management, task
+        services). The file below is a template: students adapt it to their
+        installed ROS 2 Java toolchain. The architectural point is that the
+        boundary is still an action goal + feedback + result, independent of
+        language.
+      </p>
+
+      <p><strong>File: Chapter14_Lesson5.java</strong></p>
+      <pre><code class="language-java">
+/*
+Chapter 14 - Lesson 5: Lab: Assemble a Full Navigation Stack
+*/
+
+package amr.chapter14.lesson5;
+
+import org.ros2.rcljava.RCLJava;
+import org.ros2.rcljava.node.Node;
+
+import geometry_msgs.msg.PoseStamped;
+import nav2_msgs.action.NavigateToPose;
+
+public class Chapter14Lesson5 {
+  private static PoseStamped makeGoalPose(Node node, double x, double y, double yawRad, String frameId) {
+    PoseStamped pose = new PoseStamped();
+    pose.getHeader().setFrameId(frameId);
+    pose.getHeader().setStamp(node.getClock().now().toMsg());
+
+    pose.getPose().getPosition().setX(x);
+    pose.getPose().getPosition().setY(y);
+    pose.getPose().getPosition().setZ(0.0);
+
+    pose.getPose().getOrientation().setZ(Math.sin(yawRad / 2.0));
+    pose.getPose().getOrientation().setW(Math.cos(yawRad / 2.0));
+    return pose;
+  }
+
+  public static void main(String[] args) throws Exception {
+    RCLJava.rclJavaInit();
+    Node node = RCLJava.createNode("chapter14_lesson5_nav_client_java");
+
+    // PSEUDOCODE:
+    //   ActionClient&lt;NavigateToPose.Goal, NavigateToPose.Result, NavigateToPose.Feedback&gt; client =
+    //     new ActionClient&lt;&gt;(node, NavigateToPose.class, "navigate_to_pose");
+    //   client.waitForServer(...);
+    //   NavigateToPose.Goal goal = new NavigateToPose.Goal();
+    //   goal.setPose(makeGoalPose(node, 2.0, 0.5, 0.0, "map"));
+    //   client.sendGoal(goal, feedbackCb, resultCb);
+
+    NavigateToPose.Goal goal = new NavigateToPose.Goal();
+    goal.setPose(makeGoalPose(node, 2.0, 0.5, 0.0, "map"));
+
+    node.getLogger().info("Template prepared. Implement ActionClient calls for your rcljava version.");
+
+    for (int i = 0; i &lt; 20; i++) {
+      RCLJava.spinOnce(node, 100);
+      Thread.sleep(100);
+    }
+
+    node.dispose();
+    RCLJava.shutdown();
+  }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Integration -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Lab: Action Client + Monitoring</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is useful for rapid experiment design, plotting, and parameter
+        sweeps. This script sends a navigation goal and monitors localization.
+        In Simulink, you can replace the monitoring loop with ROS 2 subscriber
+        blocks and log signals.
+      </p>
+
+      <p><strong>File: Chapter14_Lesson5.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter 14 - Lesson 5: Lab: Assemble a Full Navigation Stack
+
+clear; clc;
+
+node = ros2node("/chapter14_lesson5_matlab_client");
+amclSub = ros2subscriber(node, "/amcl_pose", "geometry_msgs/PoseWithCovarianceStamped");
+
+ac = ros2actionclient(node, "/navigate_to_pose", "nav2_msgs/NavigateToPose");
+fprintf("Waiting for action server...\n");
+waitForServer(ac);
+
+goalMsg = ros2message(ac);
+goalMsg.pose.header.frame_id = "map";
+goalMsg.pose.header.stamp = ros2time(node);
+
+goalMsg.pose.pose.position.x = 2.0;
+goalMsg.pose.pose.position.y = 0.5;
+
+yaw = 0.0;
+goalMsg.pose.pose.orientation.z = sin(yaw/2.0);
+goalMsg.pose.pose.orientation.w = cos(yaw/2.0);
+
+fprintf("Sending goal...\n");
+gh = sendGoal(ac, goalMsg);
+
+tStart = tic;
+while ~isDone(gh)
+    fb = getFeedback(gh);
+    if ~isempty(fb)
+        fprintf("Distance remaining: %.3f m\n", fb.distance_remaining);
+    end
+
+    if amclSub.NewMessageAvailable
+        amcl = receive(amclSub, 0.01);
+        x = amcl.pose.pose.position.x;
+        y = amcl.pose.pose.position.y;
+        fprintf("AMCL pose: (%.3f, %.3f)\n", x, y);
+    end
+    pause(0.1);
+end
+
+res = getResult(gh);
+tGoal = toc(tStart);
+
+fprintf("\n=== Chapter14 Lesson5 Report ===\n");
+fprintf("Time-to-goal (s): %.3f\n", tGoal);
+disp(res);
+
+clear node;
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica (Offline Analysis) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      11. Wolfram Mathematica Lab: Offline Safety and Performance Analysis
+    </h2>
+    <div class="down-content">
+      <p>
+        A full navigation stack should be evaluated quantitatively. The notebook
+        below analyzes a CSV log (exported from your run) and computes path
+        length, speed statistics, curvature, and a conservative safe-speed bound
+        based on measured latency and braking.
+      </p>
+
+      <p><strong>File: Chapter14_Lesson5.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter 14 - Lesson 5: Offline analysis of navigation logs *)
+
+ClearAll["Global`*"];
+
+csvPath = "nav_run_log.csv";  (* edit to your exported log file *)
+If[!FileExistsQ[csvPath],
+  Print["CSV file not found. Export a CSV named nav_run_log.csv in the working directory."];
+];
+
+data = Import[csvPath, "CSV"];
+data2 = If[VectorQ[data[[1]], StringQ], Rest[data], data] // N;
+
+{t, x, y, yaw, v, w} = Transpose[data2];
+
+xy = Transpose[{x, y}];
+seg = Differences[xy];
+segLen = Norm /@ seg;
+pathLen = Total[segLen];
+
+vStats = {Mean[v], Max[v]};
+wStats = {Mean[Abs[w]], Max[Abs[w]]};
+
+eps = 1.*^-3;
+kappa = w / Map[If[Abs[#] &lt; eps, Sign[#]*eps + eps, #] &, v];
+kStats = {Mean[Abs[kappa]], Max[Abs[kappa]]};
+
+Print["Path length (m): ", pathLen];
+Print["Mean v (m/s), Max v (m/s): ", vStats];
+Print["Mean |w| (rad/s), Max |w| (rad/s): ", wStats];
+Print["Mean |kappa| (1/m), Max |kappa| (1/m): ", kStats];
+
+(* Safety bound: d_stop = v*L + v^2/(2 a_brake) &lt;= d_free *)
+L = 0.25;     (* seconds *)
+aBrake = 1.5; (* m/s^2 *)
+dFree = 0.8;  (* m *)
+sol = Solve[vVar*L + vVar^2/(2 aBrake) &lt;= dFree &amp;&amp; vVar &gt;= 0, vVar, Reals];
+vMax = Max[0, vVar /. sol[[1]]];
+Print["Conservative v_max (m/s): ", N[vMax]];
+
+ListLinePlot[Transpose[{t, v}], Frame -&gt; True, FrameLabel -&gt; {"t (s)", "v (m/s)"}, PlotLabel -&gt; "Linear speed"]
+ListLinePlot[Transpose[{t, Abs[w]}], Frame -&gt; True, FrameLabel -&gt; {"t (s)", "|w| (rad/s)"}, PlotLabel -&gt; "Angular rate"]
+ListLinePlot[Transpose[{x, y}], Frame -&gt; True, FrameLabel -&gt; {"x (m)", "y (m)"}, PlotLabel -&gt; "Trajectory (x,y)"]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Transform Chain Validation):</strong>
+        Suppose at time <strong> \( t \)</strong> you have transforms
+        <strong> \( {}^{\text{map}}\mathbf{T}_{\text{odom}} \)</strong> and
+        <strong> \( {}^{\text{odom}}\mathbf{T}_{\text{base}} \)</strong>. Derive
+        the expression for
+        <strong> \( {}^{\text{map}}\mathbf{T}_{\text{base}} \)</strong> and
+        state one measurable symptom if the chain is inconsistent.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The composition is:
+      </p>
+      <h4 class="mathJax">
+        \[ {}^{\text{map}}\mathbf{T}_{\text{base}} =
+        {}^{\text{map}}\mathbf{T}_{\text{odom}}\;{}^{\text{odom}}\mathbf{T}_{\text{base}}.
+        \]
+      </h4>
+      <p>
+        If inconsistent, you commonly observe TF extrapolation errors or “goal
+        moves backward” effects: a goal in <code>map</code> produces commands in
+        a rotated/transposed base frame, visible as motion in the wrong
+        direction relative to the map visualization.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Latency-Limited Speed Bound):</strong>
+        Given latency <strong> \( L \)</strong>, braking capability
+        <strong> \( a_{\text{brake}} \)</strong>, and free distance
+        <strong> \( d_{\text{free}} \)</strong>, derive a bound on speed to
+        satisfy <strong> \( d_{\text{stop}}(v) \le d_{\text{free}} \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Use
+        <strong>
+          \( d_{\text{stop}}(v)=vL + \frac{v^2}{2a_{\text{brake}}} \)</strong
+        >. Solve the quadratic inequality:
+      </p>
+      <h4 class="mathJax">
+        \[ vL + \frac{v^2}{2a_{\text{brake}}} \le d_{\text{free}}
+        \;\Longleftrightarrow\; v^2 + 2a_{\text{brake}}Lv -
+        2a_{\text{brake}}d_{\text{free}} \le 0. \]
+      </h4>
+      <p>The admissible nonnegative solution is:</p>
+      <h4 class="mathJax">
+        \[ v \le -a_{\text{brake}}L + \sqrt{a_{\text{brake}}^2 L^2 +
+        2a_{\text{brake}} d_{\text{free}} }. \]
+      </h4>
+
+      <p>
+        <strong>Problem 3 (Inflation Feasibility):</strong>
+        A corridor has half-width <strong> \( w_{\min} \)</strong>. The robot
+        inscribed radius is <strong> \( r_{\text{ins}} \)</strong> and
+        localization uncertainty radius is
+        <strong> \( r_{\text{unc}} \)</strong>. Give a sufficient condition for
+        the corridor to remain feasible under conservative planning.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A sufficient feasibility condition is:
+        <strong> \( r_{\text{ins}} + r_{\text{unc}} \le w_{\min} \)</strong>. If
+        violated, even perfect planning may reject the corridor because the
+        conservative footprint does not fit. One remedy is reducing uncertainty
+        (better localization) rather than shrinking safety margins blindly.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Contract-Based Debugging):</strong>
+        You send a goal and the action server responds, but the robot never
+        moves. Provide a diagnostic decision procedure that isolates the failure
+        to (i) TF contract, (ii) costmap contract, (iii) controller/output
+        contract.
+      </p>
+      <p><strong>Solution (procedure):</strong></p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Goal accepted, no motion"] --> B["Is cmd_vel published?"]
+  B -->|no| C["Check controller active + lifecycle states"]
+  C --> D["Check TF lookup map-odom-base"]
+  D -->|fail| TFERR["Fix TF \ntimestamps/frames"]
+  D -->|ok| E["Check controller \nconstraints (v,w limits)"]
+  B -->|yes| F["Robot base consumes cmd_vel?"]
+  F -->|no| BASE["Fix base driver / \nmux / safety stop"]
+  F -->|yes| G["Is local costmap \nall lethal?"]
+  G -->|yes| CMERR["Fix obstacle layer / \ninflation / footprint"]
+  G -->|no| H["Check progress checker / \nrecovery loops"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Problem 5 (Liveness vs Safety Trade-off):</strong>
+        Explain why overly aggressive recovery (frequent spins/backups) can
+        reduce liveness in cluttered environments, and propose one measurable
+        criterion to tune recovery thresholds.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Aggressive recovery can cause repeated mode switching (hybrid
+        “chattering”), consuming time without reducing costmap risk. A
+        measurable tuning criterion is a progress metric such as:
+        <strong>
+          \( \Delta d = d_{\text{goal}}(t) - d_{\text{goal}}(t+T) \)</strong
+        >. Trigger recovery only if
+        <strong> \( \Delta d \le \epsilon \)</strong> for a dwell time
+        <strong> \( T \)</strong>, while also enforcing safety constraints
+        (Section 3). This reduces unnecessary recoveries when slow progress is
+        expected.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        You assembled a full navigation stack by enforcing architectural
+        contracts: consistent TF chains, stable localization, calibrated layered
+        costmaps, planner/controller boundary correctness, and behavior-tree
+        orchestration with recoveries. You also derived and applied a
+        latency-aware safety bound on speed and used contract-based
+        observability to debug failures. This integration mindset is the
+        foundation for Chapter 15, where local motion generation methods are
+        studied in detail.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Marzinotto, A., Colledanchise, M., Smith, C., &amp; Ögren, P. (2014).
+        Towards a unified behavior trees framework for robot control.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 5420–5427.
+      </li>
+      <li>
+        Colledanchise, M., &amp; Ögren, P. (2018).
+        <em>Behavior Trees in Robotics and AI: An Introduction</em>. CRC Press.
+      </li>
+      <li>
+        Fox, D., Burgard, W., &amp; Thrun, S. (1997). The dynamic window
+        approach to collision avoidance.
+        <em>IEEE Robotics &amp; Automation Magazine</em>, 4(1), 23–33.
+      </li>
+      <li>
+        Brock, O., &amp; Khatib, O. (1999). High-speed navigation using the
+        global dynamic window approach.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 341–346.
+      </li>
+      <li>
+        Thrun, S., Burgard, W., &amp; Fox, D. (2005).
+        <em>Probabilistic Robotics</em>. MIT Press. (Localization/costmap
+        probabilistic grounding used by stacks.)
+      </li>
+      <li>
+        Arkin, R.C. (1989). Motor schema-based mobile robot navigation.
+        <em>International Journal of Robotics Research</em>, 8(4), 92–112.
+      </li>
+      <li>
+        Quigley, M., et al. (2009). ROS: An open-source Robot Operating System.
+        <em>ICRA Workshop on Open Source Software</em>.
+      </li>
+      <li>
+        Macenski, S., et al. (2020). Robot Operating System 2: Design,
+        architecture, and uses in the wild.
+        <em>Science Robotics</em>, 5(44), eabb3527.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter14/Lesson4.html">
+          Lesson 4: Recovery Behaviors and Fault Handling
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Pure Pursuit and Geometric Path Tracking
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

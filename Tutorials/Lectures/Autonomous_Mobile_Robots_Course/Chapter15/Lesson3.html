@@ -1,0 +1,2363 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 15: Local Motion Generation (Mobile-Specific) - Lesson 3: Dynamic Window Approach (DWA) | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 15: Local Motion Generation (Mobile-Specific)</h1>
+    <h3><strong>Lesson 3: Dynamic Window Approach (DWA)</strong></h3>
+    <p>
+      This lesson develops the Dynamic Window Approach as a mobile-specific
+      local motion generator that selects feasible translational and rotational
+      velocities by explicitly respecting acceleration limits,
+      forward-simulating short-horizon trajectories, and optimizing a
+      multi-objective score (goal progress, clearance, and speed). We emphasize
+      the admissibility (stop-safety) condition, the dynamic-window
+      construction, and implementation patterns that plug into a layered
+      navigation stack.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In a layered AMR navigation stack, a local planner operates in a
+        receding-horizon loop: given the current robot state, a local obstacle
+        representation (often derived from costmaps), and a short-term objective
+        (track the global path while avoiding collisions), it outputs a velocity
+        command
+        <strong> \( (v, \omega) \):</strong>
+        to be executed for a short control period
+        <strong> \( \Delta t \):</strong>.
+      </p>
+      <p>
+        The Dynamic Window Approach (DWA) performs this selection by enumerating
+        candidate commands inside a <em>dynamic window</em> defined by both
+        kinematic bounds and acceleration feasibility, then scoring each command
+        via rollout simulation under a unicycle-like model (appropriate for many
+        ground bases).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["State: (x,y,theta,v,w)"] --> W["Dynamic window from limits + \naccel: (v,w) bounds"]
+  G["Goal / path \ntracking objective"] --> E["Evaluate candidates"]
+  M["Local obstacles \n(inflated map / scan)"] --> E
+  W --> Samp["Sample candidate (v,w)"]
+  Samp --> Roll["Forward simulate for horizon T"]
+  Roll --> Feas["Reject if not stop-safe"]
+  Feas --> E
+  E --> Best["Pick best score (v*,w*)"]
+  Best --> Cmd["Send cmd for dt"]
+  Cmd --> S
+        </pre>
+      </div>
+
+      <p>
+        DWA is <em>local</em>: it does not guarantee global optimality, and can
+        be trapped by local minima. However, it is fast, reactive, and
+        integrates naturally with costmap-based obstacle representations
+        introduced earlier in Chapter 14.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Motion Model and Rollout Discretization -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Motion Model and Rollout Discretization</h2>
+    <div class="down-content">
+      <p>
+        For many wheeled mobile bases, the short-horizon local prediction can be
+        approximated by the planar unicycle model with control inputs
+        <strong> \( v \):</strong> (linear velocity) and
+        <strong> \( \omega \):</strong>
+        (yaw rate):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \dot x = v\cos\theta,\qquad \dot y = v\sin\theta,\qquad \dot\theta =
+        \omega. \]
+      </h4>
+
+      <p>
+        DWA uses forward simulation (rollout) with time step
+        <strong> \( \Delta t \):</strong> over a horizon
+        <strong> \( T = N\Delta t \):</strong>. With forward Euler
+        discretization:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} x_{k+1} &= x_k + v\cos\theta_k\,\Delta t,\\ y_{k+1}
+        &= y_k + v\sin\theta_k\,\Delta t,\\ \theta_{k+1} &= \theta_k +
+        \omega\,\Delta t. \end{aligned} \]
+      </h4>
+
+      <p>
+        For each candidate <strong> \( (v,\omega) \):</strong> assumed constant
+        over the horizon, the rollout produces a discrete trajectory
+        <strong>
+          \( \tau(v,\omega) = \{ {\mathbf{x} }_0,{\mathbf{x}
+          }_1,\dots,{\mathbf{x} }_N\} \):</strong
+        >
+        where <strong> \( {\mathbf{x} }_k = (x_k,y_k,\theta_k) \):</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Dynamic Window Construction -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Dynamic Window Construction</h2>
+    <div class="down-content">
+      <p>
+        Let the robot's current commanded velocities be
+        <strong> \( v_t \):</strong> and <strong> \( \omega_t \):</strong>. The
+        dynamic window is the intersection of:
+      </p>
+      <ul>
+        <li>
+          <strong>Kinematic limits:</strong>
+          <strong> \( v \in [v_{\min}, v_{\max}] \):</strong>,
+          <strong> \( \omega \in [\omega_{\min}, \omega_{\max}] \):</strong>.
+        </li>
+        <li>
+          <strong
+            >Acceleration feasibility over one control period \( \Delta t
+            \):</strong
+          >
+          given bounds <strong> \( a_{\max} \):</strong> (accel),
+          <strong> \( a_{\text{brake} } \):</strong> (decel magnitude), and
+          <strong> \( \alpha_{\max} \):</strong> (yaw accel):
+        </li>
+      </ul>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} v &\in \left[v_t - a_{\text{brake} }\Delta t,\; v_t +
+        a_{\max}\Delta t\right],\\ \omega &\in \left[\omega_t -
+        \alpha_{\max}\Delta t,\; \omega_t + \alpha_{\max}\Delta t\right].
+        \end{aligned} \]
+      </h4>
+
+      <p>Therefore the dynamic window bounds are:</p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} v_{\text{low} } &= \max\!\left(v_{\min},\, v_t -
+        a_{\text{brake} }\Delta t\right),\qquad v_{\text{high} } =
+        \min\!\left(v_{\max},\, v_t + a_{\max}\Delta t\right),\\
+        \omega_{\text{low} } &= \max\!\left(\omega_{\min},\, \omega_t -
+        \alpha_{\max}\Delta t\right),\qquad \omega_{\text{high} } =
+        \min\!\left(\omega_{\max},\, \omega_t + \alpha_{\max}\Delta t\right).
+        \end{aligned} \]
+      </h4>
+
+      <p>
+        Candidate controls are sampled on a grid:
+        <strong> \( v = v_{\text{low} } + i\Delta v \):</strong>,
+        <strong> \( \omega = \omega_{\text{low} } + j\Delta\omega \):</strong>
+        with resolutions <strong> \( \Delta v \):</strong> and
+        <strong> \( \Delta\omega \):</strong>.
+      </p>
+
+      <p>
+        <strong>Sampling note:</strong> finer grids improve solution quality but
+        increase computation. If <strong> \( n_v \):</strong> and
+        <strong> \( n_\omega \):</strong> are samples per dimension and
+        <strong> \( N \):</strong> rollout steps, the naive complexity per cycle
+        is
+        <strong> \( \mathcal{O}(n_v n_\omega N) \):</strong>
+        plus the obstacle distance query cost.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Admissibility (Stop-Safety) and a Safety Lemma -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Admissibility (Stop-Safety) and a Safety Lemma</h2>
+    <div class="down-content">
+      <p>
+        A core idea in DWA is to reject velocity commands that cannot stop
+        before reaching an obstacle. Let
+        <strong> \( d_{\min}(\tau) \):</strong> be the minimum clearance from
+        the robot body (radius <strong> \( r_{\text{robot} } \):</strong>) along
+        the rollout <strong> \( \tau \):</strong> to the nearest obstacle (in
+        the local map). For static obstacles and bounded braking deceleration
+        <strong> \( a_{\text{brake} } &gt; 0 \):</strong>, a conservative
+        stopping distance for forward motion is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ d_{\text{stop} }(v) = \frac{\max(0,v)^2}{2a_{\text{brake} } }. \]
+      </h4>
+
+      <p>
+        <strong>Admissibility condition (stop-safe):</strong> keep only
+        candidates satisfying
+        <strong>
+          \( d_{\min}(\tau) &gt; d_{\text{stop} }(v) + r_{\text{robot} }
+          \):</strong
+        >.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \text{Admissible}(v,\omega)\ \Longleftrightarrow\
+        d_{\min}(\tau(v,\omega)) &gt; d_{\text{stop} }(v) + r_{\text{robot} }.
+        \]
+      </h4>
+
+      <p>
+        <strong>Lemma (Stop-safety under static obstacles):</strong>
+        Assume (i) obstacles are static over the horizon, (ii) the clearance
+        estimate
+        <strong> \( d_{\min}(\tau) \):</strong> is conservative (never
+        overestimates), and (iii) the robot can always brake with deceleration
+        magnitude at least <strong> \( a_{\text{brake} } \):</strong>. If at
+        each control cycle the commanded <strong> \( (v,\omega) \):</strong> is
+        admissible and is held for <strong> \( \Delta t \):</strong>, then a
+        collision can be avoided by braking at or before the point where the
+        admissibility inequality becomes tight.
+      </p>
+
+      <p>
+        <strong>Proof (sketch):</strong>
+        For an admissible command, the rollout clearance satisfies
+        <strong>
+          \( d_{\min}(\tau) - r_{\text{robot} } &gt; d_{\text{stop} }(v)
+          \):</strong
+        >. The right-hand side is exactly the distance required to reduce
+        forward speed from <strong> \( v \):</strong> to zero under deceleration
+        <strong> \( a_{\text{brake} } \):</strong>: from
+        <strong> \( v^2 = 2a_{\text{brake} }d \):</strong> we obtain
+        <strong> \( d = v^2/(2a_{\text{brake} }) \):</strong>. Therefore, even
+        if the robot begins braking immediately, it can come to rest strictly
+        before its body intersects the nearest obstacle along the rollout.
+        Receding-horizon replanning maintains this margin each cycle. □
+      </p>
+
+      <p>
+        This lemma clarifies the role of conservative distance estimates and
+        braking bounds. In real systems, moving obstacles, sensing latency, and
+        map errors motivate additional margins and shorter horizons.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Multi-Objective Scoring and Normalization -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Multi-Objective Scoring and Normalization</h2>
+    <div class="down-content">
+      <p>
+        Among admissible candidates, DWA selects the command that maximizes a
+        weighted score. A classical decomposition is:
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  T["Trajectory tau(v,w)"] --> H["Heading score: \nalign to goal"]
+  T --> C["Clearance score: \nmin obstacle distance"]
+  T --> V["Speed score: \nprefer larger v"]
+  H --> N["Normalize across candidates"]
+  C --> N
+  V --> N
+  N --> J["Total score J = wh*H + wc*C + wv*V"]
+        </pre>
+      </div>
+
+      <p>A concrete choice (one of many) is:</p>
+
+      <h4 class="mathJax">
+        \[ J(v,\omega) = w_h\,\widehat{H}(v,\omega) + w_c\,\widehat{C}(v,\omega)
+        + w_v\,\widehat{V}(v,\omega), \qquad w_h,w_c,w_v \ge 0,\ \ w_h+w_c+w_v =
+        1. \]
+      </h4>
+
+      <p>
+        Here <strong> \( H \):</strong> measures goal alignment at the end of
+        the rollout (e.g., cosine of heading error),
+        <strong> \( C \):</strong> is minimum clearance along the trajectory,
+        and <strong> \( V \):</strong> encourages progress (e.g., normalized
+        speed). Hats denote normalization within the current candidate set, for
+        example:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \widehat{z}_i = \frac{z_i - \min_j z_j}{\max_j z_j - \min_j z_j +
+        \varepsilon}, \qquad \varepsilon &gt; 0. \]
+      </h4>
+
+      <p>
+        <strong>Tuning guideline:</strong>
+        Increasing <strong> \( w_c \):</strong> yields more conservative
+        obstacle clearance; increasing <strong> \( w_v \):</strong> yields
+        faster motion; increasing <strong> \( w_h \):</strong> yields stronger
+        goal/path tracking but can cause corner cutting if clearance is
+        underweighted.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Practical Integration Notes (Costmaps, Footprints, and Update Rates) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      6. Practical Integration Notes (Costmaps, Footprints, and Update Rates)
+    </h2>
+    <div class="down-content">
+      <p>
+        In practical AMR stacks, obstacle information is often represented by an
+        inflated costmap (Chapter 14, Lesson 2). For DWA, what matters is a fast
+        query for <strong> \( d_{\min}(\tau) \):</strong> (clearance) along a
+        rollout. Common approaches include:
+      </p>
+      <ul>
+        <li>
+          <strong>Distance transform:</strong> precompute a distance-to-obstacle
+          field over the costmap grid so that clearance queries reduce to table
+          lookups plus bilinear interpolation.
+        </li>
+        <li>
+          <strong>Point-cloud / scan distance:</strong> compute distances from
+          rollout points to a set of obstacle points extracted from LiDAR scans
+          (fast with k-d trees).
+        </li>
+        <li>
+          <strong>Footprint-aware collision checks:</strong> use a polygonal
+          footprint rather than a radius; clearance becomes the minimum distance
+          from the footprint to occupied/inflated cells.
+        </li>
+      </ul>
+      <p>
+        Because DWA is reactive, its stability depends on timing: the control
+        period <strong> \( \Delta t \):</strong> should be short enough that the
+        local map and robot state are fresh, and the horizon
+        <strong> \( T \):</strong> should be long enough to see around local
+        obstacles but short enough to keep computation within real-time
+        constraints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Implementations (Python, C++, Java, MATLAB/Simulink, Wolfram Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following reference implementations include a from-scratch DWA core.
+        In production AMR software, you typically wrap the core in middleware
+        (e.g., ROS/ROS2) and replace the obstacle model with real sensor/costmap
+        queries.
+      </p>
+
+      <h3>7.1 Python Implementation</h3>
+      <p><strong>Code: Chapter15_Lesson3.py</strong></p>
+      <pre><code class="language-python">
+&quot;&quot;&quot;
+Chapter15_Lesson3.py
+Dynamic Window Approach (DWA) — from-scratch reference implementation (2D unicycle).
+- No ROS dependencies. Uses obstacle points and a simple receding-horizon rollout.
+- You can later wrap `dwa_control()` inside a ROS2 node that publishes geometry_msgs/Twist.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple
+import math
+import numpy as np
+
+
+@dataclass
+class State:
+    x: float
+    y: float
+    theta: float   # heading [rad]
+    v: float       # linear velocity [m/s]
+    w: float       # angular velocity [rad/s]
+
+
+@dataclass
+class Config:
+    # Kinematic limits
+    v_min: float = -0.2
+    v_max: float =  1.0
+    w_min: float = -1.5
+    w_max: float =  1.5
+
+    # Dynamic limits (accelerations)
+    a_max: float = 0.8          # linear accel [m/s^2]
+    a_brake: float = 1.0        # linear decel magnitude [m/s^2]
+    alpha_max: float = 2.0      # angular accel [rad/s^2]
+
+    # Discretization
+    dt: float = 0.1             # control period [s]
+    T: float = 2.0              # rollout horizon [s]
+    v_res: float = 0.05         # sampling resolution [m/s]
+    w_res: float = 0.1          # sampling resolution [rad/s]
+
+    # Robot geometry
+    robot_radius: float = 0.3   # [m]
+
+    # Scoring weights
+    w_heading: float = 0.4
+    w_clear: float = 0.4
+    w_speed: float = 0.2
+
+
+def motion_step(s: State, v: float, w: float, dt: float) -&gt; State:
+    &quot;&quot;&quot;Forward Euler unicycle integration.&quot;&quot;&quot;
+    nx = s.x + v * math.cos(s.theta) * dt
+    ny = s.y + v * math.sin(s.theta) * dt
+    ntheta = s.theta + w * dt
+    return State(nx, ny, ntheta, v, w)
+
+
+def dynamic_window(s: State, cfg: Config) -&gt; Tuple[float, float, float, float]:
+    &quot;&quot;&quot;
+    Dynamic window:
+      - kinematic window: [v_min, v_max] x [w_min, w_max]
+      - acceleration window: [v - a_brake*dt, v + a_max*dt] x [w - alpha*dt, w + alpha*dt]
+      - intersection
+    &quot;&quot;&quot;
+    v_low_kin, v_high_kin = cfg.v_min, cfg.v_max
+    w_low_kin, w_high_kin = cfg.w_min, cfg.w_max
+
+    v_low_dyn = s.v - cfg.a_brake * cfg.dt
+    v_high_dyn = s.v + cfg.a_max * cfg.dt
+    w_low_dyn = s.w - cfg.alpha_max * cfg.dt
+    w_high_dyn = s.w + cfg.alpha_max * cfg.dt
+
+    v_low = max(v_low_kin, v_low_dyn)
+    v_high = min(v_high_kin, v_high_dyn)
+    w_low = max(w_low_kin, w_low_dyn)
+    w_high = min(w_high_kin, w_high_dyn)
+    return v_low, v_high, w_low, w_high
+
+
+def rollout(s0: State, v: float, w: float, cfg: Config) -&gt; List[State]:
+    n = int(cfg.T / cfg.dt)
+    traj = [s0]
+    s = s0
+    for _ in range(n):
+        s = motion_step(s, v, w, cfg.dt)
+        traj.append(s)
+    return traj
+
+
+def min_clearance(traj: List[State], obstacles: np.ndarray) -&gt; float:
+    &quot;&quot;&quot;
+    Obstacles: array shape (M,2) of point obstacles in world coordinates.
+    Returns minimum Euclidean distance from any trajectory point to any obstacle.
+    &quot;&quot;&quot;
+    pts = np.array([(st.x, st.y) for st in traj], dtype=float)  # (N,2)
+    # pairwise distances: (N,M)
+    d = np.linalg.norm(pts[:, None, :] - obstacles[None, :, :], axis=2)
+    return float(np.min(d))
+
+
+def heading_score(traj: List[State], goal: Tuple[float, float]) -&gt; float:
+    &quot;&quot;&quot;
+    Heading score: cosine alignment between final heading and direction to goal.
+    Range roughly [-1, 1], higher is better.
+    &quot;&quot;&quot;
+    gx, gy = goal
+    last = traj[-1]
+    dir_to_goal = math.atan2(gy - last.y, gx - last.x)
+    ang_err = wrap_to_pi(dir_to_goal - last.theta)
+    return math.cos(ang_err)
+
+
+def speed_score(v: float, cfg: Config) -&gt; float:
+    &quot;&quot;&quot;Prefer higher forward speed within limits.&quot;&quot;&quot;
+    return (v - cfg.v_min) / max(1e-9, (cfg.v_max - cfg.v_min))
+
+
+def admissible(v: float, clearance: float, cfg: Config) -&gt; bool:
+    &quot;&quot;&quot;
+    Stop-safe admissibility (static obstacles):
+      stopping distance d_stop = v^2 / (2*a_brake)
+      require clearance &gt; d_stop + robot_radius
+    &quot;&quot;&quot;
+    if clearance &lt;= 0.0:
+        return False
+    d_stop = (max(0.0, v) ** 2) / max(1e-9, 2.0 * cfg.a_brake)
+    return clearance &gt; (d_stop + cfg.robot_radius)
+
+
+def normalize(vals: List[float]) -&gt; List[float]:
+    lo, hi = min(vals), max(vals)
+    if abs(hi - lo) &lt; 1e-12:
+        return [0.0 for _ in vals]
+    return [(v - lo) / (hi - lo) for v in vals]
+
+
+def dwa_control(s: State, goal: Tuple[float, float], obstacles: np.ndarray, cfg: Config) -&gt; Tuple[float, float, List[State]]:
+    &quot;&quot;&quot;
+    Compute (v*, w*) maximizing weighted score over sampled (v,w) within dynamic window.
+    Returns best velocities and the associated trajectory.
+    &quot;&quot;&quot;
+    vL, vU, wL, wU = dynamic_window(s, cfg)
+
+    v_samples = np.arange(vL, vU + 1e-9, cfg.v_res)
+    w_samples = np.arange(wL, wU + 1e-9, cfg.w_res)
+
+    cand = []
+    for v in v_samples:
+        for w in w_samples:
+            traj = rollout(s, float(v), float(w), cfg)
+            clear = min_clearance(traj, obstacles) - cfg.robot_radius
+            if not admissible(float(v), clear, cfg):
+                continue
+            h = heading_score(traj, goal)
+            sp = speed_score(float(v), cfg)
+            cand.append((h, clear, sp, float(v), float(w), traj))
+
+    if not cand:
+        # fallback: stop
+        return 0.0, 0.0, [s]
+
+    hs = normalize([c[0] for c in cand])
+    cs = normalize([c[1] for c in cand])
+    vs = normalize([c[2] for c in cand])
+
+    best_j = -1e18
+    best = cand[0]
+    for i, c in enumerate(cand):
+        j = cfg.w_heading * hs[i] + cfg.w_clear * cs[i] + cfg.w_speed * vs[i]
+        if j &gt; best_j:
+            best_j = j
+            best = c
+
+    _, _, _, v_best, w_best, traj_best = best
+    return v_best, w_best, traj_best
+
+
+def wrap_to_pi(a: float) -&gt; float:
+    &quot;&quot;&quot;Map angle to (-pi, pi].&quot;&quot;&quot;
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def demo():
+    &quot;&quot;&quot;
+    Simple closed-loop demo with point obstacles.
+    Requires: numpy (and optionally matplotlib for visualization).
+    &quot;&quot;&quot;
+    cfg = Config()
+    s = State(x=0.0, y=0.0, theta=0.0, v=0.0, w=0.0)
+    goal = (8.0, 6.0)
+
+    # Obstacles as points
+    obstacles = []
+    for x in np.linspace(2.0, 7.0, 15):
+        obstacles.append((x, 3.0))
+    for y in np.linspace(1.0, 5.0, 12):
+        obstacles.append((4.0, y))
+    obs = np.array(obstacles, dtype=float)
+
+    path = [(s.x, s.y)]
+    for _ in range(600):
+        v, w, _ = dwa_control(s, goal, obs, cfg)
+        s = motion_step(s, v, w, cfg.dt)
+        path.append((s.x, s.y))
+        if math.hypot(s.x - goal[0], s.y - goal[1]) &lt; 0.3:
+            break
+
+    print(&quot;Final state:&quot;, s)
+    print(&quot;Steps:&quot;, len(path))
+
+    try:
+        import matplotlib.pyplot as plt
+        path = np.array(path)
+        plt.figure()
+        plt.plot(path[:, 0], path[:, 1], label=&quot;trajectory&quot;)
+        plt.scatter(obs[:, 0], obs[:, 1], s=15, label=&quot;obstacles&quot;)
+        plt.scatter([goal[0]], [goal[1]], s=50, marker=&quot;*&quot;, label=&quot;goal&quot;)
+        plt.axis(&quot;equal&quot;)
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    except Exception as e:
+        print(&quot;Matplotlib plot skipped:&quot;, e)
+
+
+if __name__ == &quot;__main__&quot;:
+    demo()
+      </code></pre>
+
+      <h3>7.2 C++ Implementation</h3>
+      <p><strong>Code: Chapter15_Lesson3.cpp</strong></p>
+      <pre><code class="language-cpp">
+/*
+Chapter15_Lesson3.cpp
+Dynamic Window Approach (DWA) — minimal C++17 implementation (no ROS required).
+Build (example):
+  g++ -std=c++17 -O2 Chapter15_Lesson3.cpp -o dwa_demo
+*/
+
+#include &lt;cmath&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;tuple&gt;
+#include &lt;utility&gt;
+#include &lt;vector&gt;
+
+struct State {
+    double x{0.0};
+    double y{0.0};
+    double theta{0.0};
+    double v{0.0};
+    double w{0.0};
+};
+
+struct Config {
+    // Kinematic limits
+    double v_min{-0.2};
+    double v_max{ 1.0};
+    double w_min{-1.5};
+    double w_max{ 1.5};
+
+    // Dynamics
+    double a_max{0.8};
+    double a_brake{1.0};
+    double alpha_max{2.0};
+
+    // Discretization
+    double dt{0.1};
+    double T{2.0};
+    double v_res{0.05};
+    double w_res{0.1};
+
+    // Geometry
+    double robot_radius{0.3};
+
+    // Weights
+    double w_heading{0.4};
+    double w_clear{0.4};
+    double w_speed{0.2};
+};
+
+static double wrap_to_pi(double a) {
+    const double pi = 3.14159265358979323846;
+    a = std::fmod(a + pi, 2.0 * pi);
+    if (a &lt; 0) a += 2.0 * pi;
+    return a - pi;
+}
+
+static State motion_step(const State&amp; s, double v, double w, double dt) {
+    State ns = s;
+    ns.x += v * std::cos(s.theta) * dt;
+    ns.y += v * std::sin(s.theta) * dt;
+    ns.theta += w * dt;
+    ns.v = v;
+    ns.w = w;
+    return ns;
+}
+
+static std::tuple&lt;double,double,double,double&gt; dynamic_window(const State&amp; s, const Config&amp; cfg) {
+    double v_low_dyn = s.v - cfg.a_brake * cfg.dt;
+    double v_high_dyn = s.v + cfg.a_max * cfg.dt;
+    double w_low_dyn = s.w - cfg.alpha_max * cfg.dt;
+    double w_high_dyn = s.w + cfg.alpha_max * cfg.dt;
+
+    double vL = std::max(cfg.v_min, v_low_dyn);
+    double vU = std::min(cfg.v_max, v_high_dyn);
+    double wL = std::max(cfg.w_min, w_low_dyn);
+    double wU = std::min(cfg.w_max, w_high_dyn);
+    return {vL, vU, wL, wU};
+}
+
+static std::vector&lt;State&gt; rollout(const State&amp; s0, double v, double w, const Config&amp; cfg) {
+    int n = static_cast&lt;int&gt;(cfg.T / cfg.dt);
+    std::vector&lt;State&gt; traj;
+    traj.reserve(n + 1);
+    traj.push_back(s0);
+    State s = s0;
+    for (int i = 0; i &lt; n; ++i) {
+        s = motion_step(s, v, w, cfg.dt);
+        traj.push_back(s);
+    }
+    return traj;
+}
+
+static double min_clearance(const std::vector&lt;State&gt;&amp; traj, const std::vector&lt;std::pair&lt;double,double&gt;&gt;&amp; obs) {
+    double best = std::numeric_limits&lt;double&gt;::infinity();
+    for (const auto&amp; st : traj) {
+        for (const auto&amp; o : obs) {
+            double dx = st.x - o.first;
+            double dy = st.y - o.second;
+            double d = std::sqrt(dx*dx + dy*dy);
+            if (d &lt; best) best = d;
+        }
+    }
+    return best;
+}
+
+static double heading_score(const std::vector&lt;State&gt;&amp; traj, const std::pair&lt;double,double&gt;&amp; goal) {
+    const auto&amp; last = traj.back();
+    double dir = std::atan2(goal.second - last.y, goal.first - last.x);
+    double err = wrap_to_pi(dir - last.theta);
+    return std::cos(err); // [-1,1]
+}
+
+static double speed_score(double v, const Config&amp; cfg) {
+    return (v - cfg.v_min) / std::max(1e-9, (cfg.v_max - cfg.v_min));
+}
+
+static bool admissible(double v, double clearance, const Config&amp; cfg) {
+    double d_stop = (std::max(0.0, v) * std::max(0.0, v)) / std::max(1e-9, 2.0 * cfg.a_brake);
+    return clearance &gt; (d_stop + cfg.robot_radius);
+}
+
+static void normalize(std::vector&lt;double&gt;&amp; vals) {
+    double lo = std::numeric_limits&lt;double&gt;::infinity();
+    double hi = -std::numeric_limits&lt;double&gt;::infinity();
+    for (double v : vals) { lo = std::min(lo, v); hi = std::max(hi, v); }
+    if (std::fabs(hi - lo) &lt; 1e-12) {
+        for (auto&amp; v : vals) v = 0.0;
+        return;
+    }
+    for (auto&amp; v : vals) v = (v - lo) / (hi - lo);
+}
+
+struct Candidate {
+    double h;
+    double c;
+    double s;
+    double v;
+    double w;
+    std::vector&lt;State&gt; traj;
+};
+
+static std::tuple&lt;double,double,std::vector&lt;State&gt;&gt;
+dwa_control(const State&amp; s, const std::pair&lt;double,double&gt;&amp; goal,
+            const std::vector&lt;std::pair&lt;double,double&gt;&gt;&amp; obs, const Config&amp; cfg) {
+
+    auto [vL, vU, wL, wU] = dynamic_window(s, cfg);
+
+    std::vector&lt;Candidate&gt; cand;
+    for (double v = vL; v &lt;= vU + 1e-12; v += cfg.v_res) {
+        for (double w = wL; w &lt;= wU + 1e-12; w += cfg.w_res) {
+            auto traj = rollout(s, v, w, cfg);
+            double clear = min_clearance(traj, obs) - cfg.robot_radius;
+            if (!admissible(v, clear, cfg)) continue;
+            Candidate c;
+            c.h = heading_score(traj, goal);
+            c.c = clear;
+            c.s = speed_score(v, cfg);
+            c.v = v;
+            c.w = w;
+            c.traj = std::move(traj);
+            cand.push_back(std::move(c));
+        }
+    }
+
+    if (cand.empty()) {
+        return {0.0, 0.0, std::vector&lt;State&gt;{s} };
+    }
+
+    std::vector&lt;double&gt; hs, cs, ss;
+    hs.reserve(cand.size()); cs.reserve(cand.size()); ss.reserve(cand.size());
+    for (const auto&amp; c : cand) { hs.push_back(c.h); cs.push_back(c.c); ss.push_back(c.s); }
+    normalize(hs); normalize(cs); normalize(ss);
+
+    double bestJ = -1e18;
+    size_t bestIdx = 0;
+    for (size_t i = 0; i &lt; cand.size(); ++i) {
+        double J = cfg.w_heading * hs[i] + cfg.w_clear * cs[i] + cfg.w_speed * ss[i];
+        if (J &gt; bestJ) { bestJ = J; bestIdx = i; }
+    }
+
+    return {cand[bestIdx].v, cand[bestIdx].w, cand[bestIdx].traj};
+}
+
+int main() {
+    Config cfg;
+    State s;
+    std::pair&lt;double,double&gt; goal{8.0, 6.0};
+
+    std::vector&lt;std::pair&lt;double,double&gt;&gt; obs;
+    for (int i = 0; i &lt; 15; ++i) obs.push_back({2.0 + i*(5.0/14.0), 3.0});
+    for (int i = 0; i &lt; 12; ++i) obs.push_back({4.0, 1.0 + i*(4.0/11.0)});
+
+    for (int k = 0; k &lt; 600; ++k) {
+        auto [v, w, traj] = dwa_control(s, goal, obs, cfg);
+        s = motion_step(s, v, w, cfg.dt);
+        double dist = std::hypot(s.x - goal.first, s.y - goal.second);
+        if (k % 20 == 0) {
+            std::cout &lt;&lt; &quot;k=&quot; &lt;&lt; k &lt;&lt; &quot; x=&quot; &lt;&lt; s.x &lt;&lt; &quot; y=&quot; &lt;&lt; s.y &lt;&lt; &quot; dist=&quot; &lt;&lt; dist &lt;&lt; &quot; v=&quot; &lt;&lt; v &lt;&lt; &quot; w=&quot; &lt;&lt; w &lt;&lt; &quot;\n&quot;;
+        }
+        if (dist &lt; 0.3) break;
+    }
+    std::cout &lt;&lt; &quot;Final: x=&quot; &lt;&lt; s.x &lt;&lt; &quot; y=&quot; &lt;&lt; s.y &lt;&lt; &quot; theta=&quot; &lt;&lt; s.theta &lt;&lt; &quot;\n&quot;;
+    return 0;
+}
+      </code></pre>
+
+      <h3>7.3 Java Implementation</h3>
+      <p><strong>Code: Chapter15_Lesson3.java</strong></p>
+      <pre><code class="language-java">
+/*
+Chapter15_Lesson3.java
+Dynamic Window Approach (DWA) — minimal Java implementation (no ROS required).
+Compile:
+  javac Chapter15_Lesson3.java
+Run:
+  java Chapter15_Lesson3
+*/
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Chapter15_Lesson3 {
+
+    static class State {
+        double x, y, theta, v, w;
+        State(double x, double y, double theta, double v, double w) {
+            this.x = x; this.y = y; this.theta = theta; this.v = v; this.w = w;
+        }
+    }
+
+    static class Config {
+        double vMin = -0.2, vMax = 1.0;
+        double wMin = -1.5, wMax = 1.5;
+
+        double aMax = 0.8;
+        double aBrake = 1.0;
+        double alphaMax = 2.0;
+
+        double dt = 0.1;
+        double T = 2.0;
+        double vRes = 0.05;
+        double wRes = 0.1;
+
+        double robotRadius = 0.3;
+
+        double wHeading = 0.4;
+        double wClear = 0.4;
+        double wSpeed = 0.2;
+    }
+
+    static class Candidate {
+        double h, c, s, v, w;
+        List&lt;State&gt; traj;
+        Candidate(double h, double c, double s, double v, double w, List&lt;State&gt; traj) {
+            this.h = h; this.c = c; this.s = s; this.v = v; this.w = w; this.traj = traj;
+        }
+    }
+
+    static double wrapToPi(double a) {
+        double pi = Math.PI;
+        a = (a + pi) % (2.0 * pi);
+        if (a &lt; 0) a += 2.0 * pi;
+        return a - pi;
+    }
+
+    static State motionStep(State s, double v, double w, double dt) {
+        double nx = s.x + v * Math.cos(s.theta) * dt;
+        double ny = s.y + v * Math.sin(s.theta) * dt;
+        double nt = s.theta + w * dt;
+        return new State(nx, ny, nt, v, w);
+    }
+
+    static double[] dynamicWindow(State s, Config cfg) {
+        double vLowDyn = s.v - cfg.aBrake * cfg.dt;
+        double vHighDyn = s.v + cfg.aMax * cfg.dt;
+        double wLowDyn = s.w - cfg.alphaMax * cfg.dt;
+        double wHighDyn = s.w + cfg.alphaMax * cfg.dt;
+
+        double vL = Math.max(cfg.vMin, vLowDyn);
+        double vU = Math.min(cfg.vMax, vHighDyn);
+        double wL = Math.max(cfg.wMin, wLowDyn);
+        double wU = Math.min(cfg.wMax, wHighDyn);
+        return new double[]{vL, vU, wL, wU};
+    }
+
+    static List&lt;State&gt; rollout(State s0, double v, double w, Config cfg) {
+        int n = (int)Math.floor(cfg.T / cfg.dt);
+        List&lt;State&gt; traj = new ArrayList&lt;&gt;();
+        traj.add(s0);
+        State s = s0;
+        for (int i = 0; i &lt; n; i++) {
+            s = motionStep(s, v, w, cfg.dt);
+            traj.add(s);
+        }
+        return traj;
+    }
+
+    static double minClearance(List&lt;State&gt; traj, double[][] obs) {
+        double best = Double.POSITIVE_INFINITY;
+        for (State st : traj) {
+            for (double[] o : obs) {
+                double dx = st.x - o[0];
+                double dy = st.y - o[1];
+                double d = Math.hypot(dx, dy);
+                if (d &lt; best) best = d;
+            }
+        }
+        return best;
+    }
+
+    static double headingScore(List&lt;State&gt; traj, double gx, double gy) {
+        State last = traj.get(traj.size() - 1);
+        double dir = Math.atan2(gy - last.y, gx - last.x);
+        double err = wrapToPi(dir - last.theta);
+        return Math.cos(err);
+    }
+
+    static double speedScore(double v, Config cfg) {
+        return (v - cfg.vMin) / Math.max(1e-9, (cfg.vMax - cfg.vMin));
+    }
+
+    static boolean admissible(double v, double clear, Config cfg) {
+        double vv = Math.max(0.0, v);
+        double dStop = (vv * vv) / Math.max(1e-9, 2.0 * cfg.aBrake);
+        return clear &gt; (dStop + cfg.robotRadius);
+    }
+
+    static double[] normalize(double[] vals) {
+        double lo = Double.POSITIVE_INFINITY, hi = Double.NEGATIVE_INFINITY;
+        for (double v : vals) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+        double[] out = new double[vals.length];
+        if (Math.abs(hi - lo) &lt; 1e-12) return out; // all zeros
+        for (int i = 0; i &lt; vals.length; i++) out[i] = (vals[i] - lo) / (hi - lo);
+        return out;
+    }
+
+    static Object[] dwaControl(State s, double gx, double gy, double[][] obs, Config cfg) {
+        double[] win = dynamicWindow(s, cfg);
+        double vL = win[0], vU = win[1], wL = win[2], wU = win[3];
+
+        List&lt;Candidate&gt; cand = new ArrayList&lt;&gt;();
+        for (double v = vL; v &lt;= vU + 1e-12; v += cfg.vRes) {
+            for (double w = wL; w &lt;= wU + 1e-12; w += cfg.wRes) {
+                List&lt;State&gt; traj = rollout(s, v, w, cfg);
+                double clear = minClearance(traj, obs) - cfg.robotRadius;
+                if (!admissible(v, clear, cfg)) continue;
+                double h = headingScore(traj, gx, gy);
+                double sp = speedScore(v, cfg);
+                cand.add(new Candidate(h, clear, sp, v, w, traj));
+            }
+        }
+
+        if (cand.isEmpty()) return new Object[]{0.0, 0.0, List.of(s)};
+
+        double[] hs = new double[cand.size()];
+        double[] cs = new double[cand.size()];
+        double[] ss = new double[cand.size()];
+        for (int i = 0; i &lt; cand.size(); i++) {
+            hs[i] = cand.get(i).h;
+            cs[i] = cand.get(i).c;
+            ss[i] = cand.get(i).s;
+        }
+        hs = normalize(hs);
+        cs = normalize(cs);
+        ss = normalize(ss);
+
+        double bestJ = -1e18;
+        int bestIdx = 0;
+        for (int i = 0; i &lt; cand.size(); i++) {
+            double J = cfg.wHeading * hs[i] + cfg.wClear * cs[i] + cfg.wSpeed * ss[i];
+            if (J &gt; bestJ) { bestJ = J; bestIdx = i; }
+        }
+        Candidate best = cand.get(bestIdx);
+        return new Object[]{best.v, best.w, best.traj};
+    }
+
+    public static void main(String[] args) {
+        Config cfg = new Config();
+        State s = new State(0.0, 0.0, 0.0, 0.0, 0.0);
+        double gx = 8.0, gy = 6.0;
+
+        List&lt;double[]&gt; obsList = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 15; i++) obsList.add(new double[]{2.0 + i*(5.0/14.0), 3.0});
+        for (int i = 0; i &lt; 12; i++) obsList.add(new double[]{4.0, 1.0 + i*(4.0/11.0)});
+        double[][] obs = obsList.toArray(new double[0][0]);
+
+        for (int k = 0; k &lt; 600; k++) {
+            Object[] out = dwaControl(s, gx, gy, obs, cfg);
+            double v = (double)out[0];
+            double w = (double)out[1];
+            s = motionStep(s, v, w, cfg.dt);
+            double dist = Math.hypot(s.x - gx, s.y - gy);
+            if (k % 20 == 0) {
+                System.out.printf(&quot;k=%d x=%.3f y=%.3f dist=%.3f v=%.2f w=%.2f%n&quot;, k, s.x, s.y, dist, v, w);
+            }
+            if (dist &lt; 0.3) break;
+        }
+        System.out.printf(&quot;Final: x=%.3f y=%.3f theta=%.3f%n&quot;, s.x, s.y, s.theta);
+    }
+}
+      </code></pre>
+
+      <h3>7.4 MATLAB / Simulink Implementation</h3>
+      <p>
+        MATLAB can prototype DWA quickly; for deployment, toolchains typically
+        use Robotics System Toolbox and code generation (when applicable). The
+        file below provides: (i) a runnable DWA demo, and (ii) a script to
+        programmatically build a Simulink scaffold.
+      </p>
+      <p><strong>Code: Chapter15_Lesson3.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter15_Lesson3.m
+% Dynamic Window Approach (DWA) — MATLAB reference implementation + Simulink build script.
+%
+% Usage:
+%   Chapter15_Lesson3();
+%
+% Notes:
+% - Obstacles are point obstacles (Mx2). Replace with costmap distance queries in real AMR stacks.
+% - The Simulink section programmatically builds a simple model for unicycle + DWA controller.
+
+function Chapter15_Lesson3()
+    cfg = dwa_config();
+
+    s = struct('x',0,'y',0,'theta',0,'v',0,'w',0);
+    goal = [8; 6];
+
+    obs = [];
+    obs = [obs; [linspace(2,7,15)' 3*ones(15,1)]];
+    obs = [obs; [4*ones(12,1) linspace(1,5,12)']];
+
+    path = [s.x, s.y];
+    for k = 1:600
+        [v, w, traj] = dwa_control(s, goal, obs, cfg); %#ok&lt;ASGLU&gt;
+        s = motion_step(s, v, w, cfg.dt);
+        path(end+1,:) = [s.x, s.y]; %#ok&lt;AGROW&gt;
+        if norm([s.x; s.y] - goal) &lt; 0.3
+            break;
+        end
+    end
+
+    fprintf('Final state: x=%.3f y=%.3f theta=%.3f (steps=%d)\n', s.x, s.y, s.theta, size(path,1));
+
+    figure; hold on; grid on; axis equal;
+    plot(path(:,1), path(:,2), 'LineWidth', 1.5);
+    scatter(obs(:,1), obs(:,2), 20, 'filled');
+    scatter(goal(1), goal(2), 80, 'p', 'filled');
+    legend('trajectory','obstacles','goal');
+    title('DWA demo (MATLAB)');
+end
+
+function cfg = dwa_config()
+    cfg.v_min = -0.2; cfg.v_max = 1.0;
+    cfg.w_min = -1.5; cfg.w_max = 1.5;
+
+    cfg.a_max = 0.8;
+    cfg.a_brake = 1.0;
+    cfg.alpha_max = 2.0;
+
+    cfg.dt = 0.1;
+    cfg.T  = 2.0;
+    cfg.v_res = 0.05;
+    cfg.w_res = 0.1;
+
+    cfg.robot_radius = 0.3;
+
+    cfg.w_heading = 0.4;
+    cfg.w_clear   = 0.4;
+    cfg.w_speed   = 0.2;
+end
+
+function s2 = motion_step(s, v, w, dt)
+    s2 = s;
+    s2.x = s.x + v*cos(s.theta)*dt;
+    s2.y = s.y + v*sin(s.theta)*dt;
+    s2.theta = wrapToPi(s.theta + w*dt);
+    s2.v = v;
+    s2.w = w;
+end
+
+function [v_best, w_best, traj_best] = dwa_control(s, goal, obs, cfg)
+    [vL, vU, wL, wU] = dynamic_window(s, cfg);
+
+    cand = struct('h',{},'c',{},'sp',{},'v',{},'w',{},'traj',{});
+    idx = 0;
+
+    for v = vL:cfg.v_res:(vU + 1e-12)
+        for w = wL:cfg.w_res:(wU + 1e-12)
+            traj = rollout(s, v, w, cfg);
+            clear = min_clearance(traj, obs) - cfg.robot_radius;
+            if ~admissible(v, clear, cfg)
+                continue;
+            end
+            idx = idx + 1;
+            cand(idx).h = heading_score(traj, goal); %#ok&lt;AGROW&gt;
+            cand(idx).c = clear;
+            cand(idx).sp = speed_score(v, cfg);
+            cand(idx).v = v;
+            cand(idx).w = w;
+            cand(idx).traj = traj;
+        end
+    end
+
+    if isempty(cand)
+        v_best = 0; w_best = 0; traj_best = {s};
+        return;
+    end
+
+    hs = normalize([cand.h]);
+    cs = normalize([cand.c]);
+    ss = normalize([cand.sp]);
+
+    Jbest = -inf; best = 1;
+    for i = 1:numel(cand)
+        J = cfg.w_heading*hs(i) + cfg.w_clear*cs(i) + cfg.w_speed*ss(i);
+        if J &gt; Jbest
+            Jbest = J; best = i;
+        end
+    end
+
+    v_best = cand(best).v;
+    w_best = cand(best).w;
+    traj_best = cand(best).traj;
+end
+
+function [vL, vU, wL, wU] = dynamic_window(s, cfg)
+    v_low_dyn = s.v - cfg.a_brake * cfg.dt;
+    v_high_dyn = s.v + cfg.a_max * cfg.dt;
+    w_low_dyn = s.w - cfg.alpha_max * cfg.dt;
+    w_high_dyn = s.w + cfg.alpha_max * cfg.dt;
+
+    vL = max(cfg.v_min, v_low_dyn);
+    vU = min(cfg.v_max, v_high_dyn);
+    wL = max(cfg.w_min, w_low_dyn);
+    wU = min(cfg.w_max, w_high_dyn);
+end
+
+function traj = rollout(s0, v, w, cfg)
+    n = floor(cfg.T / cfg.dt);
+    traj = cell(n+1,1);
+    traj{1} = s0;
+    s = s0;
+    for i = 1:n
+        s = motion_step(s, v, w, cfg.dt);
+        traj{i+1} = s;
+    end
+end
+
+function dmin = min_clearance(traj, obs)
+    pts = zeros(numel(traj),2);
+    for i = 1:numel(traj)
+        pts(i,:) = [traj{i}.x, traj{i}.y];
+    end
+    % pairwise distances N x M
+    D = sqrt((pts(:,1) - obs(:,1)').^2 + (pts(:,2) - obs(:,2)').^2);
+    dmin = min(D(:));
+end
+
+function h = heading_score(traj, goal)
+    last = traj{end};
+    dir = atan2(goal(2) - last.y, goal(1) - last.x);
+    err = wrapToPi(dir - last.theta);
+    h = cos(err);
+end
+
+function sp = speed_score(v, cfg)
+    sp = (v - cfg.v_min) / max(1e-9, (cfg.v_max - cfg.v_min));
+end
+
+function ok = admissible(v, clear, cfg)
+    dstop = (max(0,v)^2) / max(1e-9, 2*cfg.a_brake);
+    ok = clear &gt; (dstop + cfg.robot_radius);
+end
+
+function y = normalize(x)
+    lo = min(x); hi = max(x);
+    if abs(hi - lo) &lt; 1e-12
+        y = zeros(size(x));
+    else
+        y = (x - lo) ./ (hi - lo);
+    end
+end
+
+function a = wrapToPi(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+
+% -------------------------------------------------------------------------
+% Simulink: Build a minimal DWA closed-loop model programmatically
+% -------------------------------------------------------------------------
+function Chapter15_Lesson3_build_simulink()
+    mdl = 'Chapter15_Lesson3_DWA_Simulink';
+    if bdIsLoaded(mdl); close_system(mdl,0); end
+    new_system(mdl); open_system(mdl);
+
+    % Blocks: Integrator for x,y,theta (unicycle), MATLAB Function for DWA,
+    % and a "To Workspace" for logging.
+    add_block('simulink/Sources/Constant', [mdl '/Goal'], 'Value','[8;6]');
+    add_block('simulink/User-Defined Functions/MATLAB Function', [mdl '/DWA_Controller']);
+    add_block('simulink/Continuous/Integrator', [mdl '/Int_x']);
+    add_block('simulink/Continuous/Integrator', [mdl '/Int_y']);
+    add_block('simulink/Continuous/Integrator', [mdl '/Int_theta']);
+
+    add_block('simulink/Sinks/To Workspace', [mdl '/x_log'], 'VariableName','x_log');
+    add_block('simulink/Sinks/To Workspace', [mdl '/y_log'], 'VariableName','y_log');
+
+    % Positioning (rough)
+    set_param([mdl '/Goal'], 'Position', [40 40 80 70]);
+    set_param([mdl '/DWA_Controller'], 'Position', [140 30 280 90]);
+    set_param([mdl '/Int_x'], 'Position', [340 20 370 50]);
+    set_param([mdl '/Int_y'], 'Position', [340 70 370 100]);
+    set_param([mdl '/Int_theta'], 'Position', [340 120 370 150]);
+    set_param([mdl '/x_log'], 'Position', [420 20 480 50]);
+    set_param([mdl '/y_log'], 'Position', [420 70 480 100]);
+
+    % Fill MATLAB Function code (simplified DWA: outputs v,w based on x,y,theta)
+    mf = Simulink.findBlocks(mdl, 'BlockType', 'MATLABFunction');
+    mf = mf{1};
+    code = [
+        "function [v,w] = f(goal,x,y,theta)" newline ...
+        "%#codegen" newline ...
+        "% Minimal placeholder: replace with full dwa_control logic if desired." newline ...
+        "dx = goal(1) - x; dy = goal(2) - y;" newline ...
+        "dir = atan2(dy,dx);" newline ...
+        "err = atan2(sin(dir-theta), cos(dir-theta));" newline ...
+        "v = min(0.8, sqrt(dx^2+dy^2));" newline ...
+        "w = max(-1.0, min(1.0, 2.0*err));" newline ...
+        "end" newline
+    ];
+    set_param([mdl '/DWA_Controller'], 'Script', code);
+
+    % Wiring: Goal to controller, controller to dynamics, states back
+    add_line(mdl, 'Goal/1', 'DWA_Controller/1');
+    add_line(mdl, 'Int_x/1', 'DWA_Controller/2');
+    add_line(mdl, 'Int_y/1', 'DWA_Controller/3');
+    add_line(mdl, 'Int_theta/1', 'DWA_Controller/4');
+
+    % Unicycle dynamics: xdot=v*cos(theta), ydot=v*sin(theta), thetadot=w
+    % Use Gain blocks and Trigonometric function blocks for a complete model
+    % (omitted for brevity). Students can complete this as an exercise.
+
+    save_system(mdl);
+    fprintf('Built Simulink model: %s\n', mdl);
+end
+      </code></pre>
+
+      <h3>7.5 Wolfram Mathematica Implementation</h3>
+      <p><strong>Code: Chapter15_Lesson3.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter15_Lesson3.nb
+   Dynamic Window Approach (DWA) — Wolfram Language reference notebook content.
+   Open this file in Mathematica.
+*)
+
+ClearAll[&quot;Global`*&quot;];
+
+(* Configuration *)
+cfg = &lt;|
+  &quot;vMin&quot; -&gt; -0.2, &quot;vMax&quot; -&gt; 1.0,
+  &quot;wMin&quot; -&gt; -1.5, &quot;wMax&quot; -&gt; 1.5,
+  &quot;aMax&quot; -&gt; 0.8, &quot;aBrake&quot; -&gt; 1.0, &quot;alphaMax&quot; -&gt; 2.0,
+  &quot;dt&quot; -&gt; 0.1, &quot;T&quot; -&gt; 2.0,
+  &quot;vRes&quot; -&gt; 0.05, &quot;wRes&quot; -&gt; 0.1,
+  &quot;rRobot&quot; -&gt; 0.3,
+  &quot;wHeading&quot; -&gt; 0.4, &quot;wClear&quot; -&gt; 0.4, &quot;wSpeed&quot; -&gt; 0.2
+|&gt;;
+
+wrapToPi[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+motionStep[s_, v_, w_, dt_] := Module[{x, y, th},
+  {x, y, th} = s[[{1, 2, 3}]];
+  {x + v Cos[th] dt, y + v Sin[th] dt, wrapToPi[th + w dt], v, w}
+];
+
+dynamicWindow[s_, cfg_] := Module[{v, w, dt, aBrake, aMax, alphaMax,
+   vL, vU, wL, wU},
+  {v, w} = s[[{4, 5}]];
+  dt = cfg[&quot;dt&quot;]; aBrake = cfg[&quot;aBrake&quot;]; aMax = cfg[&quot;aMax&quot;]; alphaMax = cfg[&quot;alphaMax&quot;];
+  vL = Max[cfg[&quot;vMin&quot;], v - aBrake dt];
+  vU = Min[cfg[&quot;vMax&quot;], v + aMax dt];
+  wL = Max[cfg[&quot;wMin&quot;], w - alphaMax dt];
+  wU = Min[cfg[&quot;wMax&quot;], w + alphaMax dt];
+  {vL, vU, wL, wU}
+];
+
+rollout[s0_, v_, w_, cfg_] := Module[{n, dt, s = s0},
+  n = Floor[cfg[&quot;T&quot;]/cfg[&quot;dt&quot;]];
+  dt = cfg[&quot;dt&quot;];
+  NestList[motionStep[#, v, w, dt] &amp;, s, n]
+];
+
+minClearance[traj_, obs_] := Module[{pts},
+  pts = traj[[All, {1, 2}]];
+  Min[Flatten[EuclideanDistance @@@ Tuples[{pts, obs}]]]
+];
+
+headingScore[traj_, goal_] := Module[{last, dir, err},
+  last = traj[[-1]];
+  dir = ArcTan @@ Reverse[(goal - last[[{1, 2}]])];
+  err = wrapToPi[dir - last[[3]]];
+  Cos[err]
+];
+
+speedScore[v_, cfg_] := (v - cfg[&quot;vMin&quot;]) / Max[10^-9, (cfg[&quot;vMax&quot;] - cfg[&quot;vMin&quot;])];
+
+admissibleQ[v_, clear_, cfg_] := Module[{dStop},
+  dStop = (Max[0, v]^2) / Max[10^-9, 2 cfg[&quot;aBrake&quot;]];
+  clear &gt; (dStop + cfg[&quot;rRobot&quot;])
+];
+
+normalize[list_] := Module[{lo = Min[list], hi = Max[list]},
+  If[Abs[hi - lo] &lt; 10^-12, ConstantArray[0., Length[list]], (list - lo)/(hi - lo)]
+];
+
+dwaControl[s_, goal_, obs_, cfg_] := Module[
+  {vL, vU, wL, wU, vs, ws, cand = {}, traj, clear, h, sp, hs, cs, ss, J, best},
+  {vL, vU, wL, wU} = dynamicWindow[s, cfg];
+  vs = Range[vL, vU, cfg[&quot;vRes&quot;]];
+  ws = Range[wL, wU, cfg[&quot;wRes&quot;]];
+
+  Do[
+    traj = rollout[s, v, w, cfg];
+    clear = minClearance[traj, obs] - cfg[&quot;rRobot&quot;];
+    If[admissibleQ[v, clear, cfg],
+      h = headingScore[traj, goal];
+      sp = speedScore[v, cfg];
+      AppendTo[cand, &lt;|&quot;h&quot; -&gt; h, &quot;c&quot; -&gt; clear, &quot;s&quot; -&gt; sp, &quot;v&quot; -&gt; v, &quot;w&quot; -&gt; w, &quot;traj&quot; -&gt; traj|&gt;]
+    ],
+    {v, vs}, {w, ws}
+  ];
+
+  If[cand === {}, Return[{0., 0., {s} }]];
+
+  hs = normalize[cand[[All, &quot;h&quot;]]];
+  cs = normalize[cand[[All, &quot;c&quot;]]];
+  ss = normalize[cand[[All, &quot;s&quot;]]];
+
+  J = cfg[&quot;wHeading&quot;] hs + cfg[&quot;wClear&quot;] cs + cfg[&quot;wSpeed&quot;] ss;
+  best = Ordering[J, -1][[1]];
+  {cand[[best, &quot;v&quot;]], cand[[best, &quot;w&quot;]], cand[[best, &quot;traj&quot;]]}
+];
+
+(* Demo *)
+s = {0., 0., 0., 0., 0.};
+goal = {8., 6.};
+
+obs1 = Transpose[{Subdivide[2., 7., 14], ConstantArray[3., 15]}];
+obs2 = Transpose[{ConstantArray[4., 12], Subdivide[1., 5., 11]}];
+obs = Join[obs1, obs2];
+
+path = {s[[{1, 2}]]};
+Do[
+  {v, w, traj} = dwaControl[s, goal, obs, cfg];
+  s = motionStep[s, v, w, cfg[&quot;dt&quot;]];
+  path = Append[path, s[[{1, 2}]]];
+  If[Norm[s[[{1, 2}]] - goal] &lt; 0.3, Break[]],
+  {k, 1, 600}
+];
+
+Show[
+  ListLinePlot[path, PlotRange -&gt; All, AspectRatio -&gt; 1],
+  ListPlot[obs, PlotStyle -&gt; PointSize[0.012]],
+  ListPlot[{goal}, PlotMarkers -&gt; {&quot;\[Star]&quot;, 16}]
+]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Dynamic Window Derivation):</strong>
+        Starting from kinematic limits
+        <strong> \( v \in [v_{\min}, v_{\max}] \):</strong>,
+        <strong> \( \omega \in [\omega_{\min}, \omega_{\max}] \):</strong>
+        and acceleration bounds
+        <strong> \( \dot v \in [-a_{\text{brake} }, a_{\max}] \):</strong>,
+        <strong> \( \dot\omega \in [-\alpha_{\max}, \alpha_{\max}] \):</strong>,
+        derive the window bounds
+        <strong>
+          \( v_{\text{low} }, v_{\text{high} }, \omega_{\text{low} },
+          \omega_{\text{high} } \):</strong
+        >
+        used by DWA for one control period <strong> \( \Delta t \):</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Over a short interval <strong> \( \Delta t \):</strong>, acceleration
+        feasibility implies
+        <strong>
+          \( v \in [v_t - a_{\text{brake} }\Delta t,\ v_t + a_{\max}\Delta t]
+          \):</strong
+        >
+        and
+        <strong>
+          \( \omega \in [\omega_t - \alpha_{\max}\Delta t,\ \omega_t +
+          \alpha_{\max}\Delta t] \):</strong
+        >. Intersecting with kinematic bounds yields:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} v_{\text{low} } &= \max\!\left(v_{\min},\, v_t -
+        a_{\text{brake} }\Delta t\right),\quad v_{\text{high} } =
+        \min\!\left(v_{\max},\, v_t + a_{\max}\Delta t\right),\\
+        \omega_{\text{low} } &= \max\!\left(\omega_{\min},\, \omega_t -
+        \alpha_{\max}\Delta t\right),\quad \omega_{\text{high} } =
+        \min\!\left(\omega_{\max},\, \omega_t + \alpha_{\max}\Delta t\right).
+        \end{aligned} \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Stop-Safety Inequality):</strong>
+        Assume the robot can brake with constant deceleration magnitude
+        <strong> \( a_{\text{brake} } \):</strong>. Derive the stopping distance
+        <strong> \( d_{\text{stop} }(v) \):</strong> from initial forward speed
+        <strong> \( v \ge 0 \):</strong> and state the admissibility condition
+        using the minimum clearance <strong> \( d_{\min}(\tau) \):</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        With constant deceleration, kinematics give
+        <strong> \( v^2 = 2a_{\text{brake} }d \):</strong>. Solving for
+        distance:
+      </p>
+
+      <h4 class="mathJax">
+        \[ d_{\text{stop} }(v) = \frac{v^2}{2a_{\text{brake} } }. \]
+      </h4>
+
+      <p>
+        If clearance along the rollout is
+        <strong> \( d_{\min}(\tau) \):</strong> measured from the robot
+        boundary, the stop-safe condition is:
+        <strong>
+          \( d_{\min}(\tau) &gt; d_{\text{stop} }(v) + r_{\text{robot} }
+          \):</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Rollout Discretization Error):</strong>
+        Consider forward Euler simulation of the unicycle model with step
+        <strong> \( \Delta t \):</strong>. Give a bound on the one-step local
+        truncation error order and explain qualitatively how this affects DWA
+        performance.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Forward Euler has local truncation error
+        <strong> \( \mathcal{O}(\Delta t^2) \):</strong> and global error
+        <strong> \( \mathcal{O}(\Delta t) \):</strong> over a fixed horizon. If
+        <strong> \( \Delta t \):</strong> is too large, the simulated trajectory
+        deviates from the true executed motion, which can violate clearance
+        predictions and destabilize scoring. Practical DWA uses small
+        <strong> \( \Delta t \):</strong> consistent with the controller update
+        rate and includes conservative safety margins.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Candidate Set Complexity):</strong>
+        Suppose the dynamic window spans <strong> \( \Delta v \):</strong> in
+        linear velocity and <strong> \( \Delta\omega \):</strong> in yaw rate,
+        and you sample with steps <strong> \( \delta v \):</strong> and
+        <strong> \( \delta\omega \):</strong>. With rollout length
+        <strong> \( N = T/\Delta t \):</strong>, give the asymptotic time
+        complexity per control cycle.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        The number of candidates is approximately
+        <strong> \( n_v \approx \Delta v/\delta v \):</strong> and
+        <strong> \( n_\omega \approx \Delta\omega/\delta\omega \):</strong>.
+        Each candidate rollout costs <strong> \( \mathcal{O}(N) \):</strong> for
+        state propagation plus obstacle checks. Therefore total cost is
+        <strong> \( \mathcal{O}(n_v n_\omega N) \):</strong>, plus the per-step
+        distance-query cost (often optimized via distance fields or spatial
+        indices).
+      </p>
+
+      <p>
+        <strong
+          >Problem 5 (Weight Tuning as a Constrained Optimization):</strong
+        >
+        Consider the normalized score
+        <strong>
+          \( J = w_h\widehat{H} + w_c\widehat{C} + w_v\widehat{V} \):</strong
+        >
+        with <strong> \( w_h,w_c,w_v \ge 0 \):</strong> and
+        <strong> \( w_h+w_c+w_v = 1 \):</strong>. Show that maximizing
+        <strong> \( J \):</strong> over weights for a fixed candidate is
+        achieved by placing all weight on the largest normalized component, and
+        explain why this is undesirable in practice.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        For a fixed candidate,
+        <strong> \( \widehat{H},\widehat{C},\widehat{V} \):</strong> are
+        constants in <strong> \( [0,1] \):</strong>. Over the simplex,
+        <strong> \( J \):</strong> is linear in the weights, so its maximum
+        occurs at an extreme point:
+        <strong> \( (w_h,w_c,w_v) \in \{(1,0,0),(0,1,0),(0,0,1)\} \):</strong>.
+        Hence all weight goes to whichever component is largest. In practice,
+        this is undesirable because it makes behavior brittle: a tiny change in
+        normalization can flip the chosen extreme, causing oscillations (e.g.,
+        switching between “go fast” and “stay safe”). Therefore DWA fixes
+        weights (or adapts them smoothly) to balance objectives robustly.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formulated DWA as a real-time velocity selection method that (i)
+        constructs a dynamically feasible search region in
+        <strong> \( (v,\omega) \):</strong> space, (ii) forward-simulates
+        short-horizon trajectories under a mobile kinematic model, (iii)
+        enforces a stop-safety admissibility constraint, and (iv) chooses
+        commands by multi-objective scoring with normalization. This sets the
+        foundation for more advanced local planners such as TEB in the next
+        lesson.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Fox, D., Burgard, W., &amp; Thrun, S. (1997). The Dynamic Window
+        Approach to Collision Avoidance.
+        <em>IEEE Robotics &amp; Automation Magazine</em>, 4(1), 23–33.
+      </li>
+      <li>
+        Brock, O., &amp; Khatib, O. (1999). High-speed navigation using the
+        global dynamic window approach.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 341–346.
+      </li>
+      <li>
+        Quinlan, S., &amp; Khatib, O. (1993). Elastic bands: connecting path
+        planning and control.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 802–807.
+      </li>
+      <li>
+        Ziegler, J., et al. (2014). Making Bertha Drive—An Autonomous Journey on
+        a Historic Route.
+        <em>IEEE Intelligent Transportation Systems Magazine</em>, 6(2), 8–20.
+      </li>
+      <li>
+        LaValle, S.M. (2006). Planning Algorithms (local planning and reactive
+        methods chapters).
+        <em>Cambridge University Press</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter15/Lesson2.html">
+          Lesson 2: Stanley Controller for Ground Vehicles
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson4.html">
+          Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="active-lesson" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

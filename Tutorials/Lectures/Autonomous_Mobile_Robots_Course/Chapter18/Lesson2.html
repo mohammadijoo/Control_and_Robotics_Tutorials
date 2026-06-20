@@ -1,0 +1,2539 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 18: Outdoor and Field AMR - Lesson 2: Traversability and Terrain Classification | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 18: Outdoor and Field AMR</h1>
+    <h3>
+      <strong>Lesson 2: Traversability and Terrain Classification</strong>
+    </h3>
+    <p>
+      Outdoor autonomy forces the robot to reason about
+      <em>more than geometry</em>: grass may be passable, loose gravel may
+      reduce traction, mud may cause wheel sinkage, and negative obstacles
+      (ditches) are catastrophic despite appearing “flat” from some viewpoints.
+      This lesson builds a principled pipeline for estimating a
+      <strong>terrain class</strong> and a
+      <strong>traversability probability</strong> per map cell, using both
+      exteroception (LiDAR/stereo/radar) and proprioception (IMU/odometry slip
+      cues), and then converting these estimates into a planner-friendly cost
+      layer.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In indoor AMR, “traversable” often reduces to collision-free 2D
+        occupancy. Outdoors, <strong>terrain mechanics</strong> enters: a cell
+        can be collision-free but unsafe due to high slope, large roughness, low
+        friction, sinkage, or vegetation compliance. We therefore estimate:
+      </p>
+
+      <ul>
+        <li>
+          <strong>\( y_{ij} \):</strong> a discrete terrain label for cell
+          <strong>\( (i,j) \)</strong>
+          (e.g., asphalt, gravel, grass, mud, rock, water/ditch).
+        </li>
+        <li>
+          <strong>\( p_{ij} \):</strong> a probability of safe traversal
+          <strong>\( p_{ij} = \Pr(\text{safe} \mid \mathcal{D}_{ij}) \)</strong
+          >, conditioned on local data <strong>\( \mathcal{D}_{ij} \)</strong>.
+        </li>
+        <li>
+          <strong>\( c_{ij} \):</strong> a planning cost (used in costmaps /
+          local scoring), derived from <strong>\( p_{ij} \)</strong>.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S1["Sensors: LiDAR / Stereo / Radar"] --> P1["Preprocess: filtering, time sync"]
+  S2["Proprioception: IMU / Odometry"] --> P1
+  P1 --> M1["2.5D map: height mean + variance per cell"]
+  M1 --> F1["Features: slope, roughness, step, texture, reflectance"]
+  F1 --> C1["Terrain class posterior per cell"]
+  F1 --> T1["Traversability probability per cell"]
+  C1 --> FUS["Fuse: expected cost by class"]
+  T1 --> FUS
+  FUS --> CM["Cost layer: c_ij for planner"]
+  CM --> NAV["Planner: choose path + speed, replan on updates"]
+        </pre>
+      </div>
+
+      <p>
+        The core modeling choice is whether traversability is
+        <em>rule-based</em> (thresholds on slope/roughness),
+        <em>probabilistic</em> (uncertainty-aware constraints), or
+        <em>learned</em> (a classifier/regressor trained from data). In
+        practice, outdoor stacks often combine them: geometric rules handle
+        safety-critical limits, while learning handles semantic surface types
+        and traction.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Grid Terrain Representations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Grid Terrain Representations: Elevation and Uncertainty</h2>
+    <div class="down-content">
+      <p>
+        We assume a 2.5D elevation map (introduced earlier in Chapter 9), where
+        each grid cell stores a height estimate
+        <strong>\( \mu_{ij} \)</strong> and an uncertainty (variance)
+        <strong>\( \sigma_{ij}^2 \)</strong>. For a cell-centered coordinate
+        <strong>\( \mathbf{s}_{ij} = (x_{ij}, y_{ij}) \)</strong>, the map
+        represents the surface as <strong>\( z \approx h(x,y) \)</strong>.
+      </p>
+
+      <p>
+        If a range sensor provides a height measurement
+        <strong>\( z_k \)</strong> for the same cell with measurement noise
+        variance <strong>\( \sigma_z^2 \)</strong>, a simple Bayesian
+        (Kalman-style) fusion update is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ K_{ij} \leftarrow \frac{\sigma_{ij}^2}{\sigma_{ij}^2 +
+        \sigma_z^2},\quad \mu_{ij} \leftarrow \mu_{ij} + K_{ij}(z_k -
+        \mu_{ij}),\quad \sigma_{ij}^2 \leftarrow (1-K_{ij})\sigma_{ij}^2 \]
+      </h4>
+
+      <p>
+        This update is optimal (minimum-variance unbiased) under linear-Gaussian
+        assumptions. Even when the surface is not strictly planar, the variance
+        is useful as a <em>confidence indicator</em> for downstream
+        classification: low-confidence cells should be treated cautiously.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Geometric Traversability Metrics from Elevation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Geometric Traversability Metrics</h2>
+    <div class="down-content">
+      <p>
+        Traversability is often first approximated using local geometry computed
+        from the elevation map. Let a local neighborhood around cell
+        <strong>\( (i,j) \)</strong> contain points
+        <strong>\( \{(x_n,y_n,z_n)\}_{n=1}^m \)</strong>. We fit a plane
+        <strong>\( z = a x + b y + c \)</strong> via least squares.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{z} = \begin{bmatrix} z_1 \\ \vdots \\ z_m \end{bmatrix},\quad
+        \mathbf{A} = \begin{bmatrix} x_1 & y_1 & 1 \\ \vdots & \vdots & \vdots
+        \\ x_m & y_m & 1 \end{bmatrix},\quad \hat{\boldsymbol{\theta} } =
+        \begin{bmatrix} \hat a \\ \hat b \\ \hat c \end{bmatrix} =
+        (\mathbf{A}^\top \mathbf{A})^{-1}\mathbf{A}^\top \mathbf{z} \]
+      </h4>
+
+      <p>
+        The (local) slope angle is then
+        <strong> \( \alpha_{ij} \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \alpha_{ij} = \arctan\!\left(\sqrt{\hat a^2 + \hat b^2}\right) \]
+      </h4>
+
+      <p>
+        Roughness can be defined as the RMS of residuals to the fitted plane:
+        <strong> \( \rho_{ij} \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \rho_{ij} = \sqrt{\frac{1}{m}\sum_{n=1}^m \left(z_n - (\hat a x_n +
+        \hat b y_n + \hat c)\right)^2} \]
+      </h4>
+
+      <p>
+        Step height (to capture curbs/rocks) can be approximated on the height
+        patch:
+        <strong> \( \delta_{ij} \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \delta_{ij} = \max_{n \in \mathcal{N}_{ij} } z_n - \min_{n \in
+        \mathcal{N}_{ij} } z_n \]
+      </h4>
+
+      <p>
+        <strong>Uncertainty propagation (key result).</strong>
+        Assume the measurement model
+        <strong
+          >\( \mathbf{z} = \mathbf{A}\boldsymbol{\theta} +
+          \boldsymbol{\varepsilon} \)</strong
+        >
+        with
+        <strong
+          >\( \boldsymbol{\varepsilon}\sim\mathcal{N}(\mathbf{0},
+          \sigma^2\mathbf{I}) \)</strong
+        >. Then the LS estimator covariance is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \operatorname{Cov}(\hat{\boldsymbol{\theta} }) =
+        \sigma^2(\mathbf{A}^\top \mathbf{A})^{-1} \]
+      </h4>
+
+      <p>
+        This provides confidence intervals for slope (via the delta method),
+        enabling risk-aware decisions such as “avoid if
+        <strong>\( \Pr(\alpha_{ij} &gt; \alpha_{\max}) \)</strong> is large”.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Terrain Classification as Probabilistic Inference -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Terrain Classification</h2>
+    <div class="down-content">
+      <p>
+        Let
+        <strong>\( \boldsymbol{\phi}_{ij} \in \mathbb{R}^d \)</strong> denote a
+        feature vector for cell <strong>\( (i,j) \)</strong>, e.g.,
+        <strong
+          >\( \boldsymbol{\phi}_{ij} = [\alpha_{ij}, \rho_{ij}, \delta_{ij},
+          r_{ij}, t_{ij}, \dots]^\top \)</strong
+        >, where <strong>\( r_{ij} \)</strong> might be LiDAR intensity
+        statistics and <strong>\( t_{ij} \)</strong> image texture cues. A
+        multiclass softmax model estimates
+        <strong>\( \Pr(y_{ij}=c \mid \boldsymbol{\phi}_{ij}) \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Pr(y_{ij}=c \mid \boldsymbol{\phi}_{ij}) =
+        \frac{\exp(\mathbf{w}_c^\top
+        \boldsymbol{\phi}_{ij})}{\sum_{c'=1}^{C}\exp(\mathbf{w}_{c'}^\top
+        \boldsymbol{\phi}_{ij})} \]
+      </h4>
+
+      <p>
+        To stabilize classifications over time, apply a Bayes filter per cell.
+        With measurement <strong>\( z_t \)</strong> (features at time
+        <strong>\( t \)</strong>) and prior belief
+        <strong>\( b_{t-1}(c) \)</strong>, the posterior is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ b_t(c) \propto p(z_t \mid c)\, b_{t-1}(c),\quad \sum_{c=1}^{C} b_t(c)
+        = 1 \]
+      </h4>
+
+      <p>
+        For numerical stability, maintain log-beliefs:
+        <strong> \( \ell_t(c) \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \ell_t(c) = \ell_{t-1}(c) + \log p(z_t \mid c) - \log Z_t,\quad Z_t =
+        \sum_{c=1}^{C} p(z_t \mid c)\exp(\ell_{t-1}(c)) \]
+      </h4>
+
+      <p>
+        The output of classification is not merely a label, but a
+        <em>distribution</em> that can be consumed by planners via expected
+        cost, worst-case risk, or CVaR-style objectives.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: From Traversability Probability to Planning Cost -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      5. Traversability as Risk: Probability, Constraints, and Cost Layers
+    </h2>
+    <div class="down-content">
+      <p>
+        A practical definition is:
+        <strong
+          >\( p_{ij} = \Pr(\text{safe} \mid \boldsymbol{\phi}_{ij}) \)</strong
+        >. A common parametric model is logistic regression:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p_{ij} = \sigma(s_{ij}),\quad s_{ij} = b + \mathbf{w}^\top
+        \boldsymbol{\phi}_{ij},\quad \sigma(u)=\frac{1}{1+\exp(-u)} \]
+      </h4>
+
+      <p>
+        Safety constraints can also be imposed explicitly. If a feature
+        <strong>\( x \)</strong> is modeled as Gaussian
+        <strong>\( x \sim \mathcal{N}(\mu, \sigma^2) \)</strong>, then:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Pr(x \le \tau) = \Phi\!\left(\frac{\tau-\mu}{\sigma}\right),\quad
+        \Pr(x &gt; \tau) = 1-\Phi\!\left(\frac{\tau-\mu}{\sigma}\right) \]
+      </h4>
+
+      <p>
+        A planner rarely consumes probabilities directly; it consumes costs. A
+        standard conversion is the negative log:
+        <strong> \( c_{ij} \):</strong>
+      </p>
+
+      <h4 class="mathJax">\[ c_{ij} = -\log(p_{ij}+\varepsilon) \]</h4>
+
+      <p>
+        This is powerful because independent safety factors become additive. If
+        <strong>\( p_{ij} = \prod_{k=1}^{K} p_{ij}^{(k)} \)</strong>, then
+        <strong>\( -\log p_{ij} = \sum_k -\log p_{ij}^{(k)} \)</strong>, giving
+        a clean decomposition across slope/roughness/traction terms.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Proprioceptive Cues (Slip) and Self-Supervision -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Proprioceptive Cues: Slip and Self-Supervised Labels</h2>
+    <div class="down-content">
+      <p>
+        Exteroception captures geometry and appearance; proprioception captures
+        <em>interaction</em>. For wheeled robots, slip ratio is a common
+        indicator:
+        <strong> \( \kappa \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \kappa = \frac{\omega R - v}{\max(|v|, \epsilon_v)} \]
+      </h4>
+
+      <p>
+        where <strong>\( \omega \)</strong> is wheel angular speed,
+        <strong>\( R \)</strong> wheel radius, and
+        <strong>\( v \)</strong> forward speed estimated from state estimation
+        (IMU+odometry+GPS). Persistent <strong>\( |\kappa| \)</strong> indicates
+        low traction or sinkage.
+      </p>
+
+      <p>
+        A practical self-supervised scheme is: (i) predict terrain class from
+        camera/LiDAR features, (ii) use measured slip as a weak label for “low
+        traction” vs “high traction”, (iii) update the classifier online (with
+        safeguards to avoid drift). This closes the loop between perception and
+        locomotion without requiring manual labeling for every environment.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Online Decision: Choose Path and Speed Under Risk -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Online Decision: Risk-Aware Path and Speed Selection</h2>
+    <div class="down-content">
+      <p>
+        Outdoor navigation often benefits from coupling traversability with
+        speed control. A simple rule is to bound speed by expected slip and
+        terrain roughness:
+        <strong>\( v_{\max}(\mathbf{s}) \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ v_{\max}(\mathbf{s}_{ij}) = \min\!\left(v_{\text{robot} },
+        \frac{a_{\text{lat,max} } }{\max(\tan(\alpha_{ij}), \epsilon)} \right)
+        \]
+      </h4>
+
+      <p>
+        where <strong>\( a_{\text{lat,max} } \)</strong> is a lateral
+        acceleration limit (stability/rollover margin) and
+        <strong>\( \alpha_{ij} \)</strong> slope. This is a simplified
+        heuristic; advanced models also incorporate friction and curvature.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["New sensor data"] --> B["Update elevation + features"]
+  B --> C["Update class posterior + p_trav"]
+  C --> D["Convert to cost + risk masks"]
+  D --> E["Planner evaluates candidates"]
+  E --> F["Choose path + speed"]
+  F --> G["Execute; measure slip + failures"]
+  G --> H["Optional: adjust model weights"]
+  H --> A
+        </pre>
+      </div>
+
+      <p>
+        Note the feedback loop: when execution reveals unexpected slip or
+        sinkage, the traversability model should become more conservative in
+        similar cells (within reasonable bounds to avoid instability).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Implementations (Python / C++ / Java / MATLAB / Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following reference implementations build a simple height map,
+        compute geometric features (slope/roughness/step), and produce a
+        traversability probability map. They are intentionally minimal to
+        emphasize the math and data flow.
+      </p>
+
+      <p><strong>Chapter18_Lesson2.py</strong></p>
+      <pre><code class="language-python">
+# Chapter18_Lesson2.py
+# Traversability + terrain classification (toy implementation)
+#
+# This script demonstrates:
+#   1) 2.5D elevation mapping (mean height per cell)
+#   2) geometric features: slope, roughness, step height
+#   3) a simple probabilistic traversability score via logistic model
+#
+# Output: a CSV map with per-cell features and p_trav.
+#
+# Notes:
+# - In real robots, you would feed point clouds from LiDAR/stereo via ROS2
+#   (e.g., sensor_msgs/PointCloud2) and publish the cost layer to Nav2.
+# - Here we keep it self-contained, no ROS dependency.
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+from dataclasses import dataclass
+from typing import Tuple
+
+import numpy as np
+
+
+@dataclass
+class GridSpec:
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    resolution: float
+
+    @property
+    def shape(self) -&gt; Tuple[int, int]:
+        nx = int(math.ceil((self.x_max - self.x_min) / self.resolution))
+        ny = int(math.ceil((self.y_max - self.y_min) / self.resolution))
+        return ny, nx  # (rows, cols)
+
+    def world_to_cell(self, x: np.ndarray, y: np.ndarray) -&gt; Tuple[np.ndarray, np.ndarray]:
+        ix = np.floor((x - self.x_min) / self.resolution).astype(int)
+        iy = np.floor((y - self.y_min) / self.resolution).astype(int)
+        return iy, ix
+
+    def cell_center(self, iy: int, ix: int) -&gt; Tuple[float, float]:
+        xc = self.x_min + (ix + 0.5) * self.resolution
+        yc = self.y_min + (iy + 0.5) * self.resolution
+        return xc, yc
+
+
+def sigmoid(s: np.ndarray) -&gt; np.ndarray:
+    return 1.0 / (1.0 + np.exp(-s))
+
+
+def synthetic_point_cloud(n: int = 200_000, seed: int = 0) -&gt; np.ndarray:
+    """
+    Create a synthetic outdoor surface: slope + bumps + ditch.
+    Returns Nx3 array [x,y,z].
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-10.0, 10.0, size=n)
+    y = rng.uniform(-10.0, 10.0, size=n)
+
+    # base plane (gentle slope)
+    z = 0.05 * x + 0.02 * y
+
+    # add bumps (rocks)
+    bumps = [(-3.0, 2.0, 0.35, 1.2), (4.0, -1.5, 0.25, 0.9), (1.0, 5.0, 0.30, 1.0)]
+    for cx, cy, amp, sig in bumps:
+        z += amp * np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2.0 * sig**2))
+
+    # add ditch (negative obstacle)
+    ditch = (x &gt; -2.0) &amp; (x &lt; 2.0) &amp; (y &gt; -6.0) &amp; (y &lt; -3.0)
+    z[ditch] -= 0.6
+
+    # sensor noise
+    z += rng.normal(0.0, 0.02, size=n)
+
+    return np.c_[x, y, z]
+
+
+def points_to_height_map(points_xyz: np.ndarray, grid: GridSpec) -&gt; Tuple[np.ndarray, np.ndarray]:
+    """
+    Mean height per cell (NaN for empty). Also returns count per cell.
+    """
+    ny, nx = grid.shape
+    H_sum = np.zeros((ny, nx), dtype=float)
+    C = np.zeros((ny, nx), dtype=int)
+
+    x, y, z = points_xyz[:, 0], points_xyz[:, 1], points_xyz[:, 2]
+    iy, ix = grid.world_to_cell(x, y)
+
+    valid = (ix &gt;= 0) &amp; (ix &lt; nx) &amp; (iy &gt;= 0) &amp; (iy &lt; ny)
+    iy = iy[valid]
+    ix = ix[valid]
+    z = z[valid]
+
+    # accumulate
+    np.add.at(H_sum, (iy, ix), z)
+    np.add.at(C, (iy, ix), 1)
+
+    H = np.full((ny, nx), np.nan, dtype=float)
+    mask = C &gt; 0
+    H[mask] = H_sum[mask] / C[mask]
+    return H, C
+
+
+def fill_nan_nearest(H: np.ndarray, max_iters: int = 6) -&gt; np.ndarray:
+    """
+    Simple hole filling: iteratively replace NaNs by mean of 8-neighbors.
+    """
+    out = H.copy()
+    ny, nx = out.shape
+    for _ in range(max_iters):
+        nan_mask = np.isnan(out)
+        if not nan_mask.any():
+            break
+        out_new = out.copy()
+        for iy in range(ny):
+            for ix in range(nx):
+                if not nan_mask[iy, ix]:
+                    continue
+                y0, y1 = max(0, iy - 1), min(ny - 1, iy + 1)
+                x0, x1 = max(0, ix - 1), min(nx - 1, ix + 1)
+                patch = out[y0 : y1 + 1, x0 : x1 + 1]
+                vals = patch[~np.isnan(patch)]
+                if vals.size &gt; 0:
+                    out_new[iy, ix] = float(vals.mean())
+        out = out_new
+    return out
+
+
+def local_features(H: np.ndarray, grid: GridSpec) -&gt; Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute:
+      slope_rad: atan(norm(grad h))
+      rough: local std of heights in 3x3
+      step: local max-min in 3x3
+    """
+    Hf = fill_nan_nearest(H, max_iters=6)
+
+    # gradient (central differences)
+    # numpy.gradient returns [d/dy, d/dx]
+    dhdy, dhdx = np.gradient(Hf, grid.resolution, grid.resolution)
+    slope_rad = np.arctan(np.sqrt(dhdx**2 + dhdy**2))
+
+    ny, nx = H.shape
+    rough = np.zeros((ny, nx), dtype=float)
+    step = np.zeros((ny, nx), dtype=float)
+
+    for iy in range(ny):
+        for ix in range(nx):
+            y0, y1 = max(0, iy - 1), min(ny - 1, iy + 1)
+            x0, x1 = max(0, ix - 1), min(nx - 1, ix + 1)
+            patch = Hf[y0 : y1 + 1, x0 : x1 + 1]
+            rough[iy, ix] = float(np.std(patch))
+            step[iy, ix] = float(np.max(patch) - np.min(patch))
+
+    return slope_rad, rough, step
+
+
+def traversability_probability(
+    slope_rad: np.ndarray,
+    rough: np.ndarray,
+    step: np.ndarray,
+    C: np.ndarray,
+) -&gt; np.ndarray:
+    """
+    Simple logistic model:
+        p = sigmoid(b + w1*slope + w2*rough + w3*step)
+    Weights are illustrative; in practice, you calibrate them to your robot
+    and terrain with a dataset (labels from human driving success or slip).
+    """
+    # illustrative weights (tune/calibrate)
+    b = 3.0
+    w1 = -6.0     # slope_rad
+    w2 = -40.0    # rough (meters)
+    w3 = -25.0    # step (meters)
+
+    s = b + w1 * slope_rad + w2 * rough + w3 * step
+    p = sigmoid(s)
+    p = np.where(C &gt; 0, p, np.nan)
+    return p
+
+
+def write_csv(out_path: str, grid: GridSpec, p: np.ndarray, slope_rad: np.ndarray, rough: np.ndarray, step: np.ndarray, C: np.ndarray) -&gt; None:
+    ny, nx = grid.shape
+    slope_deg = slope_rad * 180.0 / np.pi
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("x,y,p_trav,slope_deg,rough_m,step_m,count\n")
+        for iy in range(ny):
+            for ix in range(nx):
+                if C[iy, ix] == 0:
+                    continue
+                xc, yc = grid.cell_center(iy, ix)
+                f.write(
+                    f"{xc:.6f},{yc:.6f},{p[iy,ix]:.8f},{slope_deg[iy,ix]:.4f},{rough[iy,ix]:.6f},{step[iy,ix]:.6f},{C[iy,ix]}\n"
+                )
+
+
+def main() -&gt; None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--points_csv", type=str, default="", help="CSV with columns x,y,z (no header required). If empty, use synthetic data.")
+    parser.add_argument("--resolution", type=float, default=0.25)
+    parser.add_argument("--out_csv", type=str, default="traversability_map.csv")
+    args = parser.parse_args()
+
+    if args.points_csv and os.path.isfile(args.points_csv):
+        pts = np.loadtxt(args.points_csv, delimiter=",")
+        if pts.ndim == 1:
+            pts = pts.reshape(1, -1)
+        pts = pts[:, :3]
+    else:
+        pts = synthetic_point_cloud()
+
+    x_min, x_max = float(np.min(pts[:, 0])), float(np.max(pts[:, 0]))
+    y_min, y_max = float(np.min(pts[:, 1])), float(np.max(pts[:, 1]))
+
+    grid = GridSpec(x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max, resolution=args.resolution)
+
+    H, C = points_to_height_map(pts, grid)
+    slope_rad, rough, step = local_features(H, grid)
+    p = traversability_probability(slope_rad, rough, step, C)
+
+    write_csv(args.out_csv, grid, p, slope_rad, rough, step, C)
+    print(f"Exported: {args.out_csv}")
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <p><strong>Chapter18_Lesson2.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter18_Lesson2.cpp
+// Traversability + terrain classification (toy implementation, C++17)
+//
+// Build:
+//   g++ -O2 -std=c++17 Chapter18_Lesson2.cpp -o Chapter18_Lesson2
+//
+// Run:
+//   ./Chapter18_Lesson2 --points_csv points.csv --resolution 0.25 --out_csv traversability_map.csv
+//   (If --points_csv omitted, generates synthetic point cloud)
+//
+// CSV input columns: x,y,z (no header required).
+//
+// Notes:
+// - For production: integrate with ROS2 rclcpp + sensor_msgs/PointCloud2,
+//   and publish a costmap layer to Nav2.
+// - Here we keep it dependency-free (no Eigen/PCL) to focus on math/pipeline.
+
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;cstddef&gt;
+#include &lt;fstream&gt;
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;sstream&gt;
+#include &lt;string&gt;
+#include &lt;tuple&gt;
+#include &lt;vector&gt;
+
+struct GridSpec {
+  double x_min, x_max, y_min, y_max, res;
+  int nx() const { return static_cast&lt;int&gt;(std::ceil((x_max - x_min) / res)); }
+  int ny() const { return static_cast&lt;int&gt;(std::ceil((y_max - y_min) / res)); }
+};
+
+static inline double sigmoid(double s) { return 1.0 / (1.0 + std::exp(-s)); }
+
+std::vector&lt;std::array&lt;double,3&gt;&gt; synthetic_point_cloud(std::size_t n=200000, unsigned seed=0) {
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution&lt;double&gt; uni(-10.0, 10.0);
+  std::normal_distribution&lt;double&gt; noise(0.0, 0.02);
+
+  std::vector&lt;std::array&lt;double,3&gt;&gt; pts;
+  pts.reserve(n);
+
+  struct Bump { double cx, cy, amp, sig; };
+  std::vector&lt;Bump&gt; bumps = {
+    {-3.0,  2.0, 0.35, 1.2},
+    { 4.0, -1.5, 0.25, 0.9},
+    { 1.0,  5.0, 0.30, 1.0}
+  };
+
+  for (std::size_t i=0;i&lt;n;i++) {
+    double x = uni(rng);
+    double y = uni(rng);
+    double z = 0.05*x + 0.02*y;
+
+    for (const auto&amp; b : bumps) {
+      double dx = x - b.cx;
+      double dy = y - b.cy;
+      z += b.amp * std::exp(-(dx*dx + dy*dy) / (2.0*b.sig*b.sig));
+    }
+
+    bool ditch = (x &gt; -2.0 &amp;&amp; x &lt; 2.0 &amp;&amp; y &gt; -6.0 &amp;&amp; y &lt; -3.0);
+    if (ditch) z -= 0.6;
+
+    z += noise(rng);
+    pts.push_back({x,y,z});
+  }
+  return pts;
+}
+
+std::vector&lt;std::array&lt;double,3&gt;&gt; read_xyz_csv(const std::string&amp; path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("Cannot open file: " + path);
+
+  std::vector&lt;std::array&lt;double,3&gt;&gt; pts;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    std::stringstream ss(line);
+    std::string tok;
+    std::vector&lt;double&gt; cols;
+    while (std::getline(ss, tok, ',')) {
+      try {
+        cols.push_back(std::stod(tok));
+      } catch (...) {
+        cols.clear(); // allow header
+        break;
+      }
+    }
+    if (cols.size() &gt;= 3) pts.push_back({cols[0], cols[1], cols[2]});
+  }
+  if (pts.empty()) throw std::runtime_error("No valid points in: " + path);
+  return pts;
+}
+
+void points_to_height_map(
+    const std::vector&lt;std::array&lt;double,3&gt;&gt;&amp; pts,
+    const GridSpec&amp; g,
+    std::vector&lt;double&gt;&amp; H,      // mean height (NaN for empty)
+    std::vector&lt;int&gt;&amp; C          // count per cell
+) {
+  const int Nx = g.nx();
+  const int Ny = g.ny();
+  H.assign(Nx*Ny, 0.0);
+  C.assign(Nx*Ny, 0);
+
+  std::vector&lt;double&gt; Hsum(Nx*Ny, 0.0);
+
+  for (const auto&amp; p : pts) {
+    double x = p[0], y = p[1], z = p[2];
+    int ix = static_cast&lt;int&gt;(std::floor((x - g.x_min) / g.res));
+    int iy = static_cast&lt;int&gt;(std::floor((y - g.y_min) / g.res));
+    if (ix &lt; 0 || ix &gt;= Nx || iy &lt; 0 || iy &gt;= Ny) continue;
+    int k = iy*Nx + ix;
+    Hsum[k] += z;
+    C[k] += 1;
+  }
+
+  H.resize(Nx*Ny);
+  for (int k=0;k&lt;Nx*Ny;k++) {
+    if (C[k] &gt; 0) H[k] = Hsum[k] / static_cast&lt;double&gt;(C[k]);
+    else H[k] = std::numeric_limits&lt;double&gt;::quiet_NaN();
+  }
+}
+
+void fill_nan(std::vector&lt;double&gt;&amp; H, int Nx, int Ny, int iters=6) {
+  for (int it=0; it&lt;iters; it++) {
+    bool any = false;
+    std::vector&lt;double&gt; out = H;
+    for (int y=0;y&lt;Ny;y++) {
+      for (int x=0;x&lt;Nx;x++) {
+        int k = y*Nx + x;
+        if (!std::isnan(H[k])) continue;
+        any = true;
+        double s = 0.0;
+        int cnt = 0;
+        for (int yy=std::max(0,y-1); yy&lt;=std::min(Ny-1,y+1); yy++) {
+          for (int xx=std::max(0,x-1); xx&lt;=std::min(Nx-1,x+1); xx++) {
+            int kk = yy*Nx + xx;
+            if (std::isnan(H[kk])) continue;
+            s += H[kk];
+            cnt++;
+          }
+        }
+        if (cnt &gt; 0) out[k] = s / static_cast&lt;double&gt;(cnt);
+      }
+    }
+    H.swap(out);
+    if (!any) break;
+  }
+}
+
+void compute_features(
+    const std::vector&lt;double&gt;&amp; H_in,
+    const std::vector&lt;int&gt;&amp; C,
+    const GridSpec&amp; g,
+    std::vector&lt;double&gt;&amp; slope_rad,
+    std::vector&lt;double&gt;&amp; rough,
+    std::vector&lt;double&gt;&amp; step
+) {
+  const int Nx = g.nx();
+  const int Ny = g.ny();
+
+  std::vector&lt;double&gt; H = H_in;
+  fill_nan(H, Nx, Ny, 6);
+
+  slope_rad.assign(Nx*Ny, std::numeric_limits&lt;double&gt;::quiet_NaN());
+  rough.assign(Nx*Ny, std::numeric_limits&lt;double&gt;::quiet_NaN());
+  step.assign(Nx*Ny, std::numeric_limits&lt;double&gt;::quiet_NaN());
+
+  // slope via central differences (clamped boundaries)
+  for (int y=0;y&lt;Ny;y++) {
+    for (int x=0;x&lt;Nx;x++) {
+      int xm1 = std::max(0, x-1), xp1 = std::min(Nx-1, x+1);
+      int ym1 = std::max(0, y-1), yp1 = std::min(Ny-1, y+1);
+      double hx1 = H[y*Nx + xp1], hx0 = H[y*Nx + xm1];
+      double hy1 = H[yp1*Nx + x], hy0 = H[ym1*Nx + x];
+      double dhdx = (hx1 - hx0) / (2.0 * g.res);
+      double dhdy = (hy1 - hy0) / (2.0 * g.res);
+      double gn = std::sqrt(dhdx*dhdx + dhdy*dhdy);
+      slope_rad[y*Nx + x] = std::atan(gn);
+    }
+  }
+
+  // roughness (std) and step (max-min) in 3x3 patch
+  for (int y=0;y&lt;Ny;y++) {
+    for (int x=0;x&lt;Nx;x++) {
+      double s = 0.0, s2 = 0.0;
+      double mn = std::numeric_limits&lt;double&gt;::infinity();
+      double mx = -std::numeric_limits&lt;double&gt;::infinity();
+      int cnt = 0;
+      for (int yy=std::max(0,y-1); yy&lt;=std::min(Ny-1,y+1); yy++) {
+        for (int xx=std::max(0,x-1); xx&lt;=std::min(Nx-1,x+1); xx++) {
+          double v = H[yy*Nx + xx];
+          s += v; s2 += v*v;
+          mn = std::min(mn, v);
+          mx = std::max(mx, v);
+          cnt++;
+        }
+      }
+      double mu = s / static_cast&lt;double&gt;(cnt);
+      double var = std::max(0.0, s2 / static_cast&lt;double&gt;(cnt) - mu*mu);
+      rough[y*Nx + x] = std::sqrt(var);
+      step[y*Nx + x] = mx - mn;
+    }
+  }
+
+  // invalidate empty cells
+  for (int k=0;k&lt;Nx*Ny;k++) {
+    if (C[k] == 0) {
+      slope_rad[k] = std::numeric_limits&lt;double&gt;::quiet_NaN();
+      rough[k] = std::numeric_limits&lt;double&gt;::quiet_NaN();
+      step[k] = std::numeric_limits&lt;double&gt;::quiet_NaN();
+    }
+  }
+}
+
+void write_csv(
+    const std::string&amp; out_path,
+    const GridSpec&amp; g,
+    const std::vector&lt;int&gt;&amp; C,
+    const std::vector&lt;double&gt;&amp; slope,
+    const std::vector&lt;double&gt;&amp; rough,
+    const std::vector&lt;double&gt;&amp; step
+) {
+  const int Nx = g.nx();
+  const int Ny = g.ny();
+
+  // illustrative weights (calibrate for your robot)
+  const double b  = 3.0;
+  const double w1 = -6.0;   // slope_rad
+  const double w2 = -40.0;  // rough
+  const double w3 = -25.0;  // step
+
+  std::ofstream out(out_path);
+  out &lt;&lt; "x,y,p_trav,slope_deg,rough_m,step_m,count\n";
+
+  for (int iy=0; iy&lt;Ny; iy++) {
+    double yc = g.y_min + (iy + 0.5) * g.res;
+    for (int ix=0; ix&lt;Nx; ix++) {
+      int k = iy*Nx + ix;
+      if (C[k] == 0) continue;
+      double s = b + w1*slope[k] + w2*rough[k] + w3*step[k];
+      double p = sigmoid(s);
+      double slope_deg = slope[k] * 180.0 / M_PI;
+      double xc = g.x_min + (ix + 0.5) * g.res;
+      out &lt;&lt; xc &lt;&lt; "," &lt;&lt; yc &lt;&lt; "," &lt;&lt; p &lt;&lt; "," &lt;&lt; slope_deg &lt;&lt; "," &lt;&lt; rough[k] &lt;&lt; "," &lt;&lt; step[k] &lt;&lt; "," &lt;&lt; C[k] &lt;&lt; "\n";
+    }
+  }
+}
+
+int main(int argc, char** argv) {
+  std::string points_csv = "";
+  std::string out_csv = "traversability_map.csv";
+  double res = 0.25;
+
+  for (int i=1; i&lt;argc; i++) {
+    std::string a = argv[i];
+    if (a == "--points_csv" &amp;&amp; i+1&lt;argc) points_csv = argv[++i];
+    else if (a == "--out_csv" &amp;&amp; i+1&lt;argc) out_csv = argv[++i];
+    else if (a == "--resolution" &amp;&amp; i+1&lt;argc) res = std::stod(argv[++i]);
+    else if (a == "--help") {
+      std::cout &lt;&lt; "Usage: ./Chapter18_Lesson2 [--points_csv points.csv] --resolution 0.25 --out_csv traversability_map.csv\n";
+      return 0;
+    }
+  }
+
+  std::vector&lt;std::array&lt;double,3&gt;&gt; pts;
+  if (!points_csv.empty()) {
+    pts = read_xyz_csv(points_csv);
+  } else {
+    pts = synthetic_point_cloud(200000, 0);
+  }
+
+  double x_min = pts[0][0], x_max = pts[0][0];
+  double y_min = pts[0][1], y_max = pts[0][1];
+  for (const auto&amp; p : pts) {
+    x_min = std::min(x_min, p[0]); x_max = std::max(x_max, p[0]);
+    y_min = std::min(y_min, p[1]); y_max = std::max(y_max, p[1]);
+  }
+
+  GridSpec g{x_min, x_max, y_min, y_max, res};
+  const int Nx = g.nx();
+  const int Ny = g.ny();
+
+  std::vector&lt;double&gt; H;
+  std::vector&lt;int&gt; C;
+  points_to_height_map(pts, g, H, C);
+
+  std::vector&lt;double&gt; slope, rough, step;
+  compute_features(H, C, g, slope, rough, step);
+
+  write_csv(out_csv, g, C, slope, rough, step);
+
+  std::cout &lt;&lt; "Exported: " &lt;&lt; out_csv &lt;&lt; "\n";
+  std::cout &lt;&lt; "Grid: " &lt;&lt; Ny &lt;&lt; " x " &lt;&lt; Nx &lt;&lt; " (resolution=" &lt;&lt; res &lt;&lt; ")\n";
+  return 0;
+}
+      </code></pre>
+
+      <p><strong>Chapter18_Lesson2.java</strong></p>
+      <pre><code class="language-java">
+// Chapter18_Lesson2.java
+// Traversability + terrain classification (toy implementation, no external libs).
+//
+// Compile: javac Chapter18_Lesson2.java
+// Run:     java Chapter18_Lesson2 --points_csv points.csv --resolution 0.25 --out_csv traversability_map.csv
+//
+// CSV input columns: x,y,z (no header required).
+// Output CSV columns: x,y,p_trav,slope_deg,rough_m,step_m,count
+//
+// Note: In production, Java teams often integrate with ROS2 via rcljava and
+// represent maps as nav_msgs/OccupancyGrid or custom layers.
+
+import java.io.*;
+import java.util.*;
+
+public class Chapter18_Lesson2 {
+
+  static class GridSpec {
+    double xMin, xMax, yMin, yMax, res;
+    int width()  { return (int)Math.ceil((xMax - xMin) / res); }
+    int height() { return (int)Math.ceil((yMax - yMin) / res); }
+  }
+
+  static double sigmoid(double s) { return 1.0 / (1.0 + Math.exp(-s)); }
+
+  static class Points {
+    double[] x, y, z;
+    Points(double[] x, double[] y, double[] z) { this.x=x; this.y=y; this.z=z; }
+    int n() { return x.length; }
+  }
+
+  static Points readXYZ(String path) throws IOException {
+    ArrayList&lt;Double&gt; xs = new ArrayList&lt;&gt;();
+    ArrayList&lt;Double&gt; ys = new ArrayList&lt;&gt;();
+    ArrayList&lt;Double&gt; zs = new ArrayList&lt;&gt;();
+    try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+      String line;
+      while ((line = br.readLine()) != null) {
+        if (line.trim().isEmpty()) continue;
+        String[] parts = line.split(",");
+        if (parts.length &lt; 3) continue;
+        try {
+          xs.add(Double.parseDouble(parts[0].trim()));
+          ys.add(Double.parseDouble(parts[1].trim()));
+          zs.add(Double.parseDouble(parts[2].trim()));
+        } catch (NumberFormatException ex) {
+          // allow header
+        }
+      }
+    }
+    if (xs.isEmpty()) throw new IllegalArgumentException("No valid points in " + path);
+    double[] x = new double[xs.size()], y = new double[ys.size()], z = new double[zs.size()];
+    for (int i=0;i&lt;xs.size();i++) { x[i]=xs.get(i); y[i]=ys.get(i); z[i]=zs.get(i); }
+    return new Points(x,y,z);
+  }
+
+  static void pointsToHeightMap(Points p, GridSpec g, double[] H, int[] C) {
+    int Nx = g.width(), Ny = g.height();
+    Arrays.fill(H, 0.0);
+    Arrays.fill(C, 0);
+
+    for (int i=0;i&lt;p.n();i++) {
+      int ix = (int)Math.floor((p.x[i] - g.xMin) / g.res);
+      int iy = (int)Math.floor((p.y[i] - g.yMin) / g.res);
+      if (ix &lt; 0 || ix &gt;= Nx || iy &lt; 0 || iy &gt;= Ny) continue;
+      int k = iy * Nx + ix;
+      H[k] += p.z[i];
+      C[k] += 1;
+    }
+    for (int k=0;k&lt;H.length;k++) {
+      if (C[k] &gt; 0) H[k] /= (double)C[k];
+      else H[k] = Double.NaN;
+    }
+  }
+
+  static void computeFeatures(
+      double[] HIn, int[] C, GridSpec g,
+      double[] slopeRad, double[] rough, double[] step
+  ) {
+    int Nx = g.width(), Ny = g.height();
+    double[] H = Arrays.copyOf(HIn, HIn.length);
+    // fill holes
+    for (int it=0; it&lt;6; it++) {
+      boolean any = false;
+      double[] out = Arrays.copyOf(H, H.length);
+      for (int y=0;y&lt;Ny;y++) for (int x=0;x&lt;Nx;x++) {
+        int k = y*Nx + x;
+        if (!Double.isNaN(H[k])) continue;
+        any = true;
+        double s = 0.0;
+        int cnt = 0;
+        for (int yy=Math.max(0,y-1); yy&lt;=Math.min(Ny-1,y+1); yy++) {
+          for (int xx=Math.max(0,x-1); xx&lt;=Math.min(Nx-1,x+1); xx++) {
+            int kk = yy*Nx + xx;
+            if (Double.isNaN(H[kk])) continue;
+            s += H[kk];
+            cnt++;
+          }
+        }
+        if (cnt &gt; 0) out[k] = s / (double)cnt;
+      }
+      H = out;
+      if (!any) break;
+    }
+
+    // slope via central differences
+    for (int y=0;y&lt;Ny;y++) for (int x=0;x&lt;Nx;x++) {
+      int xm1 = Math.max(0, x-1), xp1 = Math.min(Nx-1, x+1);
+      int ym1 = Math.max(0, y-1), yp1 = Math.min(Ny-1, y+1);
+      double hx1 = H[y*Nx + xp1], hx0 = H[y*Nx + xm1];
+      double hy1 = H[yp1*Nx + x], hy0 = H[ym1*Nx + x];
+      double dhdx = (hx1 - hx0) / (2.0 * g.res);
+      double dhdy = (hy1 - hy0) / (2.0 * g.res);
+      double gn = Math.sqrt(dhdx*dhdx + dhdy*dhdy);
+      slopeRad[y*Nx + x] = Math.atan(gn);
+    }
+
+    // roughness/std and step/max-min in 3x3 neighborhood
+    for (int y=0;y&lt;Ny;y++) for (int x=0;x&lt;Nx;x++) {
+      double s = 0.0, s2 = 0.0;
+      double mn = Double.POSITIVE_INFINITY, mx = Double.NEGATIVE_INFINITY;
+      int cnt = 0;
+      for (int yy=Math.max(0,y-1); yy&lt;=Math.min(Ny-1,y+1); yy++) {
+        for (int xx=Math.max(0,x-1); xx&lt;=Math.min(Nx-1,x+1); xx++) {
+          double v = H[yy*Nx + xx];
+          s += v;
+          s2 += v*v;
+          if (v &lt; mn) mn = v;
+          if (v &gt; mx) mx = v;
+          cnt++;
+        }
+      }
+      double mu = s / (double)cnt;
+      double var = Math.max(0.0, s2 / (double)cnt - mu*mu);
+      rough[y*Nx + x] = Math.sqrt(var);
+      step[y*Nx + x] = mx - mn;
+    }
+
+    // invalidate empty cells
+    for (int k=0;k&lt;C.length;k++) {
+      if (C[k] == 0) {
+        slopeRad[k] = Double.NaN;
+        rough[k] = Double.NaN;
+        step[k] = Double.NaN;
+      }
+    }
+  }
+
+  static void writeCSV(String outPath, GridSpec g, int[] C, double[] slope, double[] rough, double[] step) throws IOException {
+    // illustrative weights (calibrate for your robot)
+    double b = 3.0;
+    double w1 = -6.0, w2 = -40.0, w3 = -25.0;
+
+    int Nx = g.width(), Ny = g.height();
+    try (PrintWriter pw = new PrintWriter(new FileWriter(outPath))) {
+      pw.println("x,y,p_trav,slope_deg,rough_m,step_m,count");
+      for (int iy=0; iy&lt;Ny; iy++) {
+        double yc = g.yMin + (iy + 0.5) * g.res;
+        for (int ix=0; ix&lt;Nx; ix++) {
+          int k = iy*Nx + ix;
+          if (C[k] == 0) continue;
+          double s = b + w1*slope[k] + w2*rough[k] + w3*step[k];
+          double p = sigmoid(s);
+          double slopeDeg = slope[k] * 180.0 / Math.PI;
+          double xc = g.xMin + (ix + 0.5) * g.res;
+          pw.printf(Locale.US, "%.6f,%.6f,%.8f,%.4f,%.6f,%.6f,%d%n",
+                    xc, yc, p, slopeDeg, rough[k], step[k], C[k]);
+        }
+      }
+    }
+  }
+
+  public static void main(String[] args) throws Exception {
+    String pointsCSV = "";
+    String outCSV = "traversability_map.csv";
+    double res = 0.25;
+
+    for (int i=0;i&lt;args.length;i++) {
+      if (args[i].equals("--points_csv") &amp;&amp; i+1&lt;args.length) pointsCSV = args[++i];
+      else if (args[i].equals("--out_csv") &amp;&amp; i+1&lt;args.length) outCSV = args[++i];
+      else if (args[i].equals("--resolution") &amp;&amp; i+1&lt;args.length) res = Double.parseDouble(args[++i]);
+      else if (args[i].equals("--help")) {
+        System.out.println("java Chapter18_Lesson2 --points_csv points.csv --resolution 0.25 --out_csv traversability_map.csv");
+        return;
+      }
+    }
+
+    if (pointsCSV.isEmpty()) throw new IllegalArgumentException("--points_csv required for this Java demo.");
+
+    Points p = readXYZ(pointsCSV);
+    double xMin = Arrays.stream(p.x).min().getAsDouble();
+    double xMax = Arrays.stream(p.x).max().getAsDouble();
+    double yMin = Arrays.stream(p.y).min().getAsDouble();
+    double yMax = Arrays.stream(p.y).max().getAsDouble();
+
+    GridSpec g = new GridSpec();
+    g.xMin = xMin; g.xMax = xMax; g.yMin = yMin; g.yMax = yMax; g.res = res;
+
+    int Nx = g.width(), Ny = g.height();
+    double[] H = new double[Nx*Ny];
+    int[] C = new int[Nx*Ny];
+    pointsToHeightMap(p, g, H, C);
+
+    double[] slope = new double[Nx*Ny];
+    double[] rough = new double[Nx*Ny];
+    double[] step = new double[Nx*Ny];
+    computeFeatures(H, C, g, slope, rough, step);
+
+    writeCSV(outCSV, g, C, slope, rough, step);
+    System.out.println("Exported: " + outCSV);
+  }
+}
+      </code></pre>
+
+      <p><strong>Chapter18_Lesson2.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter18_Lesson2.m
+% Traversability + terrain classification (toy implementation) + Simulink model stub.
+%
+% Usage (MATLAB):
+%   % Input CSV columns: x,y,z
+%   Chapter18_Lesson2('points.csv', 0.25, 'traversability_map.csv');
+%
+% Or generate a synthetic point cloud:
+%   Chapter18_Lesson2('', 0.25, 'traversability_map.csv');
+%
+% This is an educational script (no ROS required). For real robots, you can
+% integrate with ROS Toolbox (ros2subscriber / ros2publisher) and Nav2-style
+% costmap layers.
+
+function Chapter18_Lesson2(points_csv, resolution, out_csv)
+
+if nargin &lt; 1, points_csv = ''; end
+if nargin &lt; 2, resolution = 0.25; end
+if nargin &lt; 3, out_csv = 'traversability_map.csv'; end
+
+if ~isempty(points_csv)
+    P = readmatrix(points_csv);
+    P = P(:,1:3);
+else
+    P = synthetic_point_cloud(200000, 0);
+end
+
+x_min = min(P(:,1)); x_max = max(P(:,1));
+y_min = min(P(:,2)); y_max = max(P(:,2));
+
+Nx = ceil((x_max - x_min) / resolution);
+Ny = ceil((y_max - y_min) / resolution);
+
+H_sum = zeros(Ny, Nx);
+C = zeros(Ny, Nx);
+
+ix = floor((P(:,1) - x_min) / resolution) + 1;
+iy = floor((P(:,2) - y_min) / resolution) + 1;
+
+valid = ix &gt;= 1 &amp; ix &lt;= Nx &amp; iy &gt;= 1 &amp; iy &lt;= Ny;
+ix = ix(valid); iy = iy(valid); z = P(valid,3);
+
+for i = 1:numel(z)
+    H_sum(iy(i), ix(i)) = H_sum(iy(i), ix(i)) + z(i);
+    C(iy(i), ix(i)) = C(iy(i), ix(i)) + 1;
+end
+
+H = nan(Ny, Nx);
+mask = C &gt; 0;
+H(mask) = H_sum(mask) ./ C(mask);
+
+Hf = fillmissing(H, 'nearest');
+
+% Gradient-based slope
+[dhdy, dhdx] = gradient(Hf, resolution, resolution);
+slope_rad = atan(sqrt(dhdx.^2 + dhdy.^2));
+slope_deg = slope_rad * 180/pi;
+
+% Roughness: local std in 3x3 window
+rough = local_std(Hf, 1);
+
+% Step height: local max-min in 3x3
+step = local_step(Hf, 1);
+
+% Simple calibrated model (illustrative weights; learn for your robot)
+b  = 3.0;
+w1 = -6.0;   % slope_rad
+w2 = -40.0;  % rough [m]
+w3 = -25.0;  % step [m]
+p_trav = 1 ./ (1 + exp(-(b + w1*slope_rad + w2*rough + w3*step)));
+p_trav(~mask) = NaN;
+
+% Export per-cell CSV
+fid = fopen(out_csv, 'w');
+fprintf(fid, 'x,y,p_trav,slope_deg,rough_m,step_m,count\n');
+for iy0 = 1:Ny
+    yc = y_min + (iy0 - 0.5) * resolution;
+    for ix0 = 1:Nx
+        if ~mask(iy0, ix0), continue; end
+        xc = x_min + (ix0 - 0.5) * resolution;
+        fprintf(fid, '%.6f,%.6f,%.8f,%.4f,%.6f,%.6f,%d\n', ...
+            xc, yc, p_trav(iy0,ix0), slope_deg(iy0,ix0), rough(iy0,ix0), step(iy0,ix0), C(iy0,ix0));
+    end
+end
+fclose(fid);
+
+disp(['Exported: ', out_csv]);
+
+% Optional: create a Simulink model that implements the logistic traversability block
+% (requires Simulink). Uncomment to generate:
+% create_traversability_simulink_model();
+
+end
+
+function P = synthetic_point_cloud(n, seed)
+rng(seed);
+x = -10 + 20*rand(n,1);
+y = -10 + 20*rand(n,1);
+
+z = 0.05*x + 0.02*y;
+% bumps
+bumps = [-3 2 0.35 1.2; 4 -1.5 0.25 0.9; 1 5 0.30 1.0];
+for i=1:size(bumps,1)
+    cx=bumps(i,1); cy=bumps(i,2); a=bumps(i,3); s=bumps(i,4);
+    z = z + a * exp(-((x-cx).^2 + (y-cy).^2)/(2*s^2));
+end
+% ditch
+ditch = x &gt; -2 &amp; x &lt; 2 &amp; y &gt; -6 &amp; y &lt; -3;
+z(ditch) = z(ditch) - 0.6;
+
+z = z + 0.02*randn(n,1);
+P = [x y z];
+end
+
+function S = local_std(A, k)
+[Ny, Nx] = size(A);
+S = zeros(Ny, Nx);
+for y=1:Ny
+    ys = max(1,y-k):min(Ny,y+k);
+    for x=1:Nx
+        xs = max(1,x-k):min(Nx,x+k);
+        patch = A(ys, xs);
+        S(y,x) = std(patch(:), 0);
+    end
+end
+end
+
+function D = local_step(A, k)
+[Ny, Nx] = size(A);
+D = zeros(Ny, Nx);
+for y=1:Ny
+    ys = max(1,y-k):min(Ny,y+k);
+    for x=1:Nx
+        xs = max(1,x-k):min(Nx,x+k);
+        patch = A(ys, xs);
+        D(y,x) = max(patch(:)) - min(patch(:));
+    end
+end
+end
+
+function create_traversability_simulink_model()
+% Programmatically create a small Simulink model:
+% Inputs: slope_rad, rough, step
+% Output: p_trav = sigmoid(b + w1*slope + w2*rough + w3*step)
+%
+% This is intended as a teaching aid: you can connect this block to a
+% perception pipeline and feed signals from ROS Toolbox or logged data.
+
+model = 'Chapter18_Lesson2_Simulink';
+new_system(model);
+open_system(model);
+
+add_block('simulink/Sources/In1', [model '/slope_rad'], 'Position', [30 30 60 50]);
+add_block('simulink/Sources/In1', [model '/rough'],     'Position', [30 80 60 100]);
+add_block('simulink/Sources/In1', [model '/step'],      'Position', [30 130 60 150]);
+
+add_block('simulink/User-Defined Functions/MATLAB Function', [model '/Traversability'], ...
+    'Position', [160 55 320 145]);
+set_param([model '/Traversability'], 'Script', ...
+    sprintf(['function p = f(slope_rad, rough, step)\n' ...
+             '%% logistic traversability\n' ...
+             'b=3.0; w1=-6.0; w2=-40.0; w3=-25.0;\n' ...
+             's = b + w1*slope_rad + w2*rough + w3*step;\n' ...
+             'p = 1./(1+exp(-s));\n' ...
+             'end\n']));
+
+add_block('simulink/Sinks/Out1', [model '/p_trav'], 'Position', [380 85 410 105]);
+
+add_line(model, 'slope_rad/1', 'Traversability/1');
+add_line(model, 'rough/1',     'Traversability/2');
+add_line(model, 'step/1',      'Traversability/3');
+add_line(model, 'Traversability/1', 'p_trav/1');
+
+save_system(model);
+disp(['Created Simulink model: ', model]);
+
+end
+      </code></pre>
+
+      <p><strong>Chapter18_Lesson2.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter18_Lesson2.nb
+   Wolfram Mathematica Notebook (plain-text) *)
+
+Notebook[{
+  Cell["Chapter 18 - Lesson 2: Traversability and Terrain Classification", "Title"],
+  Cell["This notebook is a minimal, self-contained demonstration of grid-based elevation mapping and traversability scoring.", "Text"],
+
+  Cell["1) Load / generate point cloud", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    ClearAll["Global`*"];
+    SyntheticPointCloud[n_Integer: 200000, seed_Integer: 0] := Module[{x, y, z, bumps, ditch},
+      SeedRandom[seed];
+      x = RandomReal[{-10, 10}, n];
+      y = RandomReal[{-10, 10}, n];
+      z = 0.05 x + 0.02 y;
+      bumps = { {-3, 2, 0.35, 1.2}, {4, -1.5, 0.25, 0.9}, {1, 5, 0.30, 1.0} };
+      Do[
+        z = z + a Exp[-((x - cx)^2 + (y - cy)^2)/(2 s^2)],
+        { {cx, cy, a, s}, bumps}
+      ];
+      ditch = Boole[(-2 &lt; x &lt; 2) &amp;&amp; (-6 &lt; y &lt; -3)] /. Thread[{x, y} -&gt; Transpose[{x, y}]];
+      z = z - 0.6 ditch;
+      z = z + RandomVariate[NormalDistribution[0, 0.02], n];
+      Transpose[{x, y, z}]
+    ];
+
+    pts = SyntheticPointCloud[200000, 0];
+  ], "Input"],
+
+  Cell["2) Build a 2.5D height map (mean height per grid cell)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    GridSpec[xmin_, xmax_, ymin_, ymax_, res_] := &lt;|
+      "xmin" -&gt; xmin, "xmax" -&gt; xmax, "ymin" -&gt; ymin, "ymax" -&gt; ymax, "res" -&gt; res,
+      "Nx" -&gt; Ceiling[(xmax - xmin)/res], "Ny" -&gt; Ceiling[(ymax - ymin)/res]
+    |&gt;;
+
+    spec = GridSpec[-10, 10, -10, 10, 0.25];
+
+    ToIndex[{x_, y_}, s_] := Module[{ix, iy},
+      ix = Floor[(x - s["xmin"])/s["res"]] + 1;
+      iy = Floor[(y - s["ymin"])/s["res"]] + 1;
+      {ix, iy}
+    ];
+
+    Hsum = ConstantArray[0., {spec["Ny"], spec["Nx"]}];
+    Cnt  = ConstantArray[0,  {spec["Ny"], spec["Nx"]}];
+
+    Do[
+      With[{x = pts[[i, 1]], y = pts[[i, 2]], z = pts[[i, 3]]},
+        With[{ij = ToIndex[{x, y}, spec]},
+          If[1 &lt;= ij[[1]] &lt;= spec["Nx"] &amp;&amp; 1 &lt;= ij[[2]] &lt;= spec["Ny"],
+            Hsum[[ij[[2]], ij[[1]]]] += z;
+            Cnt[[ij[[2]], ij[[1]]]] += 1;
+          ]
+        ]
+      ],
+      {i, Length[pts]}
+    ];
+
+    H = MapThread[If[#2 &gt; 0, #1/#2, Indeterminate] &amp;, {Hsum, Cnt}, 2];
+  ], "Input"],
+
+  Cell["3) Features: slope, roughness, step height", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    (* Fill Indeterminate holes by nearest-neighbor style smoothing *)
+    FillHoles[A_, iters_: 5] := Nest[
+      Function[M,
+        MapIndexed[
+          Function[{v, idx},
+            If[v === Indeterminate,
+              Module[{y = idx[[1]], x = idx[[2]], ys, xs, patch, vals},
+                ys = Range[Max[1, y - 1], Min[Length[M], y + 1]];
+                xs = Range[Max[1, x - 1], Min[Length[M[[1]]], x + 1]];
+                patch = Flatten[M[[ys, xs]]];
+                vals = Select[patch, # =!= Indeterminate &amp;];
+                If[Length[vals] &gt; 0, Mean[vals], Indeterminate]
+              ],
+              v
+            ]
+          ],
+          M,
+          {2}
+        ]
+      ],
+      A,
+      iters
+    ];
+
+    Hf = FillHoles[H, 6];
+
+    (* Gradient approximations *)
+    dhdx = ListCorrelate[{ {-1, 0, 1} }, Hf, {2, 2}, 0] / (2 spec["res"]);
+    dhdy = ListCorrelate[{ {-1}, {0}, {1} }, Hf, {2, 2}, 0] / (2 spec["res"]);
+    slopeRad = ArcTan[Sqrt[dhdx^2 + dhdy^2]];
+
+    (* Roughness and step in 3x3 neighborhoods *)
+    NeighborhoodPatch[M_, {y_, x_}] := Flatten[M[[Range[Max[1, y - 1], Min[spec["Ny"], y + 1]],
+                                                   Range[Max[1, x - 1], Min[spec["Nx"], x + 1]]]]];
+
+    rough = Table[StandardDeviation[NeighborhoodPatch[Hf, {y, x}]], {y, spec["Ny"]}, {x, spec["Nx"]}];
+    step  = Table[Max[NeighborhoodPatch[Hf, {y, x}]] - Min[NeighborhoodPatch[Hf, {y, x}]], {y, spec["Ny"]}, {x, spec["Nx"]}];
+  ], "Input"],
+
+  Cell["4) Traversability probability (logistic model)", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    b = 3.0; w1 = -6.0; w2 = -40.0; w3 = -25.0;
+    Sigmoid[s_] := 1/(1 + Exp[-s]);
+    pTrav = MapThread[Sigmoid[b + w1 #1 + w2 #2 + w3 #3] &amp;, {slopeRad, rough, step}, 2];
+
+    (* Mask out empty cells *)
+    pTravMasked = MapThread[If[#2 &gt; 0, #1, Indeterminate] &amp;, {pTrav, Cnt}, 2];
+  ], "Input"],
+
+  Cell["5) Export (x,y,p_trav,slope_deg,rough,step,count) to CSV", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    CellCenter[{ix_, iy_}] := {
+      spec["xmin"] + (ix - 0.5) spec["res"],
+      spec["ymin"] + (iy - 0.5) spec["res"]
+    };
+
+    rows = Reap[
+      Do[
+        If[Cnt[[iy, ix]] &gt; 0,
+          With[{xy = CellCenter[{ix, iy}]},
+            Sow[{xy[[1]], xy[[2]],
+                 pTravMasked[[iy, ix]],
+                 (180./Pi) slopeRad[[iy, ix]],
+                 rough[[iy, ix]],
+                 step[[iy, ix]],
+                 Cnt[[iy, ix]]}]
+          ]
+        ],
+        {iy, 1, spec["Ny"]}, {ix, 1, spec["Nx"]}
+      ]
+    ][[2, 1]];
+
+    Export["traversability_map.csv",
+      Prepend[rows, {"x","y","p_trav","slope_deg","rough_m","step_m","count"}]
+    ];
+  ], "Input"],
+
+  Cell["Done.", "Text"]
+},
+WindowSize-&gt; {980, 720},
+WindowMargins-&gt; { {Automatic, 30}, {Automatic, 30} },
+StyleDefinitions-&gt;"Default.nb"
+]
+      </code></pre>
+
+      <p>
+        <strong>Library notes (practical integration):</strong>
+      </p>
+      <ul>
+        <li>
+          <strong>Python:</strong> NumPy for grids; scikit-learn for quick
+          calibration; ROS2 via <code>rclpy</code>; map publication via
+          <code>nav_msgs/OccupancyGrid</code> or custom traversability layers.
+        </li>
+        <li>
+          <strong>C++:</strong> ROS2 via <code>rclcpp</code>; point clouds via
+          <code>PCL</code>; linear algebra via <code>Eigen</code>; costmaps via
+          Nav2 costmap plugins.
+        </li>
+        <li>
+          <strong>Java:</strong> ROS2 via <code>rcljava</code>; matrix ops via
+          EJML; useful for Android/edge deployments.
+        </li>
+        <li>
+          <strong>MATLAB/Simulink:</strong> ROS Toolbox for ROS2; point clouds
+          via Computer Vision Toolbox; Simulink for rapid prototyping of the
+          traversability scoring block.
+        </li>
+        <li>
+          <strong>Wolfram Mathematica:</strong> symbolic derivations,
+          uncertainty propagation, and quick validation of estimators.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Plane-fit estimator and covariance):</strong>
+        In a neighborhood, measurements satisfy
+        <strong
+          >\( \mathbf{z} = \mathbf{A}\boldsymbol{\theta} +
+          \boldsymbol{\varepsilon} \)</strong
+        >
+        with
+        <strong
+          >\( \boldsymbol{\varepsilon}\sim\mathcal{N}(\mathbf{0},
+          \sigma^2\mathbf{I}) \)</strong
+        >. (a) Derive the least-squares estimate
+        <strong>\( \hat{\boldsymbol{\theta} } \)</strong>. (b) Show that
+        <strong
+          >\( \operatorname{Cov}(\hat{\boldsymbol{\theta}
+          })=\sigma^2(\mathbf{A}^\top\mathbf{A})^{-1} \)</strong
+        >.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        (a) The LS problem minimizes
+        <strong
+          >\(
+          J(\boldsymbol{\theta})=\|\mathbf{z}-\mathbf{A}\boldsymbol{\theta}\|_2^2
+          \)</strong
+        >. Setting the gradient to zero:
+        <strong
+          >\( \nabla J =
+          -2\mathbf{A}^\top(\mathbf{z}-\mathbf{A}\boldsymbol{\theta})=\mathbf{0}
+          \)</strong
+        >, yielding normal equations
+        <strong
+          >\( \mathbf{A}^\top\mathbf{A}\hat{\boldsymbol{\theta}
+          }=\mathbf{A}^\top\mathbf{z} \)</strong
+        >. If <strong>\( \mathbf{A}^\top\mathbf{A} \)</strong> is invertible,
+        <strong
+          >\( \hat{\boldsymbol{\theta}
+          }=(\mathbf{A}^\top\mathbf{A})^{-1}\mathbf{A}^\top\mathbf{z} \)</strong
+        >.
+      </p>
+      <p>
+        (b) Substitute the model:
+        <strong
+          >\( \hat{\boldsymbol{\theta} } =
+          (\mathbf{A}^\top\mathbf{A})^{-1}\mathbf{A}^\top(\mathbf{A}\boldsymbol{\theta}+\boldsymbol{\varepsilon})
+          = \boldsymbol{\theta} +
+          (\mathbf{A}^\top\mathbf{A})^{-1}\mathbf{A}^\top\boldsymbol{\varepsilon}
+          \)</strong
+        >. Therefore:
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{Cov}(\hat{\boldsymbol{\theta} }) =
+        (\mathbf{A}^\top\mathbf{A})^{-1}\mathbf{A}^\top
+        \operatorname{Cov}(\boldsymbol{\varepsilon})
+        \mathbf{A}(\mathbf{A}^\top\mathbf{A})^{-1} =
+        (\mathbf{A}^\top\mathbf{A})^{-1}\mathbf{A}^\top (\sigma^2\mathbf{I})
+        \mathbf{A}(\mathbf{A}^\top\mathbf{A})^{-1} =
+        \sigma^2(\mathbf{A}^\top\mathbf{A})^{-1} \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Negative-log cost additivity):</strong>
+        Suppose safety decomposes into independent factors
+        <strong>\( p = \prod_{k=1}^{K} p^{(k)} \)</strong>, with all
+        <strong>\( p^{(k)} \in (0,1] \)</strong>. Show that defining
+        <strong>\( c=-\log p \)</strong> yields
+        <strong>\( c=\sum_k c^{(k)} \)</strong> where
+        <strong>\( c^{(k)}=-\log p^{(k)} \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <h4 class="mathJax">
+        \[ c = -\log\!\left(\prod_{k=1}^{K} p^{(k)}\right) =
+        -\sum_{k=1}^{K}\log(p^{(k)}) = \sum_{k=1}^{K} \left(-\log p^{(k)}\right)
+        \]
+      </h4>
+
+      <p>
+        <strong>Problem 3 (Chance constraint for slope):</strong>
+        Let the slope estimate be uncertain:
+        <strong
+          >\( \alpha \sim \mathcal{N}(\mu_\alpha, \sigma_\alpha^2) \)</strong
+        >. Derive an equivalent deterministic constraint ensuring
+        <strong>\( \Pr(\alpha \le \alpha_{\max}) \ge 1-\delta \)</strong>.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Since
+        <strong
+          >\( \Pr(\alpha \le \alpha_{\max}) =
+          \Phi((\alpha_{\max}-\mu_\alpha)/\sigma_\alpha) \)</strong
+        >, the condition is:
+      </p>
+      <h4 class="mathJax">
+        \[ \Phi\!\left(\frac{\alpha_{\max}-\mu_\alpha}{\sigma_\alpha}\right) \ge
+        1-\delta \;\;\Longleftrightarrow\;\;
+        \frac{\alpha_{\max}-\mu_\alpha}{\sigma_\alpha} \ge z_{1-\delta}
+        \;\;\Longleftrightarrow\;\; \mu_\alpha + z_{1-\delta}\sigma_\alpha \le
+        \alpha_{\max} \]
+      </h4>
+      <p>
+        where <strong>\( z_{1-\delta} \)</strong> is the
+        <strong>\( (1-\delta) \)</strong>-quantile of the standard normal. This
+        is a classic risk buffer: add a margin proportional to uncertainty.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Bayes filtering on terrain classes):</strong>
+        Consider a single cell with classes
+        <strong>\( c\in\{1,\dots,C\} \)</strong>. Show that if you store
+        unnormalized log-beliefs
+        <strong>\( \ell_t(c)=\log \tilde b_t(c) \)</strong>, the Bayes update
+        can be implemented as
+        <strong>\( \ell_t(c)=\ell_{t-1}(c)+\log p(z_t\mid c) \)</strong> plus a
+        normalization constant.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Bayes update:
+        <strong
+          >\( b_t(c) = \frac{p(z_t\mid c)\,b_{t-1}(c)}{\sum_{c'}p(z_t\mid
+          c')\,b_{t-1}(c')} \)</strong
+        >. Define unnormalized
+        <strong>\( \tilde b_t(c)=p(z_t\mid c)\,b_{t-1}(c) \)</strong>. Taking
+        logs:
+        <strong
+          >\( \log \tilde b_t(c)=\log b_{t-1}(c)+\log p(z_t\mid c) \)</strong
+        >. Normalization is a subtractive constant
+        <strong>\( \log Z_t = \log \sum_{c'}\tilde b_t(c') \)</strong> applied
+        after exponentiating or via log-sum-exp.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Design a conservative traversability rule):</strong>
+        Suppose you use three features: slope <strong>\( \alpha \)</strong>,
+        roughness <strong>\( \rho \)</strong>, and step
+        <strong>\( \delta \)</strong>. Give a conservative rule that declares a
+        cell traversable only if each chance constraint holds with confidence
+        <strong>\( 1-\delta_0 \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        If each feature is modeled as Gaussian, require:
+        <strong>\( \Pr(\alpha \le \alpha_{\max}) \ge 1-\delta_0 \)</strong>,
+        <strong>\( \Pr(\rho \le \rho_{\max}) \ge 1-\delta_0 \)</strong>,
+        <strong>\( \Pr(\delta \le \delta_{\max}) \ge 1-\delta_0 \)</strong>.
+        Using the quantile form from Problem 3, the deterministic constraints
+        are:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mu_\alpha + z_{1-\delta_0}\sigma_\alpha \le \alpha_{\max},\quad
+        \mu_\rho + z_{1-\delta_0}\sigma_\rho \le \rho_{\max},\quad \mu_\delta +
+        z_{1-\delta_0}\sigma_\delta \le \delta_{\max} \]
+      </h4>
+
+      <p>
+        By the union bound,
+        <strong>\( \Pr(\text{all constraints hold}) \ge 1-3\delta_0 \)</strong>,
+        so you can set <strong>\( \delta_0=\delta/3 \)</strong> to achieve
+        overall risk level <strong>\( \delta \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formalized outdoor traversability as a probabilistic inference
+        problem over terrain geometry and interaction: (i) build an elevation
+        map with uncertainty, (ii) extract geometric features
+        (slope/roughness/step) with confidence, (iii) infer terrain classes and
+        a traversability probability, and (iv) convert the result into an
+        additive cost layer for planners. The next lessons will use these tools
+        to handle long-range drift and environment changes that dominate field
+        deployments.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. References</h2>
+    <ol>
+      <li>
+        Papadakis, P. (2013). Terrain traversability analysis methods for
+        unmanned ground vehicles: A survey.
+        <em>Engineering Applications of Artificial Intelligence</em>, 26(4),
+        1373–1385.
+      </li>
+      <li>
+        Fankhauser, P., Bloesch, M., &amp; Hutter, M. (2018). Probabilistic
+        terrain mapping for mobile robots with uncertain localization.
+        <em>IEEE Robotics and Automation Letters</em>, 3(4), 3019–3026.
+      </li>
+      <li>
+        Bogoslavskyi, I., Vysotska, O., Serafin, J., Grisetti, G., &amp;
+        Stachniss, C. (2013). Efficient traversability analysis for mobile
+        robots using the Kinect sensor. In
+        <em>Proc. European Conference on Mobile Robots (ECMR)</em>, 158–163.
+      </li>
+      <li>
+        Krebs, A., Pradalier, C., Siegwart, R., &amp; Kohli, P. (2009).
+        Comparison of terrain classification approaches for mobile robots.
+        <em>Journal of Field Robotics</em>, 26(5), 437–452.
+      </li>
+      <li>
+        Sevastopoulos, C., &amp; Konstantopoulos, S. (2022). A survey of
+        traversability estimation for mobile robots.
+        <em>arXiv</em>:2204.10883.
+      </li>
+      <li>
+        Fankhauser, P., Hutter, M., et al. (2014). Probabilistic elevation
+        mapping for robots operating in rugged terrain. In
+        <em>Proc. CLAWAR</em> (conference paper on elevation mapping).
+      </li>
+      <li>
+        Langer, D., Rosenblatt, J.K., &amp; Hebert, M. (1994). A behavior-based
+        system for off-road navigation.
+        <em>IEEE Transactions on Robotics and Automation</em>, 10(6), 776–783.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter18/Lesson1.html">
+          Lesson 1: GPS/RTK Integration in Navigation
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter18/Lesson3.html">
+          Lesson 3: Long-Range Localization Drift Handling
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="active-lesson" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

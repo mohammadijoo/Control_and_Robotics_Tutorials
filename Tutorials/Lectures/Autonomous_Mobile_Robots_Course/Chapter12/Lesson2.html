@@ -1,0 +1,2421 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: SLAM II — Graph-Based SLAM - Lesson 2: Loop Closure Detection Concepts | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: SLAM II — Graph-Based SLAM</h1>
+    <h3><strong>Lesson 2: Loop Closure Detection Concepts</strong></h3>
+    <p>
+      This lesson develops the <em>decision layer</em> that makes graph-based
+      SLAM practical: detecting when the robot revisits a previously seen place
+      (a <em>loop closure</em>) and turning that recognition into a trustworthy
+      additional constraint in the pose/factor graph. We formalize loop closure
+      as statistical hypothesis testing, analyze false positives via perceptual
+      aliasing, and show how geometric verification (e.g., scan matching /
+      vision geometry) converts appearance matches into valid graph constraints.
+      Pose-graph optimization is deferred to Lesson 3; outlier handling to
+      Lesson 4.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In graph-based SLAM (Lesson 1), the robot maintains a set of
+        <em>keyframe poses</em>
+        <strong>\( \mathbf{x}_0, \mathbf{x}_1, \dots, \mathbf{x}_n \)</strong>
+        and a set of factors/edges encoding relative measurements (odometry,
+        scan matching, visual odometry). Without loop closure, the graph is
+        nearly a chain and drift accumulates. A loop closure adds a
+        <em>non-local</em> constraint between two distant keyframes, e.g.
+        <strong>\( \mathbf{x}_i \)</strong> and
+        <strong>\( \mathbf{x}_j \)</strong> with
+        <strong>\( |i-j| \)</strong> large, which (after optimization in Lesson
+        3) distributes the correction across the trajectory.
+      </p>
+
+      <p>
+        Operationally, loop closure detection is a two-stage pipeline: (i)
+        <strong>place recognition</strong> proposes candidates using
+        descriptors, and (ii) <strong>verification</strong> (geometric +
+        statistical) accepts/rejects the candidate before inserting a new
+        constraint into the graph.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Inputs: keyframes, descriptors, odom chain constraints"] --> B["Candidate generation: retrieve past keyframes similar to current"]
+  B --> C["Temporal / spatial gating: ignore too-recent frames and implausible matches"]
+  C --> D["Geometric verification: estimate relative transform and inlier statistics"]
+  D --> E["Statistical decision: accept or reject loop closure hypothesis"]
+  E --> F["If accepted: create new graph edge between pose i and pose j"]
+  F --> G["Output: augmented pose/factor graph (optimized in next lesson)"]
+        </pre>
+      </div>
+
+      <p>
+        The central difficulty is <strong>perceptual aliasing</strong>: distinct
+        places produce similar measurements (e.g., long corridors, repeated
+        shelves), causing false loop closures that can deform the map.
+        Therefore, loop closure detection must be framed as
+        <em>risk-controlled inference</em>, not merely nearest-neighbor
+        matching.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Formal Problem Statement -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Formal Loop-Closure Statement and Hypotheses</h2>
+    <div class="down-content">
+      <p>
+        Let the current keyframe index be <strong>\( i \)</strong>. We consider
+        a candidate past index <strong>\( j \)</strong> with
+        <strong>\( j &lt; i-\Delta \)</strong> (a minimum separation
+        <strong>\( \Delta \)</strong> prevents trivial matches to
+        near-neighbors). Define a binary loop-closure event:
+        <strong> \( L_{ij} \in \{0,1\} \)</strong>, where
+        <strong>\( L_{ij}=1 \)</strong> means “keyframes
+        <strong>\( i \)</strong> and <strong>\( j \)</strong> correspond to the
+        same physical place.”
+      </p>
+
+      <p>
+        We observe (a) an appearance descriptor
+        <strong>\( \mathbf{d}_i \)</strong> and (b) a geometric measurement
+        attempt (scan/vision) that yields a relative-pose estimate
+        <strong>\( \mathbf{z}_{ij} \)</strong>
+        and a set of inlier statistics. Collect all evidence into
+        <strong>
+          \( \mathcal{E}_{ij} =
+          \{\mathbf{d}_i,\mathbf{d}_j,\mathbf{z}_{ij},\text{inliers},\dots\}
+          \)</strong
+        >. Loop closure detection is the decision:
+        <strong> \( \delta(\mathcal{E}_{ij}) \in \{0,1\} \)</strong>.
+      </p>
+
+      <p>The Bayes posterior is:</p>
+      <h4 class="mathJax">
+        \[ P(L_{ij}=1 \mid \mathcal{E}_{ij}) = \frac{p(\mathcal{E}_{ij}\mid
+        L_{ij}=1)\,P(L_{ij}=1)} {p(\mathcal{E}_{ij}\mid L_{ij}=1)\,P(L_{ij}=1) +
+        p(\mathcal{E}_{ij}\mid L_{ij}=0)\,P(L_{ij}=0)}. \]
+      </h4>
+
+      <p>
+        A key modeling step is splitting evidence into <em>retrieval</em> and
+        <em>verification</em>. A common approximation (useful in practice) is
+        conditional independence:
+        <strong
+          >\( p(\mathcal{E}_{ij}\mid L_{ij}) \approx
+          p(\mathbf{d}_i,\mathbf{d}_j\mid
+          L_{ij})\;p(\mathbf{z}_{ij},\text{stats}\mid L_{ij}) \)</strong
+        >, which clarifies why both appearance and geometry are needed to keep
+        false positives small.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Decision Theory and Likelihood Ratio Test -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Optimal Decision Rule: Likelihood Ratio and Risk</h2>
+    <div class="down-content">
+      <p>
+        Suppose the cost of a false loop closure (accept when
+        <strong>\( L_{ij}=0 \)</strong>) is <strong> \( C_{10} \)</strong>, and
+        the cost of missing a true closure (reject when
+        <strong>\( L_{ij}=1 \)</strong>) is <strong> \( C_{01} \)</strong>.
+        Bayes risk minimization yields the rule:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \delta(\mathcal{E}_{ij}) = \begin{cases} 1 & \text{if } \log
+        \Lambda(\mathcal{E}_{ij}) &gt; \log \eta \\ 0 & \text{otherwise}
+        \end{cases} \quad \text{where} \quad \Lambda(\mathcal{E}_{ij}) =
+        \frac{p(\mathcal{E}_{ij}\mid L_{ij}=1)}{p(\mathcal{E}_{ij}\mid
+        L_{ij}=0)}, \\ \eta =
+        \frac{C_{10}}{C_{01}}\cdot\frac{P(L_{ij}=0)}{P(L_{ij}=1)}. \]
+      </h4>
+
+      <p>
+        <strong>Interpretation.</strong> In large environments, the prior
+        <strong>\( P(L_{ij}=1) \)</strong> for an arbitrary pair is small, so
+        <strong>\( \eta \)</strong> is typically large, meaning we require
+        strong evidence to accept loop closure. This is exactly what
+        practitioners do: “high precision first,” because a single false closure
+        can catastrophically bend the graph.
+      </p>
+
+      <p>
+        <strong>Proof sketch (Bayes decision rule).</strong> Choose
+        <strong>\( \delta=1 \)</strong> when its conditional expected cost is
+        smaller:
+        <strong
+          >\( C_{10}P(L_{ij}=0\mid\mathcal{E}_{ij}) &lt;
+          C_{01}P(L_{ij}=1\mid\mathcal{E}_{ij}) \)</strong
+        >. Using Bayes’ rule and rearranging yields the likelihood ratio test
+        above.
+      </p>
+
+      <p>
+        <strong>Neyman–Pearson view.</strong> If you fix a maximum allowable
+        false positive rate <strong>\( \alpha \)</strong>, then among all tests
+        with <strong>\( P(\delta=1\mid L_{ij}=0)\le \alpha \)</strong>, the
+        likelihood-ratio test is most powerful (maximizes detection
+        probability). This connects loop closure to classical detection theory:
+        we tune thresholds to meet false-alarm budgets.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Candidate Generation via Descriptors -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Candidate Generation: Descriptor Spaces and Retrieval Scores</h2>
+    <div class="down-content">
+      <p>
+        Candidate generation maps each keyframe to a descriptor vector
+        <strong>\( \mathbf{d}_i \in \mathbb{R}^m \)</strong>. Examples
+        (conceptual, not re-taught here): bag-of-visual-words for images,
+        scan-context histograms for LiDAR, learned embeddings from
+        CNN/transformer encoders. Retrieval produces a shortlist
+        <strong>\( \mathcal{C}(i) \subset \{0,\dots,i-\Delta\} \)</strong>.
+      </p>
+
+      <p>
+        A common similarity is cosine:
+        <strong
+          >\( s_{ij} = \frac{\mathbf{d}_i^\top
+          \mathbf{d}_j}{\|\mathbf{d}_i\|\;\|\mathbf{d}_j\|} \)</strong
+        >. When using bag-of-words with TF–IDF weighting, define term-frequency
+        <strong>\( \mathrm{tf}_{iw} \)</strong> and inverse-document-frequency
+        <strong>\( \mathrm{idf}_w \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{idf}_w = \log\!\left(\frac{N+1}{\mathrm{df}_w+1}\right) + 1,
+        \qquad \mathbf{d}_i[w] =
+        \frac{\mathrm{tf}_{iw}\,\mathrm{idf}_w}{\left\|\mathrm{tf}_i \odot
+        \mathrm{idf}\right\|_2}, \]
+      </h4>
+
+      <p>
+        where <strong>\( N \)</strong> is the number of keyframes so far and
+        <strong>\( \mathrm{df}_w \)</strong> is the number of keyframes
+        containing word <strong>\( w \)</strong>. The normalization makes cosine
+        similarity equal to the dot product.
+      </p>
+
+      <p>
+        <strong>Temporal gating.</strong> Always exclude the most recent window:
+        <strong>\( j \notin \{i-\Delta,\dots,i-1\} \)</strong>. Additionally, if
+        you have odometry, reject candidates that violate feasibility (e.g.,
+        requiring implausible travel speed).
+      </p>
+
+      <p>
+        <strong>Statistical scoring model.</strong> To connect retrieval to the
+        likelihood ratio in Section 3, model the similarity under two
+        hypotheses:
+        <strong
+          >\( s_{ij}\mid L_{ij}=1 \sim \mathcal{N}(\mu_1,\sigma_1^2) \)</strong
+        >,
+        <strong
+          >\( s_{ij}\mid L_{ij}=0 \sim \mathcal{N}(\mu_0,\sigma_0^2) \)</strong
+        >. Then the retrieval contribution to
+        <strong>\( \log \Lambda \)</strong> is the log-density difference. This
+        is precisely what the lab code implements (a simple, inspectable proxy
+        for complex learned models).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Verification as a Statistical Consistency Check -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Geometric Verification and Chi-Square Gating</h2>
+    <div class="down-content">
+      <p>
+        After a candidate <strong>\( (i,j) \)</strong> is proposed, we run a
+        geometric alignment step to estimate a relative pose measurement
+        <strong>\( \mathbf{z}_{ij} \)</strong> and (often) an inlier set. For 2D
+        AMR, a minimal representation is
+        <strong>\( \mathbf{z}_{ij} \in \mathbb{R}^3 \)</strong> (dx, dy, dθ).
+        Define a residual against the predicted relative transform (from the
+        current graph estimate):
+        <strong>
+          \( \mathbf{r}_{ij} = \mathbf{z}_{ij} - \hat{\mathbf{z}}_{ij}
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        Under a local linear-Gaussian approximation, if
+        <strong
+          >\( \mathbf{r}_{ij} \sim \mathcal{N}(\mathbf{0}, \mathbf{S}_{ij})
+          \)</strong
+        >, then the Mahalanobis distance:
+        <strong
+          >\( d_{ij}^2 = \mathbf{r}_{ij}^\top
+          \mathbf{S}_{ij}^{-1}\mathbf{r}_{ij} \)</strong
+        >
+        follows a chi-square distribution with
+        <strong>\( \nu \)</strong> degrees of freedom (here
+        <strong>\( \nu=3 \)</strong>).
+      </p>
+
+      <h4 class="mathJax">
+        \[ \text{Accept geometry if}\quad \mathbf{r}_{ij}^\top
+        \mathbf{S}_{ij}^{-1}\mathbf{r}_{ij} \;\le\; \chi^2_{\nu,\,1-\alpha},
+        \quad \nu=3, \]
+      </h4>
+
+      <p>
+        where <strong>\( \chi^2_{\nu,\,1-\alpha} \)</strong> is the
+        (1−α)-quantile. This is a principled false-alarm control mechanism: if
+        the residual model is correct, the probability of wrongly rejecting a
+        true loop closure is approximately <strong>\( \alpha \)</strong>.
+      </p>
+
+      <p>
+        <strong>Why chi-square? (proof sketch)</strong>
+        Let
+        <strong>\( \mathbf{y} = \mathbf{S}_{ij}^{-1/2}\mathbf{r}_{ij} \)</strong
+        >. If
+        <strong
+          >\( \mathbf{r}_{ij} \sim \mathcal{N}(\mathbf{0},\mathbf{S}_{ij})
+          \)</strong
+        >, then
+        <strong>\( \mathbf{y} \sim \mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong
+        >. Therefore:
+        <strong
+          >\( d_{ij}^2 = \mathbf{r}_{ij}^\top
+          \mathbf{S}_{ij}^{-1}\mathbf{r}_{ij} = \|\mathbf{y}\|_2^2 =
+          \sum_{k=1}^{\nu} y_k^2 \)</strong
+        >, which is chi-square with <strong>\( \nu \)</strong> degrees of
+        freedom.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Candidate (i,j) proposed by descriptor match"] --> B["Estimate relative transform z_ij via geometry"]
+  B --> C["Compute residual r_ij = z_ij - zhat_ij"]
+  C --> D["Compute d2 = r_ij^T * S^-1 * r_ij"]
+  D --> E{"Compare d2 with \ngate threshold"}
+  E -->|pass| F["Accept: add loop closure constraint edge"]
+  E -->|fail| G["Reject: treat as perceptual aliasing / outlier"]
+  </pre
+        >
+      </div>
+
+      <p>
+        In real systems, <strong>\( \mathbf{S}_{ij} \)</strong> is derived from
+        scan-matching covariance, vision reprojection Jacobians, or an
+        information-form approximation. This lesson focuses on the concept:
+        verification converts “looks similar” into “consistent with rigid-body
+        geometry + uncertainty.”
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: From Detection to a Graph Constraint (Preview Only) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. From a Detected Loop Closure to a Graph Constraint (Preview)</h2>
+    <div class="down-content">
+      <p>
+        When a loop closure is accepted, it becomes a new factor connecting
+        <strong>\( \mathbf{x}_j \)</strong> to
+        <strong>\( \mathbf{x}_i \)</strong>. In a pose-graph least-squares form
+        (Lesson 3), we will use an error function:
+        <strong> \( \mathbf{e}_{ij}(\mathbf{x}_j,\mathbf{x}_i) \)</strong>
+        and an information matrix
+        <strong>\( \boldsymbol{\Omega}_{ij} \)</strong>. Conceptually:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \text{Loop factor:}\quad \phi_{ij}(\mathbf{x}_j,\mathbf{x}_i) \propto
+        \exp\!\Big(
+        -\tfrac{1}{2}\,\mathbf{e}_{ij}(\mathbf{x}_j,\mathbf{x}_i)^\top
+        \boldsymbol{\Omega}_{ij}\, \mathbf{e}_{ij}(\mathbf{x}_j,\mathbf{x}_i)
+        \Big). \]
+      </h4>
+
+      <p>
+        The key message: detection quality determines whether adding this factor
+        improves the estimate or corrupts it. That is why this lesson treats
+        loop closure as an explicit hypothesis test with verification.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab — Retrieval + Bayes Threshold + Chi-Square Gate</h2>
+    <div class="down-content">
+      <p>
+        This lab simulates a square-loop trajectory, creates TF–IDF-like
+        descriptors, retrieves candidates by cosine similarity, then applies (i)
+        a Gaussian log-likelihood ratio threshold and (ii) a chi-square
+        geometric gate. It reports precision/recall against a distance-based
+        ground truth loop definition.
+      </p>
+
+      <p><strong>File:</strong> Chapter12_Lesson2.py</p>
+      <pre><code class="language-python">
+# Chapter12_Lesson2.py
+# Loop Closure Detection Concepts (Graph-Based SLAM) — Toy but principled demo
+# Author: Abolfazl Mohammadijoo (course scaffold)
+#
+# This script demonstrates:
+# 1) Descriptor-based retrieval (TF–IDF-like vectors + cosine similarity).
+# 2) A Bayesian / likelihood-ratio decision rule on similarity scores.
+# 3) Geometric verification via chi-square gating on a (dx,dy,dtheta) residual.
+#
+# NOTE: This is a pedagogical simulator. In a real SLAM system:
+# - descriptors come from vision/LiDAR place recognition modules,
+# - geometric verification comes from scan matching or PnP + RANSAC,
+# - accepted loop closures become graph edges optimized in the next lesson.
+
+from __future__ import annotations
+import math
+import random
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Optional
+
+import numpy as np
+
+try:
+    # SciPy is optional; we provide a fallback approximate chi-square threshold if absent.
+    from scipy.stats import chi2, norm
+    _HAVE_SCIPY = True
+except Exception:
+    _HAVE_SCIPY = False
+
+
+@dataclass
+class Params:
+    seed: int = 7
+    N: int = 520                   # number of keyframes
+    min_separation: int = 40       # exclude recent frames from loop closure candidates
+    topK: int = 5                  # number of retrieved candidates per query
+    # Similarity score model (toy):
+    mu1: float = 0.92              # mean cosine similarity for true loop closures
+    sig1: float = 0.03             # std  cosine similarity for true loop closures
+    mu0: float = 0.55              # mean cosine similarity for non-loop pairs
+    sig0: float = 0.08             # std  cosine similarity for non-loop pairs
+    # Decision costs (false accept vs false reject):
+    C10: float = 50.0              # false accept cost (catastrophic)
+    C01: float = 1.0               # false reject cost
+    prior_loop: float = 0.01       # P(L=1) prior
+    # Geometric residual covariance (dx, dy, dtheta):
+    sigma_dx: float = 0.25
+    sigma_dy: float = 0.25
+    sigma_dth: float = 0.08
+    alpha_geom: float = 0.005      # chi-square gate significance
+    # Ground-truth loop definition (for evaluation only):
+    loop_distance_thresh: float = 0.9
+    # Descriptor dimensions:
+    V: int = 500                   # "vocabulary size" or embedding dim
+
+
+def square_loop_trajectory(N: int) -> np.ndarray:
+    """
+    Generate a 2D trajectory that runs around a square multiple times.
+    Returns array of shape (N,2).
+    """
+    pts = []
+    # Make 4 segments per lap; total laps ~ N / 4S where S points per segment
+    S = max(20, N // 12)
+    # A square of side 10
+    side = 10.0
+    for lap in range(max(1, N // (4 * S)) + 1):
+        # (0,0) -> (side,0)
+        for k in range(S):
+            pts.append((k / S * side, 0.0))
+        # (side,0) -> (side,side)
+        for k in range(S):
+            pts.append((side, k / S * side))
+        # (side,side) -> (0,side)
+        for k in range(S):
+            pts.append((side - k / S * side, side))
+        # (0,side) -> (0,0)
+        for k in range(S):
+            pts.append((0.0, side - k / S * side))
+    pts = pts[:N]
+    return np.array(pts, dtype=float)
+
+
+def make_tfidf_like_descriptors(xy: np.ndarray, V: int, seed: int = 0) -> np.ndarray:
+    """
+    Create descriptors correlated with spatial location:
+    - We map the (x,y) position into a soft assignment over V bins.
+    - Then normalize to unit length.
+    This imitates "place-specific" words while still allowing aliasing.
+    """
+    rng = np.random.default_rng(seed)
+    N = xy.shape[0]
+    # Random projection centers for "words"
+    centers = rng.uniform(0.0, 10.0, size=(V, 2))
+    # RBF bandwidth
+    ell = 1.5
+    D = np.zeros((N, V), dtype=float)
+    for i in range(N):
+        diff = centers - xy[i]
+        r2 = np.sum(diff * diff, axis=1)
+        # soft activation + noise to imitate sensor variation
+        D[i] = np.exp(-0.5 * r2 / (ell * ell)) + 0.02 * rng.random(V)
+    # TF–IDF style weighting: idf based on "document frequency"
+    # Here df_w = number of frames where word activation exceeds a small threshold.
+    thr = 0.05
+    df = np.sum(D > thr, axis=0)
+    idf = np.log((N + 1.0) / (df + 1.0)) + 1.0
+    D = D * idf
+    # L2 normalize
+    norms = np.linalg.norm(D, axis=1, keepdims=True) + 1e-12
+    D = D / norms
+    return D
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+
+
+def normal_logpdf(x: float, mu: float, sigma: float) -> float:
+    # log N(x; mu, sigma^2)
+    return -0.5 * math.log(2.0 * math.pi * sigma * sigma) - 0.5 * ((x - mu) / sigma) ** 2
+
+
+def llr_similarity(s: float, p: Params) -> float:
+    """
+    Log-likelihood ratio contributed by similarity score s under:
+    H1: s ~ N(mu1,sig1^2), H0: s ~ N(mu0,sig0^2)
+    """
+    return normal_logpdf(s, p.mu1, p.sig1) - normal_logpdf(s, p.mu0, p.sig0)
+
+
+def bayes_threshold_eta(p: Params) -> float:
+    """
+    eta = (C10/C01) * (P(L=0)/P(L=1))
+    """
+    prior1 = p.prior_loop
+    prior0 = max(1e-12, 1.0 - prior1)
+    return (p.C10 / p.C01) * (prior0 / prior1)
+
+
+def chi2_threshold(nu: int, alpha: float) -> float:
+    """
+    Return chi-square quantile for df=nu at 1-alpha.
+    If SciPy is missing, use Wilson-Hilferty approximation.
+    """
+    if _HAVE_SCIPY:
+        return float(chi2.ppf(1.0 - alpha, df=nu))
+    # Wilson-Hilferty transform:
+    # chi2 ~ nu * (1 - 2/(9nu) + z*sqrt(2/(9nu)))^3
+    # with z = Phi^{-1}(1-alpha)
+    # We'll approximate z using a simple inverse-erf relation.
+    # (works adequately for typical alpha like 0.01, 0.005, 0.001)
+    # z = sqrt(2) * erfinv(2p-1); implement via math.erf inverse approximation
+    p = 1.0 - alpha
+    # Abramowitz-Stegun approximation for inverse error function
+    # (good enough for this fallback path)
+    def erfinv(y: float) -> float:
+        a = 0.147
+        sgn = 1.0 if y >= 0 else -1.0
+        ln = math.log(1.0 - y * y)
+        t = 2.0 / (math.pi * a) + ln / 2.0
+        return sgn * math.sqrt(math.sqrt(t * t - ln / a) - t)
+    z = math.sqrt(2.0) * erfinv(2.0 * p - 1.0)
+    nu_f = float(nu)
+    return nu_f * (1.0 - 2.0 / (9.0 * nu_f) + z * math.sqrt(2.0 / (9.0 * nu_f))) ** 3
+
+
+def geometric_gate(residual: np.ndarray, p: Params) -> Tuple[bool, float, float]:
+    """
+    Chi-square gate for residual r in R^3 with diagonal covariance.
+    Returns (ok, d2, threshold)
+    """
+    S = np.diag([p.sigma_dx ** 2, p.sigma_dy ** 2, p.sigma_dth ** 2])
+    Sinv = np.linalg.inv(S)
+    d2 = float(residual.T @ Sinv @ residual)
+    thr = chi2_threshold(3, p.alpha_geom)
+    return (d2 <= thr), d2, thr
+
+
+def ground_truth_loop(i: int, j: int, xy: np.ndarray, p: Params) -> bool:
+    # purely for evaluation: loop if physically close and not too recent
+    if j >= i - p.min_separation:
+        return False
+    return float(np.linalg.norm(xy[i] - xy[j])) <= p.loop_distance_thresh
+
+
+def simulate_measurement_residual(i: int, j: int, is_true_loop: bool, rng: np.random.Generator) -> np.ndarray:
+    """
+    Toy residual generator for geometric verification.
+    True loop => small residual; false loop => large residual.
+    """
+    if is_true_loop:
+        return rng.normal(0.0, [0.08, 0.08, 0.02], size=3)
+    # perceptual aliasing often yields a plausible but wrong alignment; model as larger errors
+    return rng.normal(0.0, [0.9, 0.9, 0.25], size=3)
+
+
+def retrieve_candidates(i: int, D: np.ndarray, p: Params) -> List[Tuple[int, float]]:
+    """
+    Return topK candidates (j, similarity) for keyframe i among frames < i - min_separation.
+    """
+    if i <= p.min_separation:
+        return []
+    d_i = D[i]
+    sims = []
+    for j in range(0, i - p.min_separation):
+        s = cosine_similarity(d_i, D[j])
+        sims.append((j, s))
+    sims.sort(key=lambda t: -t[1])
+    return sims[: p.topK]
+
+
+def main():
+    p = Params()
+    random.seed(p.seed)
+    np.random.seed(p.seed)
+    rng = np.random.default_rng(p.seed)
+
+    # 1) Build trajectory and descriptors
+    xy = square_loop_trajectory(p.N)
+    D = make_tfidf_like_descriptors(xy, V=p.V, seed=p.seed)
+
+    # 2) Bayesian threshold on similarity LLR
+    eta = bayes_threshold_eta(p)
+    log_eta = math.log(eta)
+
+    # 3) Run loop closure detection
+    accepted = []
+    proposed = []
+    gt_true = 0
+    det_true = 0
+    det_fp = 0
+
+    for i in range(p.N):
+        cands = retrieve_candidates(i, D, p)
+        for (j, s) in cands:
+            is_true = ground_truth_loop(i, j, xy, p)
+            if is_true:
+                gt_true += 1
+
+            # Stage A: similarity test (LLR)
+            llr = llr_similarity(s, p)
+            sim_accept = (llr > log_eta)
+
+            # Stage B: geometric gate (chi-square)
+            if sim_accept:
+                r = simulate_measurement_residual(i, j, is_true, rng)
+                ok, d2, thr = geometric_gate(r, p)
+                proposed.append((i, j, s, llr, d2, thr, is_true))
+                if ok:
+                    accepted.append((i, j, s, llr, d2, is_true))
+                    if is_true:
+                        det_true += 1
+                    else:
+                        det_fp += 1
+
+    # 4) Metrics
+    # Define "detections" as accepted, and "positives" as gt_true counted over examined candidates
+    total_det = len(accepted)
+    precision = det_true / total_det if total_det > 0 else 0.0
+    recall = det_true / gt_true if gt_true > 0 else 0.0
+
+    print("=== Loop Closure Detection (Toy) ===")
+    print(f"N keyframes: {p.N}")
+    print(f"min separation: {p.min_separation}, topK: {p.topK}")
+    print(f"Bayes threshold eta = {eta:.3g}  (log eta = {log_eta:.3f})")
+    print(f"Geometric gate alpha = {p.alpha_geom}, chi2 threshold (df=3) = {chi2_threshold(3, p.alpha_geom):.3f}")
+    print("")
+    print(f"Proposed (after similarity): {len(proposed)}")
+    print(f"Accepted (after geometry):   {len(accepted)}")
+    print(f"Detected true: {det_true}")
+    print(f"False accepts: {det_fp}")
+    print(f"Precision: {precision:.3f}")
+    print(f"Recall:    {recall:.3f}")
+
+    print("\nTop accepted loop closures (by similarity):")
+    accepted_sorted = sorted(accepted, key=lambda t: -t[2])
+    for row in accepted_sorted[:10]:
+        i, j, s, llr, d2, is_true = row
+        print(f"  i={i:4d}, j={j:4d}, sim={s:.3f}, llr={llr:.3f}, d2={d2:.3f}, true={is_true}")
+
+    # Optional: show how you would convert to a graph edge (conceptual)
+    if accepted_sorted:
+        i, j, s, llr, d2, is_true = accepted_sorted[0]
+        print("\nExample accepted pair interpreted as a graph constraint:")
+        print(f"  Add edge between x_{j} and x_{i} with measurement z_ij (dx,dy,dtheta) from geometry.")
+        print("  The optimizer in Lesson 3 will incorporate this edge into the pose graph.")
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <script>
+        /* placeholder to keep template readable in this chat export */
+      </script>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Lab — Minimal Loop-Closure Detector (Eigen)</h2>
+    <div class="down-content">
+      <p>
+        This C++ version mirrors the pipeline with brute-force cosine retrieval
+        and a chi-square gate. For production, replace retrieval with an
+        approximate nearest-neighbor index and replace the toy measurement with
+        scan matching / vision geometry outputs.
+      </p>
+
+      <p><strong>File:</strong> Chapter12_Lesson2.cpp</p>
+      <pre><code class="language-cpp">
+// Chapter12_Lesson2.cpp
+// Loop Closure Detection Concepts (Graph-Based SLAM) — Minimal C++ demo
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter12_Lesson2.cpp -I /usr/include/eigen3 -o ch12_l2
+//
+// This program demonstrates:
+// - Descriptor retrieval by cosine similarity (brute-force).
+// - Bayesian / likelihood-ratio threshold on similarity scores (Gaussian toy model).
+// - Chi-square gating for a (dx,dy,dtheta) residual with diagonal covariance.
+//
+// NOTE: Replace toy residual generation with your scan matching / vision geometry residuals.
+
+#include &lt;Eigen/Dense&gt;
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;cstdint&gt;
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;tuple&gt;
+#include &lt;vector&gt;
+
+struct Params {
+  int seed = 7;
+  int N = 520;
+  int min_separation = 40;
+  int topK = 5;
+
+  // Similarity score model (toy):
+  double mu1 = 0.92, sig1 = 0.03;
+  double mu0 = 0.55, sig0 = 0.08;
+
+  // Bayes costs + prior:
+  double C10 = 50.0;
+  double C01 = 1.0;
+  double prior_loop = 0.01;
+
+  // Geometric gate (dx,dy,dtheta) covariance std:
+  double sigma_dx = 0.25;
+  double sigma_dy = 0.25;
+  double sigma_dth = 0.08;
+
+  // If you do not have a chi-square quantile function available, set a typical constant:
+  // chi2_{df=3, 0.995} ≈ 12.838, chi2_{df=3, 0.999} ≈ 16.266
+  double chi2_thr_df3_0p995 = 12.838;
+
+  // Descriptor dimension:
+  int V = 500;
+};
+
+static double normal_logpdf(double x, double mu, double sigma) {
+  const double s2 = sigma * sigma;
+  return -0.5 * std::log(2.0 * M_PI * s2) - 0.5 * (x - mu) * (x - mu) / s2;
+}
+
+static double llr_similarity(double s, const Params&amp; p) {
+  return normal_logpdf(s, p.mu1, p.sig1) - normal_logpdf(s, p.mu0, p.sig0);
+}
+
+static double bayes_eta(const Params&amp; p) {
+  const double prior1 = p.prior_loop;
+  const double prior0 = std::max(1e-12, 1.0 - prior1);
+  return (p.C10 / p.C01) * (prior0 / prior1);
+}
+
+static Eigen::MatrixXd square_loop_xy(int N) {
+  std::vector&lt;Eigen::Vector2d&gt; pts;
+  const int S = std::max(20, N / 12);
+  const double side = 10.0;
+  const int laps = std::max(1, N / (4 * S)) + 1;
+
+  pts.reserve(laps * 4 * S);
+  for (int lap = 0; lap &lt; laps; ++lap) {
+    for (int k = 0; k &lt; S; ++k) pts.emplace_back((double)k / S * side, 0.0);
+    for (int k = 0; k &lt; S; ++k) pts.emplace_back(side, (double)k / S * side);
+    for (int k = 0; k &lt; S; ++k) pts.emplace_back(side - (double)k / S * side, side);
+    for (int k = 0; k &lt; S; ++k) pts.emplace_back(0.0, side - (double)k / S * side);
+  }
+  if ((int)pts.size() &gt; N) pts.resize(N);
+
+  Eigen::MatrixXd xy(N, 2);
+  for (int i = 0; i &lt; N; ++i) xy.row(i) = pts[i];
+  return xy;
+}
+
+static Eigen::MatrixXd make_descriptors(const Eigen::MatrixXd&amp; xy, int V, int seed) {
+  std::mt19937_64 rng(seed);
+  std::uniform_real_distribution&lt;double&gt; unif(0.0, 10.0);
+  std::uniform_real_distribution&lt;double&gt; unif01(0.0, 1.0);
+
+  const int N = (int)xy.rows();
+  Eigen::MatrixXd centers(V, 2);
+  for (int w = 0; w &lt; V; ++w) centers(w, 0) = unif(rng), centers(w, 1) = unif(rng);
+
+  const double ell = 1.5;
+  Eigen::MatrixXd D(N, V);
+  for (int i = 0; i &lt; N; ++i) {
+    for (int w = 0; w &lt; V; ++w) {
+      const double dx = centers(w, 0) - xy(i, 0);
+      const double dy = centers(w, 1) - xy(i, 1);
+      const double r2 = dx * dx + dy * dy;
+      D(i, w) = std::exp(-0.5 * r2 / (ell * ell)) + 0.02 * unif01(rng);
+    }
+  }
+
+  // TF–IDF-like idf
+  const double thr = 0.05;
+  Eigen::VectorXd df(V);
+  for (int w = 0; w &lt; V; ++w) {
+    int count = 0;
+    for (int i = 0; i &lt; N; ++i) if (D(i, w) &gt; thr) count++;
+    df(w) = (double)count;
+  }
+  Eigen::VectorXd idf(V);
+  for (int w = 0; w &lt; V; ++w) {
+    idf(w) = std::log((N + 1.0) / (df(w) + 1.0)) + 1.0;
+  }
+  for (int i = 0; i &lt; N; ++i) {
+    D.row(i) = D.row(i).array() * idf.transpose().array();
+    const double nrm = D.row(i).norm() + 1e-12;
+    D.row(i) /= nrm;
+  }
+  return D;
+}
+
+static double cosine_sim(const Eigen::VectorXd&amp; a, const Eigen::VectorXd&amp; b) {
+  const double denom = a.norm() * b.norm() + 1e-12;
+  return a.dot(b) / denom;
+}
+
+static bool ground_truth_loop(int i, int j, const Eigen::MatrixXd&amp; xy, const Params&amp; p) {
+  if (j &gt;= i - p.min_separation) return false;
+  const double dist = (xy.row(i) - xy.row(j)).norm();
+  return dist &lt;= 0.9; // same as python example
+}
+
+static Eigen::Vector3d simulate_residual(bool is_true, std::mt19937_64&amp; rng) {
+  auto gauss = [&amp;](double s) {
+    std::normal_distribution&lt;double&gt; nd(0.0, s);
+    return nd(rng);
+  };
+  if (is_true) return Eigen::Vector3d(gauss(0.08), gauss(0.08), gauss(0.02));
+  return Eigen::Vector3d(gauss(0.9), gauss(0.9), gauss(0.25));
+}
+
+static std::vector&lt;std::pair&lt;int, double&gt;&gt; retrieve_topK(int i, const Eigen::MatrixXd&amp; D, const Params&amp; p) {
+  std::vector&lt;std::pair&lt;int, double&gt;&gt; sims;
+  if (i &lt;= p.min_separation) return sims;
+  sims.reserve(i - p.min_separation);
+  const Eigen::VectorXd di = D.row(i);
+  for (int j = 0; j &lt; i - p.min_separation; ++j) {
+    const double s = cosine_sim(di, D.row(j));
+    sims.emplace_back(j, s);
+  }
+  std::partial_sort(
+      sims.begin(), sims.begin() + std::min((int)sims.size(), p.topK), sims.end(),
+      [](const auto&amp; a, const auto&amp; b) { return a.second &gt; b.second; });
+  if ((int)sims.size() &gt; p.topK) sims.resize(p.topK);
+  return sims;
+}
+
+int main() {
+  Params p;
+  std::mt19937_64 rng(p.seed);
+
+  Eigen::MatrixXd xy = square_loop_xy(p.N);
+  Eigen::MatrixXd D = make_descriptors(xy, p.V, p.seed);
+
+  const double eta = bayes_eta(p);
+  const double log_eta = std::log(eta);
+
+  int gt_true = 0, det_true = 0, det_fp = 0;
+  int proposed = 0, accepted = 0;
+
+  for (int i = 0; i &lt; p.N; ++i) {
+    auto cands = retrieve_topK(i, D, p);
+    for (const auto&amp; cs : cands) {
+      const int j = cs.first;
+      const double s = cs.second;
+
+      const bool is_true = ground_truth_loop(i, j, xy, p);
+      if (is_true) gt_true++;
+
+      const double llr = llr_similarity(s, p);
+      const bool sim_accept = (llr &gt; log_eta);
+
+      if (!sim_accept) continue;
+      proposed++;
+
+      Eigen::Vector3d r = simulate_residual(is_true, rng);
+
+      Eigen::Matrix3d S = Eigen::Matrix3d::Zero();
+      S(0, 0) = p.sigma_dx * p.sigma_dx;
+      S(1, 1) = p.sigma_dy * p.sigma_dy;
+      S(2, 2) = p.sigma_dth * p.sigma_dth;
+
+      const double d2 = r.transpose() * S.inverse() * r;
+      if (d2 &lt;= p.chi2_thr_df3_0p995) {
+        accepted++;
+        if (is_true)
+          det_true++;
+        else
+          det_fp++;
+      }
+    }
+  }
+
+  const double precision = (accepted &gt; 0) ? (double)det_true / accepted : 0.0;
+  const double recall = (gt_true &gt; 0) ? (double)det_true / gt_true : 0.0;
+
+  std::cout &lt;&lt; "=== Loop Closure Detection (C++) ===\n";
+  std::cout &lt;&lt; "N keyframes: " &lt;&lt; p.N &lt;&lt; "\n";
+  std::cout &lt;&lt; "min separation: " &lt;&lt; p.min_separation &lt;&lt; ", topK: " &lt;&lt; p.topK &lt;&lt; "\n";
+  std::cout &lt;&lt; "Bayes eta: " &lt;&lt; eta &lt;&lt; " (log eta: " &lt;&lt; log_eta &lt;&lt; ")\n";
+  std::cout &lt;&lt; "Chi2 threshold df=3, 0.995: " &lt;&lt; p.chi2_thr_df3_0p995 &lt;&lt; "\n\n";
+  std::cout &lt;&lt; "Proposed (after similarity): " &lt;&lt; proposed &lt;&lt; "\n";
+  std::cout &lt;&lt; "Accepted (after geometry):   " &lt;&lt; accepted &lt;&lt; "\n";
+  std::cout &lt;&lt; "Detected true: " &lt;&lt; det_true &lt;&lt; "\n";
+  std::cout &lt;&lt; "False accepts: " &lt;&lt; det_fp &lt;&lt; "\n";
+  std::cout &lt;&lt; "Precision: " &lt;&lt; precision &lt;&lt; "\n";
+  std::cout &lt;&lt; "Recall:    " &lt;&lt; recall &lt;&lt; "\n";
+  return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Lab — Minimal Loop-Closure Detector</h2>
+    <div class="down-content">
+      <p>
+        This Java demo keeps dependencies minimal (no external libraries
+        required) and demonstrates the core logic: cosine retrieval + chi-square
+        gating. In robotics stacks, Java is commonly paired with middleware
+        bindings or custom perception modules; the algorithmic structure remains
+        identical.
+      </p>
+
+      <p><strong>File:</strong> Chapter12_Lesson2.java</p>
+      <pre><code class="language-java">
+// Chapter12_Lesson2.java
+// Loop Closure Detection Concepts (Graph-Based SLAM) — Minimal Java demo
+//
+// This program demonstrates:
+// - Descriptor retrieval by cosine similarity (brute-force).
+// - Bayesian / likelihood-ratio threshold on similarity scores (Gaussian toy model).
+// - Chi-square gating for a (dx,dy,dtheta) residual with diagonal covariance.
+//
+// NOTE: Replace toy residual generation with real geometric verification.
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Random;
+
+public class Chapter12_Lesson2 {
+
+    static class Params {
+        int seed = 7;
+        int N = 520;
+        int minSeparation = 40;
+        int topK = 5;
+
+        // Similarity model (toy)
+        double mu1 = 0.92, sig1 = 0.03;
+        double mu0 = 0.55, sig0 = 0.08;
+
+        // Bayes costs + prior
+        double C10 = 50.0;
+        double C01 = 1.0;
+        double priorLoop = 0.01;
+
+        // Geometric gate (dx,dy,dtheta) std
+        double sigmaDx = 0.25;
+        double sigmaDy = 0.25;
+        double sigmaDth = 0.08;
+
+        // Chi-square threshold df=3 at 0.995 ~ 12.838
+        double chi2Thr = 12.838;
+
+        int V = 500;
+        double loopDistThresh = 0.9;
+    }
+
+    static double normalLogPdf(double x, double mu, double sigma) {
+        double s2 = sigma * sigma;
+        return -0.5 * Math.log(2.0 * Math.PI * s2) - 0.5 * (x - mu) * (x - mu) / s2;
+    }
+
+    static double llrSimilarity(double s, Params p) {
+        return normalLogPdf(s, p.mu1, p.sig1) - normalLogPdf(s, p.mu0, p.sig0);
+    }
+
+    static double bayesEta(Params p) {
+        double prior1 = p.priorLoop;
+        double prior0 = Math.max(1e-12, 1.0 - prior1);
+        return (p.C10 / p.C01) * (prior0 / prior1);
+    }
+
+    static double[][] squareLoopXY(int N) {
+        List&lt;double[]&gt; pts = new ArrayList&lt;&gt;();
+        int S = Math.max(20, N / 12);
+        double side = 10.0;
+        int laps = Math.max(1, N / (4 * S)) + 1;
+        for (int lap = 0; lap &lt; laps; lap++) {
+            for (int k = 0; k &lt; S; k++) pts.add(new double[]{(double)k / S * side, 0.0});
+            for (int k = 0; k &lt; S; k++) pts.add(new double[]{side, (double)k / S * side});
+            for (int k = 0; k &lt; S; k++) pts.add(new double[]{side - (double)k / S * side, side});
+            for (int k = 0; k &lt; S; k++) pts.add(new double[]{0.0, side - (double)k / S * side});
+        }
+        if (pts.size() &gt; N) pts = pts.subList(0, N);
+        double[][] xy = new double[N][2];
+        for (int i = 0; i &lt; N; i++) xy[i] = pts.get(i);
+        return xy;
+    }
+
+    static double dot(double[] a, double[] b) {
+        double s = 0.0;
+        for (int i = 0; i &lt; a.length; i++) s += a[i] * b[i];
+        return s;
+    }
+
+    static double norm(double[] a) {
+        return Math.sqrt(dot(a, a));
+    }
+
+    static double cosine(double[] a, double[] b) {
+        return dot(a, b) / (norm(a) * norm(b) + 1e-12);
+    }
+
+    static double[][] makeDescriptors(double[][] xy, int V, int seed) {
+        Random rng = new Random(seed);
+        int N = xy.length;
+
+        // Random centers
+        double[][] centers = new double[V][2];
+        for (int w = 0; w &lt; V; w++) {
+            centers[w][0] = 10.0 * rng.nextDouble();
+            centers[w][1] = 10.0 * rng.nextDouble();
+        }
+
+        double ell = 1.5;
+        double[][] D = new double[N][V];
+        for (int i = 0; i &lt; N; i++) {
+            for (int w = 0; w &lt; V; w++) {
+                double dx = centers[w][0] - xy[i][0];
+                double dy = centers[w][1] - xy[i][1];
+                double r2 = dx * dx + dy * dy;
+                D[i][w] = Math.exp(-0.5 * r2 / (ell * ell)) + 0.02 * rng.nextDouble();
+            }
+        }
+
+        // TF–IDF-like idf
+        double thr = 0.05;
+        int[] df = new int[V];
+        for (int w = 0; w &lt; V; w++) {
+            int c = 0;
+            for (int i = 0; i &lt; N; i++) if (D[i][w] &gt; thr) c++;
+            df[w] = c;
+        }
+        double[] idf = new double[V];
+        for (int w = 0; w &lt; V; w++) {
+            idf[w] = Math.log((N + 1.0) / (df[w] + 1.0)) + 1.0;
+        }
+
+        // Weight and normalize
+        for (int i = 0; i &lt; N; i++) {
+            for (int w = 0; w &lt; V; w++) D[i][w] *= idf[w];
+            double nrm = norm(D[i]) + 1e-12;
+            for (int w = 0; w &lt; V; w++) D[i][w] /= nrm;
+        }
+        return D;
+    }
+
+    static boolean groundTruthLoop(int i, int j, double[][] xy, Params p) {
+        if (j &gt;= i - p.minSeparation) return false;
+        double dx = xy[i][0] - xy[j][0];
+        double dy = xy[i][1] - xy[j][1];
+        double dist = Math.sqrt(dx * dx + dy * dy);
+        return dist &lt;= p.loopDistThresh;
+    }
+
+    static double[] simulateResidual(boolean isTrue, Random rng) {
+        // Box-Muller gaussian
+        java.util.function.DoubleUnaryOperator gauss = (sigma) -&gt; {
+            double u1 = Math.max(1e-12, rng.nextDouble());
+            double u2 = rng.nextDouble();
+            double z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+            return sigma * z;
+        };
+        if (isTrue) return new double[]{gauss.applyAsDouble(0.08), gauss.applyAsDouble(0.08), gauss.applyAsDouble(0.02)};
+        return new double[]{gauss.applyAsDouble(0.9), gauss.applyAsDouble(0.9), gauss.applyAsDouble(0.25)};
+    }
+
+    static class Cand {
+        int j;
+        double sim;
+        Cand(int j, double sim) { this.j = j; this.sim = sim; }
+    }
+
+    static List&lt;Cand&gt; retrieveTopK(int i, double[][] D, Params p) {
+        List&lt;Cand&gt; list = new ArrayList&lt;&gt;();
+        if (i &lt;= p.minSeparation) return list;
+        for (int j = 0; j &lt; i - p.minSeparation; j++) {
+            double s = cosine(D[i], D[j]);
+            list.add(new Cand(j, s));
+        }
+        Collections.sort(list, Comparator.comparingDouble((Cand c) -&gt; -c.sim));
+        if (list.size() &gt; p.topK) return list.subList(0, p.topK);
+        return list;
+    }
+
+    static boolean chi2Gate(double[] r, Params p) {
+        double d2 = (r[0] * r[0]) / (p.sigmaDx * p.sigmaDx)
+                  + (r[1] * r[1]) / (p.sigmaDy * p.sigmaDy)
+                  + (r[2] * r[2]) / (p.sigmaDth * p.sigmaDth);
+        return d2 &lt;= p.chi2Thr;
+    }
+
+    public static void main(String[] args) {
+        Params p = new Params();
+        Random rng = new Random(p.seed);
+
+        double[][] xy = squareLoopXY(p.N);
+        double[][] D = makeDescriptors(xy, p.V, p.seed);
+
+        double eta = bayesEta(p);
+        double logEta = Math.log(eta);
+
+        int gtTrue = 0, detTrue = 0, detFp = 0;
+        int proposed = 0, accepted = 0;
+
+        for (int i = 0; i &lt; p.N; i++) {
+            List&lt;Cand&gt; cands = retrieveTopK(i, D, p);
+            for (Cand c : cands) {
+                int j = c.j;
+                double s = c.sim;
+
+                boolean isTrue = groundTruthLoop(i, j, xy, p);
+                if (isTrue) gtTrue++;
+
+                double llr = llrSimilarity(s, p);
+                boolean simAccept = (llr &gt; logEta);
+                if (!simAccept) continue;
+                proposed++;
+
+                double[] r = simulateResidual(isTrue, rng);
+                if (chi2Gate(r, p)) {
+                    accepted++;
+                    if (isTrue) detTrue++;
+                    else detFp++;
+                }
+            }
+        }
+
+        double precision = (accepted &gt; 0) ? (double)detTrue / accepted : 0.0;
+        double recall = (gtTrue &gt; 0) ? (double)detTrue / gtTrue : 0.0;
+
+        System.out.println("=== Loop Closure Detection (Java) ===");
+        System.out.println("N keyframes: " + p.N);
+        System.out.println("min separation: " + p.minSeparation + ", topK: " + p.topK);
+        System.out.println("Bayes eta: " + eta + " (log eta: " + logEta + ")");
+        System.out.println("Chi2 threshold df=3, 0.995: " + p.chi2Thr);
+        System.out.println();
+        System.out.println("Proposed (after similarity): " + proposed);
+        System.out.println("Accepted (after geometry):   " + accepted);
+        System.out.println("Detected true: " + detTrue);
+        System.out.println("False accepts: " + detFp);
+        System.out.println("Precision: " + precision);
+        System.out.println("Recall:    " + recall);
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Lab — Script + Streaming Scaffold</h2>
+    <div class="down-content">
+      <p>
+        The MATLAB script implements retrieval + gating and optionally generates
+        a small Simulink model containing a MATLAB Function block to illustrate
+        how loop-closure logic can be embedded in a streaming pipeline
+        (descriptors arriving over time).
+      </p>
+
+      <p><strong>File:</strong> Chapter12_Lesson2.m</p>
+      <pre><code class="language-matlab">
+% Chapter12_Lesson2.m
+% Loop Closure Detection Concepts (Graph-Based SLAM) — MATLAB demo
+%
+% Demonstrates:
+% - Descriptor retrieval using cosine similarity (TF–IDF-like descriptors).
+% - Bayesian / likelihood-ratio thresholding on similarity scores.
+% - Chi-square gating on (dx, dy, dtheta) residual with diagonal covariance.
+%
+% Also optionally builds a tiny Simulink model with a MATLAB Function block
+% showing how gating could be used in a streaming pipeline.
+%
+% NOTE: Replace toy residual generation with scan matching / vision geometry residuals.
+
+function Chapter12_Lesson2()
+    rng(7);
+
+    % Parameters
+    N = 520;
+    minSep = 40;
+    topK = 5;
+
+    % Similarity score model (toy)
+    mu1 = 0.92; sig1 = 0.03;
+    mu0 = 0.55; sig0 = 0.08;
+
+    % Bayes costs + prior
+    C10 = 50.0;  % false accept
+    C01 = 1.0;   % false reject
+    priorLoop = 0.01;
+
+    % Geometric gate covariance std
+    sigma = diag([0.25^2, 0.25^2, 0.08^2]);
+
+    % Chi-square threshold df=3 at 0.995
+    chi2thr = 12.838;
+
+    % Descriptor dimension
+    V = 500;
+
+    % Ground-truth loop definition (evaluation only)
+    loopDistThr = 0.9;
+
+    % Build toy square-loop trajectory and descriptors
+    xy = square_loop_xy(N);
+    D  = make_descriptors(xy, V);
+
+    % Bayes threshold
+    eta = (C10/C01) * ((1-priorLoop)/priorLoop);
+    logEta = log(eta);
+
+    gtTrue = 0; detTrue = 0; detFp = 0;
+    proposed = 0; accepted = 0;
+
+    for i = 1:N
+        cands = retrieve_topK(i, D, minSep, topK);
+        for c = 1:size(cands,1)
+            j = cands(c,1);
+            s = cands(c,2);
+
+            isTrue = ground_truth_loop(i, j, xy, minSep, loopDistThr);
+            if isTrue, gtTrue = gtTrue + 1; end
+
+            llr = normal_logpdf(s, mu1, sig1) - normal_logpdf(s, mu0, sig0);
+            simAccept = (llr &gt; logEta);
+            if ~simAccept
+                continue
+            end
+            proposed = proposed + 1;
+
+            r = simulate_residual(isTrue);
+            d2 = r' * (sigma \ r);
+            if d2 &lt;= chi2thr
+                accepted = accepted + 1;
+                if isTrue, detTrue = detTrue + 1; else, detFp = detFp + 1; end
+            end
+        end
+    end
+
+    precision = 0; recall = 0;
+    if accepted &gt; 0, precision = detTrue / accepted; end
+    if gtTrue &gt; 0, recall = detTrue / gtTrue; end
+
+    fprintf('=== Loop Closure Detection (MATLAB) ===\n');
+    fprintf('N=%d, minSep=%d, topK=%d\n', N, minSep, topK);
+    fprintf('Bayes eta=%.3g (log=%.3f)\n', eta, logEta);
+    fprintf('Chi2 thr (df=3,0.995)=%.3f\n\n', chi2thr);
+    fprintf('Proposed (after similarity): %d\n', proposed);
+    fprintf('Accepted (after geometry):   %d\n', accepted);
+    fprintf('Detected true: %d\n', detTrue);
+    fprintf('False accepts: %d\n', detFp);
+    fprintf('Precision: %.3f\n', precision);
+    fprintf('Recall:    %.3f\n', recall);
+
+    % Optional: generate tiny Simulink model
+    % make_simulink_scaffold();
+end
+
+function xy = square_loop_xy(N)
+    S = max(20, floor(N/12));
+    side = 10.0;
+    pts = [];
+    laps = max(1, floor(N/(4*S))) + 1;
+    for lap = 1:laps
+        for k = 1:S, pts = [pts; (k-1)/S*side, 0.0]; end
+        for k = 1:S, pts = [pts; side, (k-1)/S*side]; end
+        for k = 1:S, pts = [pts; side-(k-1)/S*side, side]; end
+        for k = 1:S, pts = [pts; 0.0, side-(k-1)/S*side]; end
+    end
+    xy = pts(1:N,:);
+end
+
+function D = make_descriptors(xy, V)
+    N = size(xy,1);
+    centers = 10.0 * rand(V,2);
+    ell = 1.5;
+    D = zeros(N,V);
+    for i = 1:N
+        diff = centers - xy(i,:);
+        r2 = sum(diff.^2, 2);
+        D(i,:) = exp(-0.5 * r2' / (ell*ell)) + 0.02 * rand(1,V);
+    end
+
+    thr = 0.05;
+    df = sum(D &gt; thr, 1);
+    idf = log((N+1)./(df+1)) + 1;
+    D = D .* idf;
+    D = D ./ (sqrt(sum(D.^2,2)) + 1e-12);
+end
+
+function cands = retrieve_topK(i, D, minSep, topK)
+    if i &lt;= minSep
+        cands = zeros(0,2);
+        return
+    end
+    idx = 1:(i-minSep);
+    di = D(i,:);
+    sims = (D(idx,:) * di') ./ (sqrt(sum(D(idx,:).^2,2)) * norm(di) + 1e-12);
+    [~,ord] = sort(sims,'descend');
+    K = min(topK, numel(ord));
+    jj = idx(ord(1:K))';
+    ss = sims(ord(1:K));
+    cands = [jj, ss];
+end
+
+function tf = ground_truth_loop(i, j, xy, minSep, distThr)
+    if j &gt;= i - minSep
+        tf = false; return
+    end
+    tf = norm(xy(i,:) - xy(j,:)) &lt;= distThr;
+end
+
+function lp = normal_logpdf(x, mu, sigma)
+    lp = -0.5*log(2*pi*sigma*sigma) - 0.5*((x-mu)/sigma)^2;
+end
+
+function r = simulate_residual(isTrue)
+    if isTrue
+        r = [0.08*randn; 0.08*randn; 0.02*randn];
+    else
+        r = [0.9*randn; 0.9*randn; 0.25*randn];
+    end
+end
+
+function make_simulink_scaffold()
+    mdl = 'Ch12_L2_LoopClosureScaffold';
+    if bdIsLoaded(mdl), close_system(mdl,0); end
+    new_system(mdl);
+    open_system(mdl);
+
+    add_block('simulink/Sources/In1',[mdl '/sim_in']);
+    add_block('simulink/User-Defined Functions/MATLAB Function',[mdl '/gate']);
+    add_block('simulink/Sinks/Out1',[mdl '/sim_out']);
+
+    set_param([mdl '/gate'], 'Position', [250 80 420 160]);
+    set_param([mdl '/sim_in'], 'Position', [70 95 100 115]);
+    set_param([mdl '/sim_out'], 'Position', [520 95 550 115]);
+
+    add_line(mdl, 'sim_in/1', 'gate/1');
+    add_line(mdl, 'gate/1', 'sim_out/1');
+
+    % Insert code into MATLAB Function block
+    code = [
+        "function ok = gate(u)"
+        "% u = [dx; dy; dth] residual"
+        "S = diag([0.25^2, 0.25^2, 0.08^2]);"
+        "chi2thr = 12.838;"
+        "d2 = u'*(S\\u);"
+        "ok = (d2 &lt;= chi2thr);"
+        "end"
+    ];
+    set_param([mdl '/gate'], 'Script', strjoin(code, newline));
+
+    save_system(mdl);
+    fprintf('Created Simulink scaffold: %s.slx\n', mdl);
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Lab — Compact Notebook</h2>
+    <div class="down-content">
+      <p>
+        This notebook demonstrates descriptor retrieval and a chi-square gate
+        with built-in distributions. Replace the toy residual with your actual
+        geometry residual
+        <strong
+          >\( \mathbf{r}_{ij} = \mathbf{z}_{ij} - \hat{\mathbf{z}}_{ij}
+          \)</strong
+        >
+        to replicate the verification stage.
+      </p>
+
+      <p><strong>File:</strong> Chapter12_Lesson2.nb</p>
+      <pre><code class="language-mathematica">
+(* Chapter12_Lesson2.nb
+   Loop Closure Detection Concepts — Mathematica demo (compact notebook)
+   Open in Wolfram Mathematica.
+*)
+
+Notebook[{
+  Cell["Chapter 12 — Lesson 2: Loop Closure Detection Concepts", "Title"],
+  Cell["Compact demo: descriptor retrieval + simple statistical gating.", "Text"],
+
+  Cell["SeedRandom[0];", "Input"],
+  Cell["N = 420; V = 300; minSep = 40;", "Input"],
+
+  Cell["(* 1) Toy descriptors (unit-normalized vectors) *)", "Section"],
+  Cell["X = RandomReal[1, {N, V}]; X = Normalize /@ X;", "Input"],
+  Cell["cos[a_, b_] := (a.b)/(Norm[a] Norm[b] + 10^-12);", "Input"],
+
+  Cell["(* 2) Candidate retrieval: for each i, find best j &lt; i-minSep by cosine similarity *)", "Section"],
+  Cell[
+    "bestJ[i_] := If[i &lt;= minSep, Missing[\"NA\"], First @ OrderingBy[Range[i - minSep], -cos[X[[i]], X[[#]]] &amp; , 1]];",
+    "Input"
+  ],
+  Cell[
+    "detEdges = Reap[Do[j = bestJ[i]; If[j =!= Missing[\"NA\"], sim = cos[X[[i]], X[[j]]]; If[sim &gt; 0.85, Sow[{i, j, sim}]]], {i, 1, N}]][[2, 1]];",
+    "Input"
+  ],
+  Cell["Length[detEdges]", "Input"],
+  Cell["Take[Reverse@SortBy[detEdges, Last], UpTo[5]]", "Input"],
+
+  Cell["(* 3) Geometric gate: chi-square threshold for 3 DoF (x,y,theta) residual *)", "Section"],
+  Cell["chi2thr = Quantile[ChiSquareDistribution[3], 0.995];", "Input"],
+  Cell["Sigma = DiagonalMatrix[{0.2^2, 0.2^2, 0.07^2}];", "Input"],
+  Cell["gateOK[r_] := r.Inverse[Sigma].r &lt; chi2thr;", "Input"],
+  Cell["gateOK[{0.05, -0.02, 0.01}]", "Input"],
+
+  Cell["(* Replace the toy residual with r = z_ij - h(x_i,x_j) from scan matching / vision. *)", "Text"]
+},
+WindowSize -&gt; {1000, 750},
+StyleDefinitions -&gt; \"Default.nb\"
+]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Bayes threshold for loop closure):</strong>
+        Let <strong>\( L_{ij}\in\{0,1\} \)</strong>. Costs are
+        <strong>\( C_{10} \)</strong> (false accept) and
+        <strong>\( C_{01} \)</strong> (false reject). Derive the optimal
+        acceptance condition in terms of the likelihood ratio
+        <strong>\( \Lambda(\mathcal{E}_{ij}) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Choose accept if
+        <strong
+          >\( C_{10}P(L_{ij}=0\mid\mathcal{E}_{ij}) &lt;
+          C_{01}P(L_{ij}=1\mid\mathcal{E}_{ij}) \)</strong
+        >. Using Bayes’ rule:
+        <strong
+          >\(
+          \frac{P(L_{ij}=1\mid\mathcal{E}_{ij})}{P(L_{ij}=0\mid\mathcal{E}_{ij})}
+          = \Lambda(\mathcal{E}_{ij})\frac{P(L_{ij}=1)}{P(L_{ij}=0)} \)</strong
+        >. Therefore accept if:
+      </p>
+      <h4 class="mathJax">
+        \[ \Lambda(\mathcal{E}_{ij}) &gt;
+        \frac{C_{10}}{C_{01}}\cdot\frac{P(L_{ij}=0)}{P(L_{ij}=1)}. \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Chi-square gate):</strong>
+        Assume
+        <strong
+          >\( \mathbf{r} \sim \mathcal{N}(\mathbf{0},\mathbf{S}) \)</strong
+        >
+        with <strong>\( \mathbf{r}\in\mathbb{R}^{\nu} \)</strong>. Show that
+        <strong>\( d^2=\mathbf{r}^\top\mathbf{S}^{-1}\mathbf{r} \)</strong> is
+        chi-square distributed.
+      </p>
+      <p>
+        <strong>Solution:</strong> Let
+        <strong>\( \mathbf{y}=\mathbf{S}^{-1/2}\mathbf{r} \)</strong>. Then
+        <strong>\( \mathbf{y}\sim\mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong>
+        and <strong>\( d^2=\|\mathbf{y}\|_2^2=\sum_{k=1}^{\nu}y_k^2 \)</strong>,
+        hence <strong>\( d^2\sim\chi^2_{\nu} \)</strong>. The acceptance
+        probability under the model is
+        <strong>\( P(d^2 \le \chi^2_{\nu,\,1-\alpha}) = 1-\alpha \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (TF–IDF weighting effect):</strong>
+        Consider two words: a frequent “stop-word” with large
+        <strong>\( \mathrm{df}_w \)</strong> and a rare, informative word with
+        small <strong>\( \mathrm{df}_w \)</strong>. Show qualitatively and
+        quantitatively how <strong>\( \mathrm{idf}_w \)</strong> changes their
+        contribution to cosine similarity.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Since
+        <strong
+          >\( \mathrm{idf}_w = \log\left(\frac{N+1}{\mathrm{df}_w+1}\right)+1
+          \)</strong
+        >, if <strong>\( \mathrm{df}_w \approx N \)</strong> then
+        <strong>\( \mathrm{idf}_w \approx 1 \)</strong> (minimal boost), but if
+        <strong>\( \mathrm{df}_w \ll N \)</strong> then
+        <strong>\( \mathrm{idf}_w \)</strong> is much larger. Thus rare words
+        increase dot products primarily when both frames share them, improving
+        discriminability and lowering false positives caused by common patterns.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Prior odds and environment size):</strong>
+        In a long run, assume there are <strong>\( N \)</strong> keyframes and
+        only <strong>\( K \)</strong> true loop closures for the current frame
+        among all past frames. Approximate
+        <strong>\( P(L_{ij}=1) \)</strong> for a random candidate and explain
+        how this changes the Bayes threshold.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        If candidates are uniformly drawn from past frames, then roughly
+        <strong>\( P(L_{ij}=1)\approx \frac{K}{N} \)</strong> and
+        <strong>\( P(L_{ij}=0)\approx 1-\frac{K}{N} \)</strong>. As
+        <strong>\( N \)</strong> grows with <strong>\( K \)</strong> small, the
+        prior odds
+        <strong>\( \frac{P(L_{ij}=0)}{P(L_{ij}=1)} \)</strong> becomes large, so
+        the acceptance threshold <strong>\( \eta \)</strong> increases. Hence
+        large environments demand more conservative decisions.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Two-stage test composition):</strong>
+        Suppose the appearance stage has false positive rate
+        <strong>\( \alpha_a \)</strong> and the geometric stage has false
+        positive rate <strong>\( \alpha_g \)</strong> (conditional on reaching
+        it). Under the approximation that false matches must pass both,
+        upper-bound the overall false positive rate.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A conservative bound is:
+        <strong>\( \alpha_{\text{overall}} \le \alpha_a \alpha_g \)</strong>,
+        because a false candidate must survive both filters. This explains the
+        practical rule: keep appearance recall reasonably high, then use strict
+        geometric verification to drive precision.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        Loop closure detection is the <em>revisitation inference</em> module of
+        graph-based SLAM. We formulated loop closure as hypothesis testing,
+        derived an optimal likelihood-ratio decision rule under asymmetric
+        costs, and showed how geometric verification becomes a chi-square
+        consistency test. The output of this lesson is a vetted set of
+        loop-closure constraints to be inserted into the graph. In Lesson 3, we
+        will optimize the augmented graph; in Lesson 4, we will handle remaining
+        outliers robustly.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Cummins, M., &amp; Newman, P. (2008). FAB-MAP: Probabilistic
+        localization and mapping in the space of appearance.
+        <em>The International Journal of Robotics Research</em>, 27(6), 647–665.
+      </li>
+      <li>
+        Cummins, M., &amp; Newman, P. (2011). Appearance-only SLAM: Recovering
+        the metric scale.
+        <em>The International Journal of Robotics Research</em>, 30(14),
+        1758–1770.
+      </li>
+      <li>
+        Gálvez-López, D., &amp; Tardós, J.D. (2012). Bags of Binary Words for
+        Fast Place Recognition in Image Sequences.
+        <em>IEEE Transactions on Robotics</em>, 28(5), 1188–1197.
+      </li>
+      <li>
+        Nistér, D., &amp; Stewénius, H. (2006). Scalable recognition with a
+        vocabulary tree.
+        <em
+          >IEEE Conference on Computer Vision and Pattern Recognition (CVPR)</em
+        >, 2161–2168.
+      </li>
+      <li>
+        Kim, G., &amp; Kim, A. (2018). Scan Context: Egocentric Spatial
+        Descriptor for Place Recognition within 3D Point Cloud Map.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 4802–4809.
+      </li>
+      <li>
+        Dellaert, F., &amp; Kaess, M. (2017). Factor graphs for robot
+        perception.
+        <em>Foundations and Trends in Robotics</em>, 6(1–2), 1–139.
+      </li>
+      <li>
+        Kaess, M., Johannsson, H., Roberts, R., Ila, V., Leonard, J.J., &amp;
+        Dellaert, F. (2012). iSAM2: Incremental smoothing and mapping.
+        <em>The International Journal of Robotics Research</em>, 31(2), 216–235.
+      </li>
+      <li>
+        Neira, J., &amp; Tardós, J.D. (2001). Data association in stochastic
+        mapping using the joint compatibility test.
+        <em>IEEE Transactions on Robotics and Automation</em>, 17(6), 890–897.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter12/Lesson1.html">
+          Lesson 1: Pose Graphs and Factor Graphs
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter12/Lesson3.html">
+          Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

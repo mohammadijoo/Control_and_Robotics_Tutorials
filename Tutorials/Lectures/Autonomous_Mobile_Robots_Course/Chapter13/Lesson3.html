@@ -1,0 +1,2524 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus) - Lesson 3: Visual–Inertial Fusion Pipelines | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</h1>
+    <h3><strong>Lesson 3: Visual–Inertial Fusion Pipelines</strong></h3>
+    <p>
+      This lesson studies how an AMR fuses camera and IMU information to
+      estimate motion robustly under high-rate inertial dynamics, intermittent
+      visual constraints, and real-world disturbances (vibration, wheel slip,
+      motion blur). We unify filter-based and optimization-based pipelines,
+      derive their probabilistic foundations, and connect implementable
+      equations (preintegration, linearization, consistency checks) to the
+      practical architecture of modern VIO/VI-SLAM systems.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Why Visual–Inertial Fusion for AMR -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Why Visual–Inertial Fusion for AMR</h2>
+    <div class="down-content">
+      <p>
+        Visual odometry (VO) provides drift-limited constraints from images, but
+        it is sensitive to lighting, motion blur, texture scarcity, and scale
+        ambiguity (monocular). IMU integration provides high-rate motion
+        information and observability of gravity-aligned attitude and metric
+        scale, but it drifts due to bias and noise. VIO fuses both: inertial
+        propagation acts as a fast prior, while vision periodically corrects
+        drift by adding geometric constraints.
+      </p>
+      <p>
+        In AMR settings, we also care about: (i) long traversals with
+        intermittent features, (ii) vibrations, (iii) planar motion priors, and
+        (iv) wheel slip (which motivates multi-sensor redundancy). The fusion
+        pipeline must therefore be robust, computationally bounded, and
+        explicitly uncertainty-aware.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sensors: camera + IMU (+ wheel, GPS)"] --> SYNC["Time alignment and calibration"]
+  SYNC --> FE["Front-end: visual tracking and feature management"]
+  SYNC --> IMU["IMU integration / preintegration"]
+  FE --> LC["Loose coupling: VO pose -> filter/optimizer"]
+  FE --> TC["Tight coupling: reprojection residuals"]
+  IMU --> LC
+  IMU --> TC
+  LC --> EST["State estimator: EKF / Sliding-window"]
+  TC --> EST
+  EST --> OUT["Outputs: pose, velocity, biases, covariance"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Probabilistic Model and MAP Objective -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Probabilistic Model and MAP Objective</h2>
+    <div class="down-content">
+      <p>
+        Let the latent state at time <strong>\( k \)</strong> be
+        <strong>\( \mathbf{x}_k \)</strong> (pose, velocity, IMU biases). IMU
+        provides high-rate data <strong>\( \mathbf{u}_k \)</strong>, and vision
+        provides lower-rate observations <strong>\( \mathbf{z}_k \)</strong>.
+        The generic Markov factorization used by both EKF and factor graphs is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(\mathbf{x}_{0:K}\mid \mathbf{z}_{1:K},\mathbf{u}_{1:K}) \propto
+        p(\mathbf{x}_0)\prod_{k=1}^K p(\mathbf{x}_k\mid
+        \mathbf{x}_{k-1},\mathbf{u}_k)\; \prod_{k=1}^K p(\mathbf{z}_k\mid
+        \mathbf{x}_k). \]
+      </h4>
+
+      <p>
+        Under Gaussian assumptions for the process and measurement models,
+        maximizing the posterior is equivalent to minimizing a weighted
+        nonlinear least-squares objective (MAP &harr; least squares).
+      </p>
+
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x}}_{0:K} = \arg\min_{\mathbf{x}_{0:K}} \Big(
+        \|\mathbf{r}_0(\mathbf{x}_0)\|_{\mathbf{P}_0^{-1}}^2 +\sum_{k=1}^K
+        \|\mathbf{r}^{\text{imu}}_k(\mathbf{x}_{k-1},\mathbf{x}_k)\|_{\mathbf{Q}_k^{-1}}^2
+        +\sum_{k=1}^K
+        \|\mathbf{r}^{\text{vis}}_k(\mathbf{x}_k)\|_{\mathbf{R}_k^{-1}}^2 \Big),
+        \quad \|\mathbf{r}\|_{\mathbf{W}}^2 \triangleq \mathbf{r}^\top
+        \mathbf{W}\mathbf{r}. \]
+      </h4>
+
+      <p>
+        <strong>Proof sketch (MAP &harr; NLLS):</strong> If
+        <strong>
+          \( \mathbf{r} \sim \mathcal{N}(\mathbf{0},\mathbf{\Sigma}) \)</strong
+        >, then
+        <strong
+          >\( p(\mathbf{r}) \propto
+          \exp\!\left(-\tfrac{1}{2}\mathbf{r}^\top\mathbf{\Sigma}^{-1}\mathbf{r}\right)
+          \)</strong
+        >. Multiplying independent likelihood terms and taking
+        <strong>\( -\log \)</strong> yields a sum of quadratic forms; minimizing
+        that sum is MAP.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: IMU Measurement and Discrete-Time Propagation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. IMU Measurement and Discrete-Time Propagation</h2>
+    <div class="down-content">
+      <p>
+        The IMU reports specific force and angular velocity in the IMU/body
+        frame. A standard model is:
+        <strong> \( \mathbf{f}_m \)</strong> (accelerometer) and
+        <strong> \( \boldsymbol{\omega}_m \)</strong> (gyro).
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{f}_m = \mathbf{R}^\top(\mathbf{a}-\mathbf{g}) + \mathbf{b}_f
+        + \mathbf{n}_f, \qquad \boldsymbol{\omega}_m = \boldsymbol{\omega} +
+        \mathbf{b}_\omega + \mathbf{n}_\omega, \]
+      </h4>
+
+      <p>
+        where <strong> \( \mathbf{R} \)</strong> is the world-to-body rotation,
+        <strong> \( \mathbf{g} \)</strong> is gravity, biases
+        <strong> \( \mathbf{b}_f,\mathbf{b}_\omega \)</strong> are slowly
+        varying, and noises are modeled as white. In discrete time, a
+        pedagogical propagation (sufficient for AMR planar analysis) is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} \boldsymbol{\theta}_{k+1} &= \boldsymbol{\theta}_k +
+        (\boldsymbol{\omega}_{m,k}-\mathbf{b}_{\omega,k})\Delta t, \\
+        \mathbf{v}_{k+1} &= \mathbf{v}_k +
+        \left(\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_{f,k}) +
+        \mathbf{g}\right)\Delta t, \\ \mathbf{p}_{k+1} &= \mathbf{p}_k +
+        \mathbf{v}_k\Delta t +
+        \tfrac{1}{2}\left(\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_{f,k}) +
+        \mathbf{g}\right)\Delta t^2. \end{aligned} \]
+      </h4>
+
+      <p>
+        To propagate uncertainty, linearize around the current estimate using an
+        error-state model
+        <strong> \( \delta\mathbf{x}_k \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \delta\mathbf{x}_{k+1} = \mathbf{F}_k\delta\mathbf{x}_k +
+        \mathbf{G}_k\mathbf{w}_k, \qquad \mathbf{P}_{k+1} =
+        \mathbf{F}_k\mathbf{P}_k\mathbf{F}_k^\top +
+        \mathbf{G}_k\mathbf{Q}_k\mathbf{G}_k^\top. \]
+      </h4>
+
+      <p>
+        <strong>Practical note:</strong> In real 3D VIO, rotations are handled
+        on a manifold (e.g., SO(3) with incremental perturbations) to avoid
+        singularities. For AMR planar motion, a yaw angle perturbation is often
+        sufficient and simplifies Jacobians, as used in the provided code.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Visual Constraints and Coupling Strategies -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Visual Constraints and Coupling Strategies</h2>
+    <div class="down-content">
+      <p>
+        Vision can be used as (A) a pose constraint (output of VO) or (B) raw
+        pixel constraints (reprojection errors). These lead to two coupling
+        modes:
+      </p>
+      <ul>
+        <li>
+          <strong>Loose coupling:</strong> the visual front-end produces a pose
+          (or relative pose) with covariance; the back-end fuses it as a
+          measurement.
+        </li>
+        <li>
+          <strong>Tight coupling:</strong> the back-end directly minimizes
+          reprojection residuals of tracked features jointly with inertial
+          constraints, typically in a sliding window.
+        </li>
+      </ul>
+
+      <p>
+        A common tight-coupled residual for a feature
+        <strong> \( i \)</strong> observed at keyframe
+        <strong> \( k \)</strong> is:
+        <strong> \( \mathbf{r}(i,k) \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{r}(i,k) = \mathbf{u}_{i,k} -
+        \pi\!\left(\mathbf{T}_{CI}\mathbf{T}_{IW,k}^{-1}\mathbf{P}_i\right), \]
+      </h4>
+
+      <p>
+        where <strong> \( \mathbf{u}_{i,k} \)</strong> is the measured pixel,
+        <strong> \( \pi(\cdot) \)</strong> is the camera projection,
+        <strong> \( \mathbf{T}_{CI} \)</strong> is the camera&larr;IMU
+        extrinsic, and <strong> \( \mathbf{T}_{IW,k} \)</strong> is the IMU pose
+        in world. Robust penalties (Huber/Cauchy) are typically used to reduce
+        sensitivity to outliers:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \min_{\mathbf{x}} \sum_{i,k}
+        \rho\!\left(\|\mathbf{r}(i,k)\|_{\mathbf{\Sigma}_{i,k}^{-1}}^2\right) +
+        \sum_k \|\mathbf{r}^{\text{imu}}_k\|_{\mathbf{Q}_k^{-1}}^2, \quad
+        \rho(\cdot)\ \text{robust loss}. \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: IMU Preintegration for Optimization Pipelines -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. IMU Preintegration for Optimization Pipelines</h2>
+    <div class="down-content">
+      <p>
+        Sliding-window optimization would be too expensive if we integrated
+        every IMU sample as a separate factor. IMU
+        <em>preintegration</em> compresses many IMU samples between keyframes
+        <strong> \( i \)</strong> and <strong> \( j \)</strong>
+        into a small set of relative motion quantities:
+        <strong>
+          \( \Delta\mathbf{R}_{ij}, \Delta\mathbf{v}_{ij}, \Delta\mathbf{p}_{ij}
+          \)</strong
+        >
+        and an associated covariance.
+      </p>
+
+      <p>
+        In a simplified discrete form (ignoring higher-order bias corrections
+        for readability), define <strong> \( \Delta t \)</strong> as the time
+        from <strong> \( i \)</strong> to <strong> \( j \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} \Delta\mathbf{R}_{ij} &approx; \prod_{k=i}^{j-1}
+        \exp\!\left((\boldsymbol{\omega}_{m,k}-\mathbf{b}_\omega)\Delta
+        t_k\right), \\ \Delta\mathbf{v}_{ij} &approx; \sum_{k=i}^{j-1}
+        \Delta\mathbf{R}_{ik}(\mathbf{f}_{m,k}-\mathbf{b}_f)\Delta t_k, \\
+        \Delta\mathbf{p}_{ij} &approx;
+        \sum_{k=i}^{j-1}\left(\Delta\mathbf{v}_{ik}\Delta t_k +
+        \tfrac{1}{2}\Delta\mathbf{R}_{ik}(\mathbf{f}_{m,k}-\mathbf{b}_f)\Delta
+        t_k^2\right). \end{aligned} \]
+      </h4>
+
+      <p>
+        The resulting IMU factor residuals compare these preintegrated
+        quantities with the state variables at keyframes
+        <strong> \( i \)</strong> and <strong> \( j \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{r}_R &=
+        \operatorname{Log}\!\left((\Delta\mathbf{R}_{ij})^{-1}\mathbf{R}_i^\top\mathbf{R}_j\right),
+        \\ \mathbf{r}_v &=
+        \mathbf{R}_i^\top(\mathbf{v}_j-\mathbf{v}_i-\mathbf{g}\Delta t) -
+        \Delta\mathbf{v}_{ij}, \\ \mathbf{r}_p &=
+        \mathbf{R}_i^\top(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t -
+        \tfrac{1}{2}\mathbf{g}\Delta t^2) - \Delta\mathbf{p}_{ij}. \end{aligned}
+        \]
+      </h4>
+
+      <p>
+        <strong>Key idea:</strong> preintegration is computed in the local frame
+        of keyframe <strong> \( i \)</strong>, so it does not depend on the
+        global pose. Bias updates can be handled by first-order corrections that
+        avoid recomputing the full preintegration for small bias changes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Filter-Based Pipelines (Error-State EKF / MSCKF Style) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Filter-Based Pipelines (Error-State EKF / MSCKF Style)</h2>
+    <div class="down-content">
+      <p>
+        In a filter-based pipeline, the IMU drives the prediction step at high
+        rate, and visual information arrives as measurement updates. For an EKF,
+        the measurement model is:
+        <strong> \( \mathbf{z}_k = h(\mathbf{x}_k) + \mathbf{n}_k \)</strong>.
+        With linearization at <strong> \( \hat{\mathbf{x}}_k \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{y}_k = \mathbf{z}_k - h(\hat{\mathbf{x}}_k), \qquad
+        \mathbf{S}_k = \mathbf{H}_k\mathbf{P}_k\mathbf{H}_k^\top + \mathbf{R}_k,
+        \qquad \mathbf{K}_k = \mathbf{P}_k\mathbf{H}_k^\top \mathbf{S}_k^{-1}.
+        \]
+      </h4>
+
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x}}_k^+ = \hat{\mathbf{x}}_k + \mathbf{K}_k\mathbf{y}_k,
+        \qquad \mathbf{P}_k^+ =
+        (\mathbf{I}-\mathbf{K}_k\mathbf{H}_k)\mathbf{P}_k(\mathbf{I}-\mathbf{K}_k\mathbf{H}_k)^\top
+        + \mathbf{K}_k\mathbf{R}_k\mathbf{K}_k^\top. \]
+      </h4>
+
+      <p>
+        The covariance expression above is the <em>Joseph form</em>. It
+        preserves positive semidefiniteness under finite-precision arithmetic.
+        <strong>Why:</strong> it is a sum of two PSD matrices:
+        <strong>
+          \(
+          (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}(\mathbf{I}-\mathbf{K}\mathbf{H})^\top
+          \)</strong
+        >
+        and <strong> \( \mathbf{K}\mathbf{R}\mathbf{K}^\top \)</strong>.
+      </p>
+
+      <p>
+        <strong>MSCKF-style insight:</strong> Instead of explicitly estimating
+        every 3D landmark, one can keep a short history of camera poses and
+        eliminate landmarks analytically using multi-view constraints. This
+        yields measurement updates that constrain the trajectory without map
+        states, making the filter efficient.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Optimization-Based Pipelines (Sliding Window) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Optimization-Based Pipelines (Sliding Window)</h2>
+    <div class="down-content">
+      <p>
+        A sliding-window estimator maintains a window of recent keyframes and
+        solves a nonlinear least-squares problem:
+        <strong> \( \min \sum \|\text{residual}\|^2 \)</strong>. Compared to
+        EKF, it can be more accurate under strong nonlinearity because it
+        relinearizes iteratively and can handle feature structure explicitly.
+        The trade-off is higher computation.
+      </p>
+
+      <p>A standard Gauss–Newton iteration solves:</p>
+
+      <h4 class="mathJax">
+        \[ (\mathbf{J}^\top\mathbf{W}\mathbf{J})\delta =
+        -\mathbf{J}^\top\mathbf{W}\mathbf{r}, \qquad \mathbf{x} \leftarrow
+        \mathbf{x} \oplus \delta, \]
+      </h4>
+
+      <p>
+        where <strong> \( \mathbf{J} \)</strong> is the Jacobian of stacked
+        residuals, <strong> \( \mathbf{W} \)</strong> is the block weight matrix
+        (information), and <strong> \( \oplus \)</strong> denotes a state update
+        with appropriate rotation handling. The IMU part uses the preintegration
+        residuals in Section 5; the visual part uses reprojection residuals in
+        Section 4.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  K["Select keyframes in window"] --> P["Build factors: IMU + visual + priors"]
+  P --> L["Linearize residuals at current estimate"]
+  L --> H["Assemble normal equations: J^T W J and J^T W r"]
+  H --> S["Solve for delta (Cholesky or PCG)"]
+  S --> U["Update state and relinearize"]
+  U --> C["Converged?"]
+  C -->|yes| M["Marginalize old states -> prior factor"]
+  C -->|no| L
+  M --> O["Output pose, velocity, biases"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Observability, Scale, and Consistency Checks -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Observability, Scale, and Consistency Checks</h2>
+    <div class="down-content">
+      <p>
+        For VIO, some directions are fundamentally unobservable depending on
+        sensing:
+      </p>
+      <ul>
+        <li>
+          <strong>Global position:</strong> adding a constant translation to all
+          poses does not change relative visual constraints.
+        </li>
+        <li>
+          <strong>Global yaw (around gravity):</strong> without a magnetometer
+          or map constraints, yaw is often weakly/partially unobservable.
+        </li>
+        <li>
+          <strong>Scale:</strong> monocular vision alone cannot recover metric
+          scale; IMU acceleration and gravity provide scale observability when
+          excitation exists.
+        </li>
+      </ul>
+
+      <p>
+        A practical consistency test for EKF updates uses the Normalized
+        Innovation Squared (NIS):
+        <strong> \( \text{NIS}_k \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \text{NIS}_k = \mathbf{y}_k^\top \mathbf{S}_k^{-1}\mathbf{y}_k. \]
+      </h4>
+
+      <p>
+        If the model is correct, <strong> \( \text{NIS}_k \)</strong> is
+        approximately chi-square distributed with degrees of freedom equal to
+        the measurement dimension. A gating rule rejects outliers when
+        <strong> \( \text{NIS}_k &gt; \chi^2_{d,\,\alpha} \)</strong>.
+      </p>
+
+      <p>
+        <strong>AMR note:</strong> On ground robots, limited vertical excitation
+        can make scale convergence slower; wheel odometry or known-height
+        constraints can help stabilize estimation in low-excitation regimes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Implementation Notes (Calibration + Time Synchronization) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Implementation Notes (Calibration + Time Synchronization)</h2>
+    <div class="down-content">
+      <p>
+        Real VIO performance depends critically on calibration: camera
+        intrinsics, IMU noise/bias parameters, and camera&larr;IMU extrinsics
+        <strong> \( \mathbf{T}_{CI} \)</strong>. A simple time-offset model
+        introduces a scalar offset <strong> \( &bsol;tau \)</strong> such that
+        the visual timestamp <strong> \( t^c \)</strong> corresponds to IMU time
+        <strong> \( t^i = t^c + &bsol;tau \)</strong>. Estimators can either (i)
+        pre-synchronize with hardware triggering, or (ii) estimate
+        <strong> \( &bsol;tau \)</strong> online.
+      </p>
+
+      <p>
+        Online time-offset estimation is typically handled by augmenting the
+        state and linearizing the measurement w.r.t.
+        <strong> \( &bsol;tau \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{z}(t^c) &approx; h(\mathbf{x}(t^c+&bsol;tau)) &approx;
+        h(\mathbf{x}(t^c)) + \mathbf{H}_x\delta\mathbf{x} + \mathbf{H}_&bsol;tau
+        \delta&bsol;tau. \]
+      </h4>
+
+      <p>
+        The derivative <strong> \( \mathbf{H}_&bsol;tau \)</strong> can be
+        approximated using the time derivative of the predicted measurement,
+        computed from IMU propagation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Multi-Language Lab Implementations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Multi-Language Lab Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following minimal labs implement a planar VIO fusion baseline: IMU
+        propagation at <strong> \( 100\text{ Hz} \)</strong>-like rate and
+        visual pose updates at a lower rate. This matches the conceptual
+        pipeline of a loose-coupled VIO. For tight coupling, you would replace
+        the visual pose update with reprojection residuals inside an optimizer.
+      </p>
+
+      <h3>10.1 Python (EKF-style fusion)</h3>
+      <p><strong>File:</strong> Chapter13_Lesson3.py</p>
+      <pre><code class="language-python">
+# Chapter13_Lesson3.py
+# Planar visual-inertial loose coupling demo (EKF-like) for AMR
+# NOTE: This is a didactic baseline, not a production VIO.
+
+import numpy as np
+
+def wrap_angle(theta: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    return (theta + np.pi) % (2 * np.pi) - np.pi
+
+def rot2d(theta: float) -&gt; np.ndarray:
+    """2D rotation matrix."""
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, -s],[s, c]])
+
+class VIOPlanarEKF:
+    """
+    State x = [px, py, yaw, vx, vy, bg, bax, bay]^T
+    where bg gyro bias, ba accel bias (x,y only).
+    """
+    def __init__(self):
+        self.x = np.zeros(8)
+        self.P = np.eye(8) * 1e-3
+
+        # Process noise (continuous-time-ish heuristics)
+        self.sigma_g = 0.02      # rad/sqrt(s)
+        self.sigma_a = 0.20      # m/s^2/sqrt(s)
+        self.sigma_bg = 0.001    # rad/s^2/sqrt(s) (bias random walk)
+        self.sigma_ba = 0.01     # m/s^3/sqrt(s)
+
+        # Visual measurement noise (pose)
+        self.R_vis = np.diag([0.05**2, 0.05**2, (2*np.pi/180)**2])  # (m,m,rad)
+
+        # Gravity (planar: no vertical, but keep concept)
+        self.g = np.array([0.0, 0.0])
+
+    def propagate_imu(self, omega_m, a_m, dt):
+        """
+        omega_m: measured yaw rate (rad/s)
+        a_m: measured planar accel in body frame (ax, ay)
+        """
+        px, py, yaw, vx, vy, bg, bax, bay = self.x
+
+        # Bias-corrected measurements
+        omega = omega_m - bg
+        a_body = np.array([a_m[0] - bax, a_m[1] - bay])
+
+        # State propagation (simple Euler)
+        yaw_new = wrap_angle(yaw + omega * dt)
+        R = rot2d(yaw)  # body->world for accel
+        a_world = R @ a_body + self.g
+
+        vx_new = vx + a_world[0] * dt
+        vy_new = vy + a_world[1] * dt
+        px_new = px + vx * dt + 0.5 * a_world[0] * dt * dt
+        py_new = py + vy * dt + 0.5 * a_world[1] * dt * dt
+
+        # Bias random walk (no deterministic drift)
+        self.x = np.array([px_new, py_new, yaw_new, vx_new, vy_new, bg, bax, bay])
+
+        # Linearized covariance propagation: P = F P F^T + G Q G^T
+        # For compactness, we use a simplified Jacobian capturing main couplings.
+        F = np.eye(8)
+        # d pos / d vel
+        F[0,3] = dt
+        F[1,4] = dt
+
+        # yaw depends on bg
+        F[2,5] = -dt
+
+        # accel world depends on yaw and ba
+        c, s = np.cos(yaw), np.sin(yaw)
+        ax, ay = a_body
+        # a_world = [c*ax - s*ay, s*ax + c*ay]
+        dawx_dyaw = -s*ax - c*ay
+        dawy_dyaw =  c*ax - s*ay
+        # vel depends on yaw
+        F[3,2] = dawx_dyaw * dt
+        F[4,2] = dawy_dyaw * dt
+        # vel depends on bax, bay (negative through a_body)
+        # a_world wrt bax = -R[:,0], wrt bay = -R[:,1]
+        F[3,6] = -c * dt
+        F[3,7] =  s * dt
+        F[4,6] = -s * dt
+        F[4,7] = -c * dt
+
+        # pos depends on yaw and ba as well (through 0.5 a dt^2)
+        F[0,2] = 0.5 * dawx_dyaw * dt * dt
+        F[1,2] = 0.5 * dawy_dyaw * dt * dt
+        F[0,6] = -0.5 * c * dt * dt
+        F[0,7] =  0.5 * s * dt * dt
+        F[1,6] = -0.5 * s * dt * dt
+        F[1,7] = -0.5 * c * dt * dt
+
+        # Process noise: omega noise, accel noise, bias RW
+        # Noise vector w = [n_g, n_ax, n_ay, n_bg, n_bax, n_bay]
+        G = np.zeros((8,6))
+        # yaw affected by gyro noise
+        G[2,0] = dt
+        # vel affected by accel noise (world frame approx using current R)
+        G[3,1] = c * dt
+        G[3,2] = -s * dt
+        G[4,1] = s * dt
+        G[4,2] =  c * dt
+        # pos affected by accel noise (0.5 dt^2)
+        G[0,1] = 0.5 * c * dt * dt
+        G[0,2] = -0.5 * s * dt * dt
+        G[1,1] = 0.5 * s * dt * dt
+        G[1,2] = 0.5 * c * dt * dt
+
+        # bias random walks
+        G[5,3] = dt
+        G[6,4] = dt
+        G[7,5] = dt
+
+        Q = np.diag([
+            self.sigma_g**2,
+            self.sigma_a**2,
+            self.sigma_a**2,
+            self.sigma_bg**2,
+            self.sigma_ba**2,
+            self.sigma_ba**2
+        ])
+
+        self.P = F @ self.P @ F.T + G @ Q @ G.T
+
+    def update_visual_pose(self, z_pose):
+        """
+        z_pose = [px, py, yaw] from visual odometry (relative integrated to world frame).
+        """
+        # Measurement model: h(x) = [px, py, yaw]
+        H = np.zeros((3,8))
+        H[0,0] = 1.0
+        H[1,1] = 1.0
+        H[2,2] = 1.0
+
+        z = np.array(z_pose)
+        h = self.x[[0,1,2]]
+        y = z - h
+        y[2] = wrap_angle(y[2])
+
+        S = H @ self.P @ H.T + self.R_vis
+        K = self.P @ H.T @ np.linalg.inv(S)
+
+        # Joseph-form covariance update
+        I = np.eye(8)
+        self.x = self.x + K @ y
+        self.x[2] = wrap_angle(self.x[2])
+        self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ self.R_vis @ K.T
+
+def demo():
+    ekf = VIOPlanarEKF()
+    dt = 0.01
+    T = 5.0
+    N = int(T/dt)
+
+    # Simulated motion: constant forward accel then steady
+    omega_true = 0.05
+    a_body_true = np.array([0.2, 0.0])
+
+    # Biases
+    bg = 0.01
+    ba = np.array([0.05, -0.02])
+
+    # Generate occasional visual pose measurements (10 Hz)
+    vis_dt = 0.1
+    vis_times = set([int(k*vis_dt/dt) for k in range(int(T/vis_dt)+1)])
+
+    x_true = np.zeros(5)  # px,py,yaw,vx,vy
+    traj = []
+
+    for k in range(N):
+        # True propagation
+        yaw = x_true[2]
+        R = rot2d(yaw)
+        a_world = R @ a_body_true
+        x_true[3] += a_world[0]*dt
+        x_true[4] += a_world[1]*dt
+        x_true[0] += x_true[3]*dt + 0.5*a_world[0]*dt*dt
+        x_true[1] += x_true[4]*dt + 0.5*a_world[1]*dt*dt
+        x_true[2] = wrap_angle(x_true[2] + omega_true*dt)
+
+        # IMU measurements
+        omega_m = omega_true + bg + np.random.normal(0, ekf.sigma_g/np.sqrt(dt))
+        a_m = a_body_true + ba + np.random.normal(0, ekf.sigma_a/np.sqrt(dt), size=2)
+
+        ekf.propagate_imu(omega_m, a_m, dt)
+
+        # Visual update occasionally
+        if k in vis_times:
+            z_pose = np.array([x_true[0], x_true[1], x_true[2]]) + np.random.multivariate_normal(
+                mean=np.zeros(3),
+                cov=ekf.R_vis
+            )
+            ekf.update_visual_pose(z_pose)
+
+        traj.append((k*dt, x_true.copy(), ekf.x.copy()))
+
+    # Print final states
+    t, xt, xe = traj[-1]
+    print("Final time:", t)
+    print("True [px,py,yaw,vx,vy]:", xt)
+    print("EKF  [px,py,yaw,vx,vy]:", xe[:5])
+
+if __name__ == "__main__":
+    demo()
+      </code></pre>
+
+      <h3>10.2 C++ (Eigen)</h3>
+      <p><strong>File:</strong> Chapter13_Lesson3.cpp</p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;vector&gt;
+#include &lt;Eigen/Dense&gt;
+
+static double wrapAngle(double theta) {
+  while (theta &gt; M_PI) theta -= 2.0 * M_PI;
+  while (theta &lt;= -M_PI) theta += 2.0 * M_PI;
+  return theta;
+}
+
+static Eigen::Matrix2d rot2d(double yaw) {
+  double c = std::cos(yaw), s = std::sin(yaw);
+  Eigen::Matrix2d R;
+  R &lt;&lt; c, -s, s, c;
+  return R;
+}
+
+struct VIOPlanarEKF {
+  // x = [px, py, yaw, vx, vy, bg, bax, bay]
+  Eigen::VectorXd x;
+  Eigen::MatrixXd P;
+
+  double sigma_g = 0.02;
+  double sigma_a = 0.20;
+  double sigma_bg = 0.001;
+  double sigma_ba = 0.01;
+
+  Eigen::Matrix3d R_vis;
+
+  VIOPlanarEKF() {
+    x = Eigen::VectorXd::Zero(8);
+    P = Eigen::MatrixXd::Identity(8,8) * 1e-3;
+    R_vis.setZero();
+    R_vis(0,0) = 0.05*0.05;
+    R_vis(1,1) = 0.05*0.05;
+    R_vis(2,2) = std::pow(2.0*M_PI/180.0, 2);
+  }
+
+  void propagateIMU(double omega_m, const Eigen::Vector2d&amp; a_m, double dt) {
+    double px = x(0), py = x(1), yaw = x(2), vx = x(3), vy = x(4);
+    double bg = x(5), bax = x(6), bay = x(7);
+
+    double omega = omega_m - bg;
+    Eigen::Vector2d a_body(a_m(0) - bax, a_m(1) - bay);
+
+    double yaw_new = wrapAngle(yaw + omega * dt);
+    Eigen::Matrix2d R = rot2d(yaw);
+    Eigen::Vector2d a_world = R * a_body; // planar (no gravity term)
+
+    double vx_new = vx + a_world(0) * dt;
+    double vy_new = vy + a_world(1) * dt;
+    double px_new = px + vx * dt + 0.5 * a_world(0) * dt * dt;
+    double py_new = py + vy * dt + 0.5 * a_world(1) * dt * dt;
+
+    x &lt;&lt; px_new, py_new, yaw_new, vx_new, vy_new, bg, bax, bay;
+
+    Eigen::MatrixXd F = Eigen::MatrixXd::Identity(8,8);
+    F(0,3) = dt;
+    F(1,4) = dt;
+    F(2,5) = -dt;
+
+    double c = std::cos(yaw), s = std::sin(yaw);
+    double ax = a_body(0), ay = a_body(1);
+    double dawx_dyaw = -s*ax - c*ay;
+    double dawy_dyaw =  c*ax - s*ay;
+
+    F(3,2) = dawx_dyaw * dt;
+    F(4,2) = dawy_dyaw * dt;
+
+    // wrt biases: a_world = R*(a_m - b_a)
+    F(3,6) = -c * dt;
+    F(3,7) =  s * dt;
+    F(4,6) = -s * dt;
+    F(4,7) = -c * dt;
+
+    F(0,2) = 0.5 * dawx_dyaw * dt * dt;
+    F(1,2) = 0.5 * dawy_dyaw * dt * dt;
+
+    F(0,6) = -0.5 * c * dt * dt;
+    F(0,7) =  0.5 * s * dt * dt;
+    F(1,6) = -0.5 * s * dt * dt;
+    F(1,7) = -0.5 * c * dt * dt;
+
+    Eigen::MatrixXd G = Eigen::MatrixXd::Zero(8,6);
+    // w = [n_g, n_ax, n_ay, n_bg, n_bax, n_bay]
+    G(2,0) = dt;
+    G(3,1) = c * dt;
+    G(3,2) = -s * dt;
+    G(4,1) = s * dt;
+    G(4,2) =  c * dt;
+
+    G(0,1) = 0.5 * c * dt * dt;
+    G(0,2) = -0.5 * s * dt * dt;
+    G(1,1) = 0.5 * s * dt * dt;
+    G(1,2) = 0.5 * c * dt * dt;
+
+    G(5,3) = dt;
+    G(6,4) = dt;
+    G(7,5) = dt;
+
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(6,6);
+    Q(0,0) = sigma_g*sigma_g;
+    Q(1,1) = sigma_a*sigma_a;
+    Q(2,2) = sigma_a*sigma_a;
+    Q(3,3) = sigma_bg*sigma_bg;
+    Q(4,4) = sigma_ba*sigma_ba;
+    Q(5,5) = sigma_ba*sigma_ba;
+
+    P = F * P * F.transpose() + G * Q * G.transpose();
+  }
+
+  void updateVisualPose(const Eigen::Vector3d&amp; z_pose) {
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(3,8);
+    H(0,0) = 1.0;
+    H(1,1) = 1.0;
+    H(2,2) = 1.0;
+
+    Eigen::Vector3d h(x(0), x(1), x(2));
+    Eigen::Vector3d y = z_pose - h;
+    y(2) = wrapAngle(y(2));
+
+    Eigen::Matrix3d S = H * P * H.transpose() + R_vis;
+    Eigen::MatrixXd K = P * H.transpose() * S.inverse();
+
+    Eigen::MatrixXd I = Eigen::MatrixXd::Identity(8,8);
+    x = x + K * y;
+    x(2) = wrapAngle(x(2));
+    P = (I - K*H) * P * (I - K*H).transpose() + K * R_vis * K.transpose();
+  }
+};
+
+int main() {
+  VIOPlanarEKF ekf;
+  double dt = 0.01;
+  double T = 5.0;
+  int N = static_cast&lt;int&gt;(T/dt);
+
+  double omega_true = 0.05;
+  Eigen::Vector2d a_body_true(0.2, 0.0);
+
+  double bg = 0.01;
+  Eigen::Vector2d ba(0.05, -0.02);
+
+  double vis_dt = 0.1;
+  std::vector&lt;int&gt; vis_steps;
+  for (int k = 0; k &lt;= static_cast&lt;int&gt;(T/vis_dt); ++k) {
+    vis_steps.push_back(static_cast&lt;int&gt;((k*vis_dt)/dt));
+  }
+
+  Eigen::VectorXd x_true = Eigen::VectorXd::Zero(5); // px,py,yaw,vx,vy
+
+  std::mt19937 rng(0);
+  std::normal_distribution&lt;double&gt; N01(0.0, 1.0);
+
+  auto noise = [&](double sigma) { return sigma * N01(rng); };
+
+  int vis_ptr = 0;
+  for (int k = 0; k &lt; N; ++k) {
+    double yaw = x_true(2);
+    Eigen::Matrix2d R = rot2d(yaw);
+    Eigen::Vector2d a_world = R * a_body_true;
+
+    x_true(3) += a_world(0) * dt;
+    x_true(4) += a_world(1) * dt;
+    x_true(0) += x_true(3) * dt + 0.5 * a_world(0) * dt * dt;
+    x_true(1) += x_true(4) * dt + 0.5 * a_world(1) * dt * dt;
+    x_true(2) = wrapAngle(x_true(2) + omega_true * dt);
+
+    double omega_m = omega_true + bg + noise(ekf.sigma_g/std::sqrt(dt));
+    Eigen::Vector2d a_m = a_body_true + ba;
+    a_m(0) += noise(ekf.sigma_a/std::sqrt(dt));
+    a_m(1) += noise(ekf.sigma_a/std::sqrt(dt));
+
+    ekf.propagateIMU(omega_m, a_m, dt);
+
+    if (vis_ptr &lt; (int)vis_steps.size() &amp;&amp; k == vis_steps[vis_ptr]) {
+      vis_ptr++;
+      Eigen::Vector3d z_pose(x_true(0), x_true(1), x_true(2));
+      // add measurement noise
+      z_pose(0) += noise(0.05);
+      z_pose(1) += noise(0.05);
+      z_pose(2) += noise(2.0*M_PI/180.0);
+      z_pose(2) = wrapAngle(z_pose(2));
+
+      ekf.updateVisualPose(z_pose);
+    }
+  }
+
+  std::cout &lt;&lt; "True: px=" &lt;&lt; x_true(0) &lt;&lt; " py=" &lt;&lt; x_true(1)
+            &lt;&lt; " yaw=" &lt;&lt; x_true(2) &lt;&lt; " vx=" &lt;&lt; x_true(3)
+            &lt;&lt; " vy=" &lt;&lt; x_true(4) &lt;&lt; "\n";
+  std::cout &lt;&lt; "EKF : px=" &lt;&lt; ekf.x(0) &lt;&lt; " py=" &lt;&lt; ekf.x(1)
+            &lt;&lt; " yaw=" &lt;&lt; ekf.x(2) &lt;&lt; " vx=" &lt;&lt; ekf.x(3)
+            &lt;&lt; " vy=" &lt;&lt; ekf.x(4) &lt;&lt; "\n";
+  return 0;
+}
+      </code></pre>
+
+      <h3>10.3 Java (EJML)</h3>
+      <p><strong>File:</strong> Chapter13_Lesson3.java</p>
+      <pre><code class="language-java">
+import org.ejml.data.DMatrixRMaj;
+import org.ejml.dense.row.CommonOps_DDRM;
+
+import java.util.Random;
+
+public class Chapter13_Lesson3 {
+
+    static double wrapAngle(double theta) {
+        while (theta &gt; Math.PI) theta -= 2.0 * Math.PI;
+        while (theta &lt;= -Math.PI) theta += 2.0 * Math.PI;
+        return theta;
+    }
+
+    static DMatrixRMaj rot2d(double yaw) {
+        double c = Math.cos(yaw), s = Math.sin(yaw);
+        DMatrixRMaj R = new DMatrixRMaj(2,2);
+        R.set(0,0,c);  R.set(0,1,-s);
+        R.set(1,0,s);  R.set(1,1, c);
+        return R;
+    }
+
+    static class VIOPlanarEKF {
+        // x = [px, py, yaw, vx, vy, bg, bax, bay]^T
+        DMatrixRMaj x = new DMatrixRMaj(8,1);
+        DMatrixRMaj P = CommonOps_DDRM.identity(8);
+
+        double sigma_g = 0.02;
+        double sigma_a = 0.20;
+        double sigma_bg = 0.001;
+        double sigma_ba = 0.01;
+
+        DMatrixRMaj Rvis = new DMatrixRMaj(3,3);
+
+        VIOPlanarEKF() {
+            CommonOps_DDRM.scale(1e-3, P);
+            CommonOps_DDRM.fill(x, 0.0);
+            CommonOps_DDRM.fill(Rvis, 0.0);
+            Rvis.set(0,0, 0.05*0.05);
+            Rvis.set(1,1, 0.05*0.05);
+            Rvis.set(2,2, Math.pow(2.0*Math.PI/180.0, 2));
+        }
+
+        void propagateIMU(double omega_m, double ax_m, double ay_m, double dt) {
+            double px = x.get(0,0), py = x.get(1,0), yaw = x.get(2,0);
+            double vx = x.get(3,0), vy = x.get(4,0);
+            double bg = x.get(5,0), bax = x.get(6,0), bay = x.get(7,0);
+
+            double omega = omega_m - bg;
+            double axb = ax_m - bax;
+            double ayb = ay_m - bay;
+
+            double yawNew = wrapAngle(yaw + omega*dt);
+
+            double c = Math.cos(yaw), s = Math.sin(yaw);
+            // a_world = R(yaw) * a_body
+            double awx = c*axb - s*ayb;
+            double awy = s*axb + c*ayb;
+
+            double vxNew = vx + awx*dt;
+            double vyNew = vy + awy*dt;
+            double pxNew = px + vx*dt + 0.5*awx*dt*dt;
+            double pyNew = py + vy*dt + 0.5*awy*dt*dt;
+
+            x.set(0,0, pxNew);
+            x.set(1,0, pyNew);
+            x.set(2,0, yawNew);
+            x.set(3,0, vxNew);
+            x.set(4,0, vyNew);
+
+            // F
+            DMatrixRMaj F = CommonOps_DDRM.identity(8);
+            F.set(0,3, dt);
+            F.set(1,4, dt);
+            F.set(2,5, -dt);
+
+            double dawx_dyaw = -s*axb - c*ayb;
+            double dawy_dyaw =  c*axb - s*ayb;
+
+            F.set(3,2, dawx_dyaw*dt);
+            F.set(4,2, dawy_dyaw*dt);
+
+            F.set(3,6, -c*dt);
+            F.set(3,7,  s*dt);
+            F.set(4,6, -s*dt);
+            F.set(4,7, -c*dt);
+
+            F.set(0,2, 0.5*dawx_dyaw*dt*dt);
+            F.set(1,2, 0.5*dawy_dyaw*dt*dt);
+
+            F.set(0,6, -0.5*c*dt*dt);
+            F.set(0,7,  0.5*s*dt*dt);
+            F.set(1,6, -0.5*s*dt*dt);
+            F.set(1,7, -0.5*c*dt*dt);
+
+            // G (8x6)
+            DMatrixRMaj G = new DMatrixRMaj(8,6);
+            // yaw noise
+            G.set(2,0, dt);
+            // accel noise (world approx)
+            G.set(3,1, c*dt);   G.set(3,2, -s*dt);
+            G.set(4,1, s*dt);   G.set(4,2,  c*dt);
+            // pos accel noise
+            G.set(0,1, 0.5*c*dt*dt);  G.set(0,2, -0.5*s*dt*dt);
+            G.set(1,1, 0.5*s*dt*dt);  G.set(1,2,  0.5*c*dt*dt);
+            // bias RW
+            G.set(5,3, dt);
+            G.set(6,4, dt);
+            G.set(7,5, dt);
+
+            DMatrixRMaj Q = new DMatrixRMaj(6,6);
+            Q.set(0,0, sigma_g*sigma_g);
+            Q.set(1,1, sigma_a*sigma_a);
+            Q.set(2,2, sigma_a*sigma_a);
+            Q.set(3,3, sigma_bg*sigma_bg);
+            Q.set(4,4, sigma_ba*sigma_ba);
+            Q.set(5,5, sigma_ba*sigma_ba);
+
+            // P = F P F^T + G Q G^T
+            DMatrixRMaj FP = new DMatrixRMaj(8,8);
+            DMatrixRMaj FPFt = new DMatrixRMaj(8,8);
+            CommonOps_DDRM.mult(F, P, FP);
+            CommonOps_DDRM.multTransB(FP, F, FPFt);
+
+            DMatrixRMaj GQ = new DMatrixRMaj(8,6);
+            DMatrixRMaj GQGt = new DMatrixRMaj(8,8);
+            CommonOps_DDRM.mult(G, Q, GQ);
+            CommonOps_DDRM.multTransB(GQ, G, GQGt);
+
+            CommonOps_DDRM.add(FPFt, GQGt, P);
+        }
+
+        void updateVisualPose(double zpx, double zpy, double zyaw) {
+            // H maps [px,py,yaw]
+            DMatrixRMaj H = new DMatrixRMaj(3,8);
+            H.set(0,0, 1.0);
+            H.set(1,1, 1.0);
+            H.set(2,2, 1.0);
+
+            DMatrixRMaj z = new DMatrixRMaj(3,1);
+            z.set(0,0, zpx);
+            z.set(1,0, zpy);
+            z.set(2,0, zyaw);
+
+            DMatrixRMaj h = new DMatrixRMaj(3,1);
+            h.set(0,0, x.get(0,0));
+            h.set(1,0, x.get(1,0));
+            h.set(2,0, x.get(2,0));
+
+            DMatrixRMaj y = new DMatrixRMaj(3,1);
+            CommonOps_DDRM.subtract(z, h, y);
+            y.set(2,0, wrapAngle(y.get(2,0)));
+
+            DMatrixRMaj HP = new DMatrixRMaj(3,8);
+            DMatrixRMaj S = new DMatrixRMaj(3,3);
+            CommonOps_DDRM.mult(H, P, HP);
+            CommonOps_DDRM.multTransB(HP, H, S);
+            CommonOps_DDRM.addEquals(S, Rvis);
+
+            DMatrixRMaj Sinv = new DMatrixRMaj(3,3);
+            CommonOps_DDRM.invert(S, Sinv);
+
+            DMatrixRMaj PHt = new DMatrixRMaj(8,3);
+            CommonOps_DDRM.multTransB(P, H, PHt);
+
+            DMatrixRMaj K = new DMatrixRMaj(8,3);
+            CommonOps_DDRM.mult(PHt, Sinv, K);
+
+            // x = x + K y
+            DMatrixRMaj Ky = new DMatrixRMaj(8,1);
+            CommonOps_DDRM.mult(K, y, Ky);
+            CommonOps_DDRM.addEquals(x, Ky);
+            x.set(2,0, wrapAngle(x.get(2,0)));
+
+            // Joseph update: P = (I-KH) P (I-KH)^T + K R K^T
+            DMatrixRMaj I = CommonOps_DDRM.identity(8);
+            DMatrixRMaj KH = new DMatrixRMaj(8,8);
+            CommonOps_DDRM.mult(K, H, KH);
+
+            DMatrixRMaj IminusKH = new DMatrixRMaj(8,8);
+            CommonOps_DDRM.subtract(I, KH, IminusKH);
+
+            DMatrixRMaj tmp = new DMatrixRMaj(8,8);
+            DMatrixRMaj term1 = new DMatrixRMaj(8,8);
+            CommonOps_DDRM.mult(IminusKH, P, tmp);
+            CommonOps_DDRM.multTransB(tmp, IminusKH, term1);
+
+            DMatrixRMaj KR = new DMatrixRMaj(8,3);
+            DMatrixRMaj term2 = new DMatrixRMaj(8,8);
+            CommonOps_DDRM.mult(K, Rvis, KR);
+            CommonOps_DDRM.multTransB(KR, K, term2);
+
+            CommonOps_DDRM.add(term1, term2, P);
+        }
+    }
+
+    public static void main(String[] args) {
+        VIOPlanarEKF ekf = new VIOPlanarEKF();
+
+        double dt = 0.01;
+        double T = 5.0;
+        int N = (int)(T/dt);
+
+        double omegaTrue = 0.05;
+        double axBodyTrue = 0.2;
+        double ayBodyTrue = 0.0;
+
+        double bg = 0.01;
+        double bax = 0.05;
+        double bay = -0.02;
+
+        double visDt = 0.1;
+        int[] visSteps = new int[(int)(T/visDt)+1];
+        for(int i=0;i&lt;visSteps.length;i++){
+            visSteps[i] = (int)((i*visDt)/dt);
+        }
+
+        double px=0, py=0, yaw=0, vx=0, vy=0;
+
+        Random rng = new Random(0);
+
+        int visPtr = 0;
+        for(int k=0;k&lt;N;k++){
+            double c = Math.cos(yaw), s = Math.sin(yaw);
+            double awx = c*axBodyTrue - s*ayBodyTrue;
+            double awy = s*axBodyTrue + c*ayBodyTrue;
+
+            vx += awx*dt; vy += awy*dt;
+            px += vx*dt + 0.5*awx*dt*dt;
+            py += vy*dt + 0.5*awy*dt*dt;
+            yaw = wrapAngle(yaw + omegaTrue*dt);
+
+            double omega_m = omegaTrue + bg + rng.nextGaussian()*(ekf.sigma_g/Math.sqrt(dt));
+            double ax_m = axBodyTrue + bax + rng.nextGaussian()*(ekf.sigma_a/Math.sqrt(dt));
+            double ay_m = ayBodyTrue + bay + rng.nextGaussian()*(ekf.sigma_a/Math.sqrt(dt));
+
+            ekf.propagateIMU(omega_m, ax_m, ay_m, dt);
+
+            if (visPtr &lt; visSteps.length &amp;&amp; k == visSteps[visPtr]) {
+                visPtr++;
+                double zpx = px + rng.nextGaussian()*0.05;
+                double zpy = py + rng.nextGaussian()*0.05;
+                double zyaw = wrapAngle(yaw + rng.nextGaussian()*(2.0*Math.PI/180.0));
+                ekf.updateVisualPose(zpx, zpy, zyaw);
+            }
+        }
+
+        System.out.println("True: px=" + px + " py=" + py + " yaw=" + yaw + " vx=" + vx + " vy=" + vy);
+        System.out.println("EKF : px=" + ekf.x.get(0,0) + " py=" + ekf.x.get(1,0) + " yaw=" + ekf.x.get(2,0)
+                + " vx=" + ekf.x.get(3,0) + " vy=" + ekf.x.get(4,0));
+    }
+}
+      </code></pre>
+
+      <h3>10.4 MATLAB / Simulink-Oriented Script</h3>
+      <p><strong>File:</strong> Chapter13_Lesson3.m</p>
+      <pre><code class="language-matlab">
+% Chapter13_Lesson3.m
+% Planar VIO loose coupling demo (EKF-like) for AMR
+% This script mirrors the Python/C++/Java baseline.
+
+clear; clc;
+
+wrapAngle = @(th) mod(th + pi, 2*pi) - pi;
+
+rot2d = @(yaw) [cos(yaw), -sin(yaw); sin(yaw), cos(yaw)];
+
+% State x = [px; py; yaw; vx; vy; bg; bax; bay]
+x = zeros(8,1);
+P = eye(8)*1e-3;
+
+% Noise parameters
+sigma_g  = 0.02;
+sigma_a  = 0.20;
+sigma_bg = 0.001;
+sigma_ba = 0.01;
+
+Rvis = diag([0.05^2, 0.05^2, (2*pi/180)^2]);
+
+dt = 0.01;
+T  = 5.0;
+N  = floor(T/dt);
+
+omega_true = 0.05;
+a_body_true = [0.2; 0.0];
+
+bg = 0.01;
+ba = [0.05; -0.02];
+
+vis_dt = 0.1;
+vis_steps = round((0:vis_dt:T)/dt);
+vis_ptr = 1;
+
+x_true = zeros(5,1); % px,py,yaw,vx,vy
+
+rng(0);
+
+for k=1:N
+    % true propagation
+    yaw = x_true(3);
+    R = rot2d(yaw);
+    a_world = R * a_body_true;
+
+    x_true(4) = x_true(4) + a_world(1)*dt;
+    x_true(5) = x_true(5) + a_world(2)*dt;
+    x_true(1) = x_true(1) + x_true(4)*dt + 0.5*a_world(1)*dt*dt;
+    x_true(2) = x_true(2) + x_true(5)*dt + 0.5*a_world(2)*dt*dt;
+    x_true(3) = wrapAngle(x_true(3) + omega_true*dt);
+
+    % IMU measurements
+    omega_m = omega_true + bg + randn()*(sigma_g/sqrt(dt));
+    a_m = a_body_true + ba + randn(2,1)*(sigma_a/sqrt(dt));
+
+    % propagate EKF
+    px = x(1); py = x(2); yaw = x(3); vx = x(4); vy = x(5);
+    bgk = x(6); bax = x(7); bay = x(8);
+
+    omega = omega_m - bgk;
+    a_body = [a_m(1)-bax; a_m(2)-bay];
+
+    yaw_new = wrapAngle(yaw + omega*dt);
+    R = rot2d(yaw);
+    a_world = R * a_body; % planar
+
+    vx_new = vx + a_world(1)*dt;
+    vy_new = vy + a_world(2)*dt;
+    px_new = px + vx*dt + 0.5*a_world(1)*dt*dt;
+    py_new = py + vy*dt + 0.5*a_world(2)*dt*dt;
+
+    x = [px_new; py_new; yaw_new; vx_new; vy_new; bgk; bax; bay];
+
+    % Linearized F
+    F = eye(8);
+    F(1,4) = dt;
+    F(2,5) = dt;
+    F(3,6) = -dt;
+
+    c = cos(yaw); s = sin(yaw);
+    ax = a_body(1); ay = a_body(2);
+    dawx_dyaw = -s*ax - c*ay;
+    dawy_dyaw =  c*ax - s*ay;
+
+    F(4,3) = dawx_dyaw*dt;
+    F(5,3) = dawy_dyaw*dt;
+
+    F(4,7) = -c*dt;
+    F(4,8) =  s*dt;
+    F(5,7) = -s*dt;
+    F(5,8) = -c*dt;
+
+    F(1,3) = 0.5*dawx_dyaw*dt*dt;
+    F(2,3) = 0.5*dawy_dyaw*dt*dt;
+
+    F(1,7) = -0.5*c*dt*dt;
+    F(1,8) =  0.5*s*dt*dt;
+    F(2,7) = -0.5*s*dt*dt;
+    F(2,8) = -0.5*c*dt*dt;
+
+    % G and Q
+    G = zeros(8,6);
+    G(3,1) = dt;
+    G(4,2) = c*dt;  G(4,3) = -s*dt;
+    G(5,2) = s*dt;  G(5,3) =  c*dt;
+
+    G(1,2) = 0.5*c*dt*dt;  G(1,3) = -0.5*s*dt*dt;
+    G(2,2) = 0.5*s*dt*dt;  G(2,3) = 0.5*c*dt*dt;
+
+    G(6,4) = dt;
+    G(7,5) = dt;
+    G(8,6) = dt;
+
+    Q = diag([sigma_g^2, sigma_a^2, sigma_a^2, sigma_bg^2, sigma_ba^2, sigma_ba^2]);
+
+    P = F*P*F' + G*Q*G';
+
+    % visual update
+    if (vis_ptr &lt;= length(vis_steps)) &amp;&amp; (k == vis_steps(vis_ptr))
+        vis_ptr = vis_ptr + 1;
+        z = [x_true(1); x_true(2); x_true(3)] + chol(Rvis,'lower')*randn(3,1);
+
+        H = zeros(3,8);
+        H(1,1)=1; H(2,2)=1; H(3,3)=1;
+
+        h = x(1:3);
+        y = z - h;
+        y(3) = wrapAngle(y(3));
+
+        S = H*P*H' + Rvis;
+        K = P*H'/S;
+
+        I = eye(8);
+        x = x + K*y;
+        x(3) = wrapAngle(x(3));
+        P = (I-K*H)*P*(I-K*H)' + K*Rvis*K';
+    end
+end
+
+disp('Final:');
+disp(['True px py yaw vx vy: ', num2str(x_true')]);
+disp(['EKF  px py yaw vx vy: ', num2str(x(1:5)')]);
+      </code></pre>
+
+      <h3>10.5 Wolfram Mathematica (Symbolic Jacobian + EKF update demo)</h3>
+      <p><strong>File:</strong> Chapter13_Lesson3.nb</p>
+      <pre><code class="language-mathematica">
+(* Chapter13_Lesson3.nb
+   Mathematica/Wolfram Language content exported as a plain-text notebook-style script.
+   Focus: symbolic Jacobians for a planar visual update and a minimal EKF update demo.
+*)
+
+ClearAll["Global`*"];
+
+wrapAngle[th_] := Mod[th + Pi, 2 Pi] - Pi;
+
+(* State x = {px, py, yaw, vx, vy, bg, bax, bay} *)
+x = Array[x, 8];
+{px, py, yaw, vx, vy, bg, bax, bay} = x;
+
+(* Visual measurement model: z = h(x) + n, where h(x) = {px, py, yaw} *)
+h[x_] := {x[[1]], x[[2]], x[[3]]};
+
+H = D[h[x], {x}] // Simplify;
+Print["H (Jacobian of visual measurement):"];
+MatrixForm[H]
+
+(* Joseph-form covariance update proof snippet: PSD-preserving structure *)
+(* P+ = (I-KH) P (I-KH)^T + K R K^T *)
+
+(* EKF update demo with numeric substitution *)
+P = IdentityMatrix[8]*10^-3;
+Rvis = DiagonalMatrix[{0.05^2, 0.05^2, (2 Pi/180)^2}];
+
+z = {1.0, 0.5, 0.2};
+xhat = ConstantArray[0.0, 8];
+y = z - h[xhat];
+y[[3]] = wrapAngle[y[[3]]];
+
+S = H /. Thread[x -&gt; xhat];
+S = S . P . Transpose[S] + Rvis;
+
+K = P . Transpose[H /. Thread[x -&gt; xhat]] . Inverse[S];
+
+xnew = xhat + K . y;
+xnew[[3]] = wrapAngle[xnew[[3]]];
+
+I8 = IdentityMatrix[8];
+Pnew = (I8 - K.(H /. Thread[x -&gt; xhat])) . P . 
+        Transpose[I8 - K.(H /. Thread[x -&gt; xhat])] + K . Rvis . Transpose[K];
+
+Print["Updated state xnew:"];
+xnew // N // MatrixForm
+
+Print["Updated covariance diagonal:"];
+Diagonal[Pnew] // N // MatrixForm
+      </code></pre>
+
+      <p>
+        <strong>Suggested extension (for students):</strong>
+        Replace the visual pose measurement with a feature reprojection update:
+        estimate a relative pose from tracked features (e.g., PnP / essential
+        matrix with RANSAC), then feed that constraint into the estimator with
+        proper covariance and gating.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        The following problems reinforce the mathematical and algorithmic
+        foundations of visual–inertial fusion pipelines: loose vs tight
+        coupling, EKF consistency, IMU preintegration, observability
+        (scale/bias), and robust gating. Each problem includes a complete
+        solution.
+      </p>
+
+      <h3>Problem 1 (MAP = Weighted Nonlinear Least Squares)</h3>
+      <p>
+        Suppose you have independent residual blocks
+        <strong>\( \mathbf{r}_i(\mathbf{x}) \)</strong> with Gaussian noise
+        <strong
+          >\( \mathbf{r}_i \sim \mathcal{N}(\mathbf{0},\mathbf{\Sigma}_i)
+          \)</strong
+        >, and a Gaussian prior on the state:
+        <strong
+          >\( \mathbf{x} \sim \mathcal{N}(\bar{\mathbf{x}}, \mathbf{P}_0)
+          \)</strong
+        >. Show that the MAP estimate is equivalent (up to an additive constant)
+        to minimizing a weighted nonlinear least squares cost.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Independence implies the likelihood factorizes:
+        <strong
+          >\( p(\mathbf{z}\mid\mathbf{x}) = \prod_i p(\mathbf{r}_i(\mathbf{x}))
+          \)</strong
+        >, where
+        <strong
+          >\( p(\mathbf{r}_i(\mathbf{x})) \propto
+          \exp\!\left(-\tfrac{1}{2}\mathbf{r}_i(\mathbf{x})^\top\mathbf{\Sigma}_i^{-1}\mathbf{r}_i(\mathbf{x})\right)
+          \)</strong
+        >. The prior is
+        <strong
+          >\( p(\mathbf{x}) \propto
+          \exp\!\left(-\tfrac{1}{2}(\mathbf{x}-\bar{\mathbf{x}})^\top\mathbf{P}_0^{-1}(\mathbf{x}-\bar{\mathbf{x}})\right)
+          \)</strong
+        >.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x}}_{\text{MAP}} = \arg\max_{\mathbf{x}}
+        p(\mathbf{x}\mid\mathbf{z}) = \arg\min_{\mathbf{x}}\Big(
+        (\mathbf{x}-\bar{\mathbf{x}})^\top\mathbf{P}_0^{-1}(\mathbf{x}-\bar{\mathbf{x}})
+        + \sum_i
+        \mathbf{r}_i(\mathbf{x})^\top\mathbf{\Sigma}_i^{-1}\mathbf{r}_i(\mathbf{x})
+        \Big), \]
+      </h4>
+
+      <p>
+        since maximizing the posterior equals minimizing the negative
+        log-posterior, and constant terms (not depending on
+        <strong>\( \mathbf{x} \)</strong>) can be dropped. This is precisely a
+        weighted nonlinear least squares objective with an added quadratic prior
+        term.
+      </p>
+
+      <hr />
+
+      <h3>Problem 2 (Joseph Form Preserves Positive Semidefiniteness)</h3>
+      <p>
+        In a loose-coupled EKF update, the covariance is updated via Joseph
+        form:
+      </p>
+      <p>
+        <strong
+          >\( \mathbf{P}^+ =
+          (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}^-(\mathbf{I}-\mathbf{K}\mathbf{H})^\top
+          + \mathbf{K}\mathbf{R}\mathbf{K}^\top \)</strong
+        >.
+      </p>
+      <p>
+        Prove that if <strong>\( \mathbf{P}^- \succeq \mathbf{0} \)</strong> and
+        <strong>\( \mathbf{R} \succeq \mathbf{0} \)</strong>, then
+        <strong>\( \mathbf{P}^+ \succeq \mathbf{0} \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Let <strong>\( \mathbf{A} = \mathbf{I}-\mathbf{K}\mathbf{H} \)</strong>.
+        For any vector <strong>\( \mathbf{v} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{v}^\top \mathbf{A}\mathbf{P}^-\mathbf{A}^\top \mathbf{v} =
+        (\mathbf{A}^\top\mathbf{v})^\top \mathbf{P}^-
+        (\mathbf{A}^\top\mathbf{v}) \ge 0 \quad (\text{since } \mathbf{P}^-
+        \succeq \mathbf{0}). \]
+      </h4>
+      <p>Similarly:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{v}^\top \mathbf{K}\mathbf{R}\mathbf{K}^\top \mathbf{v} =
+        (\mathbf{K}^\top\mathbf{v})^\top \mathbf{R} (\mathbf{K}^\top\mathbf{v})
+        \ge 0 \quad (\text{since } \mathbf{R} \succeq \mathbf{0}). \]
+      </h4>
+      <p>
+        A sum of PSD matrices is PSD, hence
+        <strong>\( \mathbf{P}^+ \succeq \mathbf{0} \)</strong>.
+      </p>
+
+      <hr />
+
+      <h3>Problem 3 (NIS Gating and Chi-Square Threshold)</h3>
+      <p>
+        Let the innovation be
+        <strong>\( \mathbf{y}\in\mathbb{R}^d \)</strong> with covariance
+        <strong>\( \mathbf{S} \)</strong>. Under a correct model, assume
+        <strong>\( \mathbf{y}\sim\mathcal{N}(\mathbf{0},\mathbf{S}) \)</strong>.
+        Define the Normalized Innovation Squared (NIS):
+        <strong
+          >\( \text{NIS} = \mathbf{y}^\top \mathbf{S}^{-1}\mathbf{y} \)</strong
+        >. Show that <strong>\( \text{NIS} \sim \chi^2_d \)</strong> and write
+        the gating rule at significance <strong>\( \alpha \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Factor
+        <strong>\( \mathbf{S}=\mathbf{L}\mathbf{L}^\top \)</strong> (Cholesky).
+        Define <strong>\( \mathbf{w}=\mathbf{L}^{-1}\mathbf{y} \)</strong>, so
+        <strong>\( \mathbf{w}\sim\mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong>.
+      </p>
+      <h4 class="mathJax">
+        \[ \text{NIS}=\mathbf{y}^\top \mathbf{S}^{-1}\mathbf{y} =
+        \mathbf{y}^\top (\mathbf{L}^{-\top}\mathbf{L}^{-1})\mathbf{y} =
+        (\mathbf{L}^{-1}\mathbf{y})^\top(\mathbf{L}^{-1}\mathbf{y}) =
+        \mathbf{w}^\top\mathbf{w} = \sum_{i=1}^d w_i^2 \sim \chi^2_d. \]
+      </h4>
+      <p>
+        Gating at significance <strong>\( \alpha \)</strong> rejects an outlier
+        measurement if
+        <strong>\( \text{NIS} &gt; \chi^2_{d,\,1-\alpha} \)</strong> and accepts
+        if <strong>\( \text{NIS} \le \chi^2_{d,\,1-\alpha} \)</strong>.
+      </p>
+
+      <hr />
+
+      <h3>
+        Problem 4 (IMU Preintegration Residuals for Velocity and Position)
+      </h3>
+      <p>Starting from discrete-time propagation with gravity:</p>
+      <p>
+        <strong
+          >\( \mathbf{v}_{k+1} = \mathbf{v}_k +
+          (\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_a)+\mathbf{g})\Delta t
+          \)</strong
+        >,
+        <strong
+          >\( \mathbf{p}_{k+1} = \mathbf{p}_k + \mathbf{v}_k\Delta t +
+          \tfrac{1}{2}(\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_a)+\mathbf{g})\Delta
+          t^2 \)</strong
+        >.
+      </p>
+      <p>
+        Derive the keyframe residuals:
+        <strong
+          >\( \mathbf{r}_v =
+          \mathbf{R}_i^\top(\mathbf{v}_j-\mathbf{v}_i-\mathbf{g}\Delta t_{ij}) -
+          \Delta\mathbf{v}_{ij} \)</strong
+        >
+        and
+        <strong
+          >\( \mathbf{r}_p =
+          \mathbf{R}_i^\top(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta
+          t_{ij}-\tfrac{1}{2}\mathbf{g}\Delta t_{ij}^2) - \Delta\mathbf{p}_{ij}
+          \)</strong
+        >, where
+        <strong>\( \Delta\mathbf{v}_{ij},\Delta\mathbf{p}_{ij} \)</strong> are
+        the preintegrated increments in the <strong>\( i \)</strong>-frame.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Summing the velocity updates from <strong>\( i \)</strong> to
+        <strong>\( j \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{v}_j-\mathbf{v}_i =
+        \sum_{k=i}^{j-1}\left(\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_a)+\mathbf{g}\right)\Delta
+        t_k. \]
+      </h4>
+      <p>
+        Separate gravity and left-multiply by
+        <strong>\( \mathbf{R}_i^\top \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{R}_i^\top(\mathbf{v}_j-\mathbf{v}_i-\mathbf{g}\Delta t_{ij})
+        =
+        \sum_{k=i}^{j-1}\mathbf{R}_i^\top\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_a)\Delta
+        t_k. \]
+      </h4>
+      <p>
+        Define the preintegrated velocity increment:
+        <strong
+          >\( \Delta\mathbf{v}_{ij} \triangleq
+          \sum_{k=i}^{j-1}\mathbf{R}_i^\top\mathbf{R}_k(\mathbf{f}_{m,k}-\mathbf{b}_a)\Delta
+          t_k \)</strong
+        >, yielding <strong>\( \mathbf{r}_v \)</strong>.
+      </p>
+      <p>
+        For position, sum the position updates and substitute the velocity
+        recursion to isolate gravity and the initial velocity term, then express
+        the remaining specific-force contribution in the
+        <strong>\( i \)</strong>-frame as
+        <strong>\( \Delta\mathbf{p}_{ij} \)</strong>. This gives:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{R}_i^\top(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta
+        t_{ij}-\tfrac{1}{2}\mathbf{g}\Delta t_{ij}^2) = \Delta\mathbf{p}_{ij},
+        \]
+      </h4>
+      <p>
+        and therefore the residual <strong>\( \mathbf{r}_p \)</strong> as
+        stated.
+      </p>
+
+      <hr />
+
+      <h3>Problem 5 (Scale Observability: Monocular Vision vs VIO)</h3>
+      <p>
+        (i) Explain why monocular visual odometry is scale-ambiguous. (ii) Show
+        how IMU introduces metric information that makes scale observable under
+        sufficiently rich motion. Use the specific force relation
+        <strong
+          >\( \mathbf{f} \approx \mathbf{R}^\top(\ddot{\mathbf{p}}-\mathbf{g})
+          \)</strong
+        >
+        in your argument.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        (i) Monocular reprojection constraints are invariant under a similarity
+        transform: if you scale the 3D structure and camera translations by
+        <strong>\( s \)</strong>, pixel projections remain unchanged. Thus, the
+        visual likelihood does not uniquely determine <strong>\( s \)</strong>.
+      </p>
+      <p>
+        (ii) IMU measures metric acceleration (in SI units). If you scale the
+        trajectory as
+        <strong>\( \mathbf{p}'(t)=s\mathbf{p}(t) \)</strong>, then
+        <strong>\( \ddot{\mathbf{p}}'(t)=s\ddot{\mathbf{p}}(t) \)</strong>, so
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{f}' \approx \mathbf{R}^\top(\ddot{\mathbf{p}}' - \mathbf{g})
+        = \mathbf{R}^\top(s\ddot{\mathbf{p}} - \mathbf{g}), \]
+      </h4>
+      <p>
+        which generally differs from
+        <strong
+          >\( \mathbf{f}\approx \mathbf{R}^\top(\ddot{\mathbf{p}}-\mathbf{g})
+          \)</strong
+        >
+        unless <strong>\( s=1 \)</strong> (or the motion has insufficient
+        excitation so <strong>\( \ddot{\mathbf{p}} \)</strong> carries no
+        informative content). Therefore, matching IMU measurements constrains
+        scale in VIO given sufficiently exciting motion.
+      </p>
+
+      <hr />
+
+      <h3>
+        Problem 6 (Why Underestimating VO Covariance Breaks Loose Coupling)
+      </h3>
+      <p>
+        In a loose-coupled EKF, a VO module outputs a pose measurement
+        <strong>\( \mathbf{z}^{vo}_k \)</strong> with covariance
+        <strong>\( \mathbf{R}^{vo}_k \)</strong>. Explain how
+        <strong>\( \mathbf{R}^{vo}_k \)</strong> affects the Kalman gain and why
+        underestimating it leads to inconsistency and possible divergence,
+        especially under outliers (motion blur, rolling shutter, time offset).
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        The innovation covariance is
+        <strong
+          >\( \mathbf{S}_k = \mathbf{H}_k\mathbf{P}^-_k\mathbf{H}_k^\top +
+          \mathbf{R}^{vo}_k \)</strong
+        >. The Kalman gain is
+        <strong
+          >\( \mathbf{K}_k = \mathbf{P}^-_k\mathbf{H}_k^\top \mathbf{S}_k^{-1}
+          \)</strong
+        >. If <strong>\( \mathbf{R}^{vo}_k \)</strong> is underestimated, then
+        <strong>\( \mathbf{S}_k \)</strong> is too small and
+        <strong>\( \mathbf{K}_k \)</strong> becomes too large, so the filter
+        over-trusts VO and pulls the state toward potentially corrupted
+        measurements. The posterior covariance becomes overly optimistic (too
+        small), so consistency tests (NIS/NEES) are violated and the filter may
+        diverge when unmodeled effects create heavy-tailed residuals. Robust
+        gating and conservative covariance modeling reduce this risk.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        We derived a unified probabilistic view of VIO pipelines, showing how
+        high-rate IMU propagation and lower-rate visual constraints form either
+        an EKF-style filter or a sliding-window optimizer. We introduced IMU
+        preintegration to build efficient inertial factors, discussed robust
+        coupling strategies and gating, and highlighted AMR-specific issues such
+        as limited excitation and calibration/time alignment sensitivity.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Mourikis, A.I., &amp; Roumeliotis, S.I. (2007). A Multi-State Constraint
+        Kalman Filter for Vision-aided Inertial Navigation.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation</em
+        >.
+      </li>
+      <li>
+        Leutenegger, S., Lynen, S., Bosse, M., Siegwart, R., &amp; Furgale, P.
+        (2015). Keyframe-based visual–inertial odometry using nonlinear
+        optimization.
+        <em>International Journal of Robotics Research</em>, 34(3), 314–334.
+      </li>
+      <li>
+        Forster, C., Carlone, L., Dellaert, F., &amp; Scaramuzza, D. (2017).
+        On-Manifold Preintegration for Real-Time Visual–Inertial Odometry.
+        <em>IEEE Transactions on Robotics</em>, 33(1), 1–21.
+      </li>
+      <li>
+        Qin, T., Li, P., &amp; Shen, S. (2018). VINS-Mono: A Robust and
+        Versatile Monocular Visual–Inertial State Estimator.
+        <em>IEEE Transactions on Robotics</em>, 34(4), 1004–1020.
+      </li>
+      <li>
+        Huang, G.P. (2010). A Study of the Consistency of EKF-Based SLAM.
+        <em>IEEE Transactions on Robotics</em>, 26(1), 1–12.
+      </li>
+      <li>
+        Eckenhoff, K., Geneva, P., &amp; Huang, G.P. (2019). Closed-Form
+        Preintegration Methods for Graph-Based Visual–Inertial Navigation.
+        <em>International Journal of Robotics Research</em>, 38(2–3), 215–235.
+      </li>
+      <li>
+        Geneva, P., Eckenhoff, K., Lee, W., Yang, Y., &amp; Huang, G.P. (2020).
+        OpenVINS: A Research Platform for Visual–Inertial Estimation.
+        <em>IEEE International Conference on Robotics and Automation</em>
+        (platform paper; estimator details reference associated journal
+        extensions).
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson2.html">
+          Lesson 2: Feature-Based vs Direct Methods
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson4.html">
+          Lesson 4: Scale, Lighting, and Motion Blur Issues
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="active-lesson" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

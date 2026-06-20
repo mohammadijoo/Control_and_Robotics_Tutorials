@@ -1,0 +1,3028 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: SLAM II — Graph-Based SLAM - Lesson 5: Lab: Build and Optimize a Pose Graph | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: SLAM II — Graph-Based SLAM</h1>
+    <h3><strong>Lesson 5: Lab: Build and Optimize a Pose Graph</strong></h3>
+    <p>
+      This lab guides you through constructing a 2D pose graph, injecting
+      realistic noise and loop-closure outliers, and solving the resulting
+      nonlinear least-squares problem with sparse Gauss–Newton /
+      Levenberg–Marquardt (LM). We focus on the residual model on SE(2),
+      Jacobian block structure, gauge handling, and solver diagnostics.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Data Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Data Model</h2>
+    <div class="down-content">
+      <p>
+        A <em>pose graph</em> consists of nodes (robot poses) and edges
+        (relative-pose constraints). Each node <strong> \( i \)</strong> stores
+        a planar pose
+        <strong> \( \mathbf{x}_i = (x_i, y_i, \theta_i) \)</strong>. An edge
+        <strong> \( (i,j) \)</strong> carries a measured relative motion
+        <strong>
+          \( \mathbf{z}_{ij} = (\Delta x, \Delta y, \Delta\theta) \)</strong
+        >
+        (odometry or loop closure), plus an information matrix
+        <strong> \( \mathbf{\Omega}_{ij} \)</strong>.
+      </p>
+
+      <p><strong>What you will implement:</strong></p>
+      <ul>
+        <li>
+          Synthesize a ground-truth trajectory and generate noisy odometry
+          edges.
+        </li>
+        <li>
+          Add loop-closure edges (including a controllable fraction of
+          outliers).
+        </li>
+        <li>
+          Initialize by dead reckoning, then optimize the graph via sparse
+          GN/LM.
+        </li>
+        <li>Evaluate convergence and trajectory quality.</li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Generate ground-truth poses (x,y,theta)"] --> B["Create noisy odometry edges (i,i+1)"]
+  B --> C["Add loop-closure candidates (i,j)"]
+  C --> D["Corrupt some loop closures (outliers)"]
+  D --> E["Build pose graph: nodes + edges + information"]
+  E --> F["Initialize: dead-reckoning chain"]
+  F --> G["Optimize: GN/LM + sparse solve"]
+  G --> H["Evaluate: cost and error metrics"]
+        </pre>
+      </div>
+
+      <p>The optimization objective (least squares) is:</p>
+      <h4 class="mathJax">
+        \[ F(\mathbf{x}) = \sum_{(i,j)\in\mathcal{E} }
+        \mathbf{e}_{ij}(\mathbf{x})^\top
+        \mathbf{\Omega}_{ij}\,\mathbf{e}_{ij}(\mathbf{x}). \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: SE(2) Edge Model and Residual -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. SE(2) Edge Model and Residual</h2>
+    <div class="down-content">
+      <p>
+        Associate each pose with a homogeneous transform
+        <strong> \( \mathbf{T}_i \in SE(2) \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{T}_i = \begin{bmatrix} \mathbf{R}(\theta_i) & \mathbf{t}_i \\
+        \mathbf{0}^\top & 1 \end{bmatrix},\quad \mathbf{R}(\theta)=
+        \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta
+        \end{bmatrix},\quad \mathbf{t}_i=\begin{bmatrix}x_i\\y_i\end{bmatrix}.
+        \]
+      </h4>
+
+      <p>
+        The predicted relative transform is
+        <strong>
+          \( \hat{\mathbf{Z} }_{ij}(\mathbf{x}) = \mathbf{T}_i^{-1}\mathbf{T}_j
+          \)</strong
+        >. Using a minimal coordinate residual:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{e}_{ij}(\mathbf{x}) = \begin{bmatrix}
+        \mathbf{R}(\theta_i)^\top(\mathbf{t}_j-\mathbf{t}_i) - \mathbf{t}_{ij}
+        \\ \mathrm{wrap}(\theta_j-\theta_i-\theta_{ij})
+        \end{bmatrix}\in\mathbb{R}^3, \]
+      </h4>
+
+      <p>
+        where
+        <strong> \( \mathbf{t}_{ij}=[\Delta x,\Delta y]^\top \)</strong> and
+        <strong> \( \theta_{ij}=\Delta\theta \)</strong> come from the
+        measurement. The wrap operator enforces consistent angle residuals.
+      </p>
+
+      <p>
+        If you are given measurement covariance
+        <strong> \( \mathbf{\Sigma}_{ij} \)</strong>, you set
+        <strong> \( \mathbf{\Omega}_{ij}=\mathbf{\Sigma}_{ij}^{-1} \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Linearization, Jacobians, and Normal Equations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Linearization, Jacobians, and Normal Equations</h2>
+    <div class="down-content">
+      <p>
+        At iteration k, linearize each residual around
+        <strong> \( \mathbf{x}^{(k)} \)</strong>:
+        <strong>
+          \( \mathbf{e}_{ij}(\mathbf{x}^{(k)}+\delta\mathbf{x}) \approx
+          \mathbf{e}_{ij}^{(k)} + \mathbf{J}_{ij}\delta\mathbf{x} \)</strong
+        >. Summing quadratic models yields sparse normal equations.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{H}\,\delta\mathbf{x} = -\mathbf{g},\quad
+        \mathbf{H}=\sum_{(i,j)\in\mathcal{E}
+        }\mathbf{J}_{ij}^\top\mathbf{\Omega}_{ij}\mathbf{J}_{ij},\quad
+        \mathbf{g}=\sum_{(i,j)\in\mathcal{E}
+        }\mathbf{J}_{ij}^\top\mathbf{\Omega}_{ij}\mathbf{e}_{ij}. \]
+      </h4>
+
+      <p>
+        Each edge touches only nodes i and j, so
+        <strong> \( \mathbf{J}_{ij} \)</strong> has two 3×3 blocks
+        <strong>
+          \( \mathbf{A}_{ij}=\partial\mathbf{e}_{ij}/\partial\mathbf{x}_i
+          \)</strong
+        >
+        and
+        <strong>
+          \( \mathbf{B}_{ij}=\partial\mathbf{e}_{ij}/\partial\mathbf{x}_j
+          \)</strong
+        >. This is the key to sparse scalability.
+      </p>
+
+      <p>
+        Let <strong> \( \mathbf{d}=\mathbf{t}_j-\mathbf{t}_i \)</strong> and
+        <strong> \( \mathbf{R}_i=\mathbf{R}(\theta_i) \)</strong>. With
+        <strong>
+          \( \mathbf{S}=\begin{bmatrix}0&amp;-1\\1&amp;0\end{bmatrix} \)</strong
+        >, the translational part satisfies:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+        \frac{\partial}{\partial\mathbf{t}_i}\Big(\mathbf{R}_i^\top\mathbf{d}\Big)=-\mathbf{R}_i^\top,\quad
+        \frac{\partial}{\partial\mathbf{t}_j}\Big(\mathbf{R}_i^\top\mathbf{d}\Big)=\mathbf{R}_i^\top,\quad
+        \frac{\partial}{\partial\theta_i}\Big(\mathbf{R}_i^\top\mathbf{d}\Big)=-\mathbf{R}_i^\top\mathbf{S}\mathbf{d}.
+        \]
+      </h4>
+
+      <p>
+        The angular residual
+        <strong>
+          \( r_\theta=\mathrm{wrap}(\theta_j-\theta_i-\theta_{ij}) \)</strong
+        >
+        has local derivatives
+        <strong> \( \partial r_\theta/\partial\theta_i=-1 \)</strong>,
+        <strong> \( \partial r_\theta/\partial\theta_j=1 \)</strong> away from
+        wrap discontinuities.
+      </p>
+
+      <p>
+        <strong>Gauge freedom:</strong> with only relative constraints, the cost
+        is invariant to a global SE(2) transform, so
+        <strong> \( \mathbf{H} \)</strong> is singular. Anchor pose 0 by adding
+        a strong prior or removing its variables.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \min_{\mathbf{x} }\; \sum_{(i,j)\in\mathcal{E}
+        }\|\mathbf{e}_{ij}(\mathbf{x})\|^2_{\mathbf{\Omega}_{ij} } +
+        \|\mathbf{x}_0-\bar{\mathbf{x} }_0\|^2_{\mathbf{\Omega}_0},\quad
+        \mathbf{\Omega}_0 \text{ large}. \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: GN/LM and Iteration Control -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. GN/LM and Iteration Control</h2>
+    <div class="down-content">
+      <p>LM solves a damped system:</p>
+      <h4 class="mathJax">
+        \[ (\mathbf{H}+\lambda\,\mathbf{D})\,\delta\mathbf{x}=-\mathbf{g},\quad
+        \lambda &gt; 0, \]
+      </h4>
+      <p>
+        typically with
+        <strong> \( \mathbf{D}=\mathrm{diag}(\mathbf{H}) \)</strong>. If the new
+        cost decreases sufficiently, reduce <strong> \( \lambda \)</strong>;
+        otherwise increase it.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Initialize x (dead-reckoning)"] --> L["Linearize edges at current x"]
+  L --> A["Assemble sparse H and g"]
+  A --> SOL["Solve: (H + lambda*D) dx = -g"]
+  SOL --> U["Update x := x + dx (wrap angles)"]
+  U --> C["Stop test: cost decrease and norm(dx)"]
+  C -->|continue| L
+  C -->|stop| OUT["Return optimized x"]
+        </pre>
+      </div>
+
+      <p>
+        For loop closures, monitor per-edge residual magnitudes; extreme values
+        are candidates for robust downweighting (Lesson 4) or gating.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Implementations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Implementations</h2>
+    <div class="down-content">
+      <p>Below are complete reference implementations.</p>
+
+      <h3><strong>Chapter12_Lesson5.py</strong></h3>
+      <pre><code class="language-python">
+# Chapter12_Lesson5.py
+# Lab: Build and Optimize a 2D Pose Graph (SE(2)) using Gauss-Newton / Levenberg-Marquardt
+# Dependencies: numpy, scipy
+#
+# Run:
+#   python Chapter12_Lesson5.py
+#
+# This script:
+#   1) Generates a synthetic SE(2) trajectory (ground truth)
+#   2) Creates noisy odometry edges + loop closure edges (optionally with outliers)
+#   3) Builds a pose graph and optimizes it with GN/LM and a sparse solver
+#   4) Prints convergence diagnostics and returns optimized poses
+#
+# NOTE: All angles are in radians. wrap() maps angles to (-pi, pi].
+
+from __future__ import annotations
+import math
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+try:
+    from scipy.sparse import lil_matrix, csr_matrix
+    from scipy.sparse.linalg import spsolve
+except Exception as e:
+    raise RuntimeError("This script requires scipy (sparse). Install via: pip install scipy") from e
+
+
+# ----------------------------
+# SE(2) utilities
+# ----------------------------
+def wrap_angle(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    a = (a + math.pi) % (2.0 * math.pi) - math.pi
+    # map -pi to +pi (optional convention)
+    if a &lt;= -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def R(theta: float) -&gt; np.ndarray:
+    c, s = math.cos(theta), math.sin(theta)
+    return np.array([[c, -s], [s, c]], dtype=float)
+
+
+def se2_compose(x1: np.ndarray, x2: np.ndarray) -&gt; np.ndarray:
+    """
+    Compose two SE(2) poses in minimal coordinates:
+      x = (t, theta) with t in R^2.
+    """
+    t1, th1 = x1[:2], x1[2]
+    t2, th2 = x2[:2], x2[2]
+    t = t1 + R(th1) @ t2
+    th = wrap_angle(th1 + th2)
+    return np.array([t[0], t[1], th], dtype=float)
+
+
+def se2_inv(x: np.ndarray) -&gt; np.ndarray:
+    """Inverse of SE(2) pose in minimal coords."""
+    t, th = x[:2], x[2]
+    Rt = R(th).T
+    tinv = -Rt @ t
+    return np.array([tinv[0], tinv[1], wrap_angle(-th)], dtype=float)
+
+
+def se2_between(xi: np.ndarray, xj: np.ndarray) -&gt; np.ndarray:
+    """Relative transform z = xi^{-1} ⊕ xj in minimal coords."""
+    return se2_compose(se2_inv(xi), xj)
+
+
+# ----------------------------
+# Pose graph data structures
+# ----------------------------
+@dataclass
+class EdgeSE2:
+    i: int
+    j: int
+    z: np.ndarray      # measurement (3,)
+    Omega: np.ndarray  # information (3,3)
+    is_loop: bool = False
+
+
+# ----------------------------
+# Residual + Jacobians
+# ----------------------------
+def residual_and_jacobian(xi: np.ndarray, xj: np.ndarray, z_ij: np.ndarray) -&gt; Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Residual e_ij(x) and Jacobians A=de/dxi, B=de/dxj using minimal residual:
+      e_t = R(theta_i)^T (t_j - t_i) - t_ij
+      e_r = wrap(theta_j - theta_i - theta_ij)
+    """
+    ti, thi = xi[:2], xi[2]
+    tj, thj = xj[:2], xj[2]
+    RijT = R(thi).T
+    d = tj - ti
+    et = RijT @ d - z_ij[:2]
+    er = wrap_angle(thj - thi - z_ij[2])
+    e = np.array([et[0], et[1], er], dtype=float)
+
+    # Jacobians
+    # S = [[0,-1],[1,0]]
+    S = np.array([[0.0, -1.0], [1.0, 0.0]])
+    # d(et)/d(ti) = -R_i^T
+    A_t_ti = -RijT
+    # d(et)/d(tj) = +R_i^T
+    B_t_tj = RijT
+    # d(et)/d(theta_i) = -R_i^T S (t_j - t_i)
+    A_t_thi = -(RijT @ (S @ d)).reshape(2, 1)
+
+    # Assemble A (3x3), B (3x3)
+    A = np.zeros((3, 3), dtype=float)
+    B = np.zeros((3, 3), dtype=float)
+    A[:2, :2] = A_t_ti
+    A[:2, 2:3] = A_t_thi
+    A[2, 2] = -1.0
+
+    B[:2, :2] = B_t_tj
+    B[2, 2] = 1.0
+
+    return e, A, B
+
+
+# ----------------------------
+# Graph optimization (GN/LM)
+# ----------------------------
+def build_normal_equations(
+    x: np.ndarray,
+    edges: List[EdgeSE2],
+    N: int,
+    anchor_idx: int = 0,
+    anchor_Omega: Optional[np.ndarray] = None,
+    anchor_pose: Optional[np.ndarray] = None,
+) -&gt; Tuple[csr_matrix, np.ndarray, float]:
+    """
+    Build sparse H and dense g for all poses (3N variables).
+    Optionally add an anchor prior on pose 'anchor_idx' to remove gauge.
+    """
+    dim = 3 * N
+    H = lil_matrix((dim, dim), dtype=float)
+    g = np.zeros(dim, dtype=float)
+    cost = 0.0
+
+    # Helper: slice for pose k
+    def sl(k: int) -&gt; slice:
+        return slice(3 * k, 3 * k + 3)
+
+    for ed in edges:
+        i, j = ed.i, ed.j
+        xi = x[sl(i)]
+        xj = x[sl(j)]
+        e, A, B = residual_and_jacobian(xi, xj, ed.z)
+        Omega = ed.Omega
+
+        cost += float(e.T @ Omega @ e)
+
+        # Edge contributions to H and g (block form)
+        AtO = A.T @ Omega
+        BtO = B.T @ Omega
+
+        H_ii = AtO @ A
+        H_ij = AtO @ B
+        H_ji = BtO @ A
+        H_jj = BtO @ B
+
+        g_i = AtO @ e
+        g_j = BtO @ e
+
+        si, sj = sl(i), sl(j)
+
+        H[si, si] += H_ii
+        H[si, sj] += H_ij
+        H[sj, si] += H_ji
+        H[sj, sj] += H_jj
+
+        g[si] += g_i
+        g[sj] += g_j
+
+    # Anchor prior: (x_anchor - anchor_pose) with information anchor_Omega
+    if anchor_Omega is None:
+        anchor_Omega = np.diag([1e6, 1e6, 1e6])
+    if anchor_pose is None:
+        anchor_pose = x[sl(anchor_idx)].copy()
+
+    ea = x[sl(anchor_idx)] - anchor_pose
+    ea[2] = wrap_angle(ea[2])
+    cost += float(ea.T @ anchor_Omega @ ea)
+
+    H_a = anchor_Omega
+    g_a = anchor_Omega @ ea
+    sa = sl(anchor_idx)
+    H[sa, sa] += H_a
+    g[sa] += g_a
+
+    return H.tocsr(), g, cost
+
+
+def levenberg_marquardt(
+    x0: np.ndarray,
+    edges: List[EdgeSE2],
+    N: int,
+    max_iters: int = 30,
+    lambda0: float = 1e-3,
+    tol: float = 1e-6,
+) -&gt; Tuple[np.ndarray, List[float]]:
+    """
+    Sparse LM on pose graph:
+      (H + lambda * diag(H)) dx = -g
+    """
+    x = x0.copy()
+    lam = lambda0
+    costs = []
+
+    for it in range(1, max_iters + 1):
+        H, g, cost = build_normal_equations(x, edges, N, anchor_idx=0)
+        costs.append(cost)
+
+        # Damping matrix: diag(H)
+        diagH = H.diagonal()
+        D = csr_matrix((diagH, (np.arange(3 * N), np.arange(3 * N))), shape=(3 * N, 3 * N))
+        H_lm = H + lam * D
+
+        # Solve linear system
+        dx = spsolve(H_lm, -g)
+
+        # Candidate update
+        x_new = x + dx
+        # wrap all angles
+        for k in range(N):
+            x_new[3 * k + 2] = wrap_angle(x_new[3 * k + 2])
+
+        # Evaluate new cost
+        _, _, cost_new = build_normal_equations(x_new, edges, N, anchor_idx=0)
+
+        # Accept / reject
+        if cost_new &lt; cost:
+            x = x_new
+            lam = max(lam / 5.0, 1e-12)
+        else:
+            lam = min(lam * 10.0, 1e12)
+
+        step_norm = float(np.linalg.norm(dx))
+        print(f"iter={it:02d} cost={cost:.6e} cost_new={cost_new:.6e} lam={lam:.2e} ||dx||={step_norm:.3e}")
+
+        if step_norm &lt; tol:
+            print("Converged: step norm below tolerance.")
+            break
+
+    return x, costs
+
+
+# ----------------------------
+# Synthetic data generation
+# ----------------------------
+def generate_ground_truth(N: int, step: float = 1.0, turn_rate: float = 0.03) -&gt; np.ndarray:
+    """
+    Create a smooth curving trajectory.
+    x_k+1 = x_k ⊕ u_k, with u_k = (step, 0, turn_rate)
+    """
+    x = np.zeros((N, 3), dtype=float)
+    for k in range(1, N):
+        u = np.array([step, 0.0, turn_rate], dtype=float)
+        x[k] = se2_compose(x[k - 1], u)
+    return x
+
+
+def add_noise_to_measurement(z: np.ndarray, sig_t: float, sig_th: float, rng: np.random.Generator) -&gt; np.ndarray:
+    zn = z.copy()
+    zn[0] += rng.normal(0.0, sig_t)
+    zn[1] += rng.normal(0.0, sig_t)
+    zn[2] = wrap_angle(zn[2] + rng.normal(0.0, sig_th))
+    return zn
+
+
+def info_from_sigmas(sig_t: float, sig_th: float) -&gt; np.ndarray:
+    # diagonal covariance
+    Sigma = np.diag([sig_t**2, sig_t**2, sig_th**2])
+    return np.linalg.inv(Sigma)
+
+
+def build_synthetic_graph(
+    x_gt: np.ndarray,
+    sig_odom_t: float = 0.05,
+    sig_odom_th: float = 0.02,
+    sig_loop_t: float = 0.10,
+    sig_loop_th: float = 0.05,
+    num_loops: int = 15,
+    outlier_frac: float = 0.20,
+    outlier_scale: float = 5.0,
+    seed: int = 7
+) -&gt; Tuple[List[EdgeSE2], np.ndarray]:
+    """
+    Build edges + an initial guess (dead reckoning from noisy odometry).
+    """
+    rng = np.random.default_rng(seed)
+    N = x_gt.shape[0]
+    edges: List[EdgeSE2] = []
+
+    # Odometry edges (i,i+1)
+    Omega_odom = info_from_sigmas(sig_odom_t, sig_odom_th)
+    for i in range(N - 1):
+        z = se2_between(x_gt[i], x_gt[i + 1])
+        z_noisy = add_noise_to_measurement(z, sig_odom_t, sig_odom_th, rng)
+        edges.append(EdgeSE2(i=i, j=i + 1, z=z_noisy, Omega=Omega_odom, is_loop=False))
+
+    # Dead-reckoning init
+    x0 = np.zeros_like(x_gt)
+    for i in range(N - 1):
+        x0[i + 1] = se2_compose(x0[i], edges[i].z)
+
+    # Loop closures
+    Omega_loop = info_from_sigmas(sig_loop_t, sig_loop_th)
+    # Choose random pairs (i,j) with j &gt; i+5
+    candidates = []
+    for i in range(N):
+        for j in range(i + 6, N):
+            candidates.append((i, j))
+    rng.shuffle(candidates)
+    pairs = candidates[:num_loops]
+
+    for (i, j) in pairs:
+        z = se2_between(x_gt[i], x_gt[j])
+        z_noisy = add_noise_to_measurement(z, sig_loop_t, sig_loop_th, rng)
+        # Inject outliers by corrupting measurement
+        if rng.random() &lt; outlier_frac:
+            z_noisy[:2] += rng.normal(0.0, outlier_scale * sig_loop_t, size=2)
+            z_noisy[2] = wrap_angle(z_noisy[2] + rng.normal(0.0, outlier_scale * sig_loop_th))
+        edges.append(EdgeSE2(i=i, j=j, z=z_noisy, Omega=Omega_loop, is_loop=True))
+
+    return edges, x0
+
+
+def trajectory_rmse(x_est: np.ndarray, x_gt: np.ndarray) -&gt; float:
+    """RMSE in translation only (simple ATE proxy without alignment)."""
+    d = x_est[:, :2] - x_gt[:, :2]
+    return float(np.sqrt(np.mean(np.sum(d*d, axis=1))))
+
+
+# ----------------------------
+# Main
+# ----------------------------
+def main():
+    N = 80
+    x_gt = generate_ground_truth(N=N, step=1.0, turn_rate=0.03)
+    edges, x0 = build_synthetic_graph(
+        x_gt,
+        sig_odom_t=0.05, sig_odom_th=0.02,
+        sig_loop_t=0.10, sig_loop_th=0.05,
+        num_loops=20,
+        outlier_frac=0.25,
+        outlier_scale=8.0,
+        seed=3
+    )
+
+    print(f"Graph: N={N}, edges={len(edges)} (odom={N-1}, loops={len(edges)-(N-1)})")
+    print("Initial RMSE (translation):", trajectory_rmse(x0, x_gt))
+
+    x_opt, costs = levenberg_marquardt(x0.reshape(-1), edges, N, max_iters=30, lambda0=1e-3, tol=1e-6)
+    x_opt = x_opt.reshape(N, 3)
+
+    print("Final RMSE (translation):", trajectory_rmse(x_opt, x_gt))
+    print("Cost sequence (first 10):", costs[:10])
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <h3><strong>Chapter12_Lesson5.cpp</strong></h3>
+      <pre><code class="language-cpp">
+// Chapter12_Lesson5.cpp
+// Lab: Build and Optimize a 2D Pose Graph (SE(2)) using Gauss-Newton / LM
+//
+// Dependencies: Eigen (header-only for dense), Eigen Sparse for sparse linear solve.
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter12_Lesson5.cpp -I /usr/include/eigen3 -o pose_graph
+//
+// Run:
+//   ./pose_graph
+//
+// This program generates a synthetic trajectory, adds noisy odometry + loop constraints,
+// anchors node 0, and optimizes using LM with sparse normal equations.
+
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;random&gt;
+#include &lt;cmath&gt;
+
+#include &lt;Eigen/Dense&gt;
+#include &lt;Eigen/Sparse&gt;
+#include &lt;Eigen/SparseCholesky&gt;
+
+using Eigen::Matrix2d;
+using Eigen::Matrix3d;
+using Eigen::Vector2d;
+using Eigen::Vector3d;
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+
+struct EdgeSE2 {
+  int i;
+  int j;
+  Vector3d z;        // measurement (dx, dy, dtheta)
+  Matrix3d Omega;    // information
+  bool is_loop;
+};
+
+static double wrap_angle(double a) {
+  a = std::fmod(a + M_PI, 2.0 * M_PI);
+  if (a &lt; 0) a += 2.0 * M_PI;
+  a -= M_PI;
+  if (a &lt;= -M_PI) a += 2.0 * M_PI;
+  return a;
+}
+
+static Matrix2d R(double theta) {
+  double c = std::cos(theta), s = std::sin(theta);
+  Matrix2d M;
+  M &lt;&lt; c, -s,
+       s,  c;
+  return M;
+}
+
+static Vector3d se2_compose(const Vector3d&amp; x1, const Vector3d&amp; x2) {
+  Vector2d t1(x1(0), x1(1));
+  double th1 = x1(2);
+  Vector2d t2(x2(0), x2(1));
+  double th2 = x2(2);
+
+  Vector2d t = t1 + R(th1) * t2;
+  double th = wrap_angle(th1 + th2);
+  return Vector3d(t(0), t(1), th);
+}
+
+static Vector3d se2_inv(const Vector3d&amp; x) {
+  Vector2d t(x(0), x(1));
+  double th = x(2);
+  Matrix2d Rt = R(th).transpose();
+  Vector2d tinv = -Rt * t;
+  return Vector3d(tinv(0), tinv(1), wrap_angle(-th));
+}
+
+static Vector3d se2_between(const Vector3d&amp; xi, const Vector3d&amp; xj) {
+  return se2_compose(se2_inv(xi), xj);
+}
+
+static void residual_and_jacobian(
+    const Vector3d&amp; xi, const Vector3d&amp; xj, const Vector3d&amp; z,
+    Vector3d&amp; e, Matrix3d&amp; A, Matrix3d&amp; B)
+{
+  Vector2d ti(xi(0), xi(1));
+  double thi = xi(2);
+  Vector2d tj(xj(0), xj(1));
+  double thj = xj(2);
+
+  Matrix2d RiT = R(thi).transpose();
+  Vector2d d = tj - ti;
+
+  Vector2d et = RiT * d - Vector2d(z(0), z(1));
+  double er = wrap_angle(thj - thi - z(2));
+  e &lt;&lt; et(0), et(1), er;
+
+  // Jacobians
+  Matrix2d S;
+  S &lt;&lt; 0.0, -1.0,
+       1.0,  0.0;
+
+  A.setZero();
+  B.setZero();
+
+  // d(et)/d(ti) = -Ri^T
+  A.block&lt;2,2&gt;(0,0) = -RiT;
+  // d(et)/d(tj) = +Ri^T
+  B.block&lt;2,2&gt;(0,0) = RiT;
+  // d(et)/d(theta_i) = -Ri^T S (tj-ti)
+  Vector2d A_t_th = -(RiT * (S * d));
+  A(0,2) = A_t_th(0);
+  A(1,2) = A_t_th(1);
+
+  // angular
+  A(2,2) = -1.0;
+  B(2,2) =  1.0;
+}
+
+static Matrix3d info_from_sigmas(double sig_t, double sig_th) {
+  Matrix3d Sigma = Matrix3d::Zero();
+  Sigma(0,0) = sig_t * sig_t;
+  Sigma(1,1) = sig_t * sig_t;
+  Sigma(2,2) = sig_th * sig_th;
+  return Sigma.inverse();
+}
+
+static void build_normal_equations(
+    const Eigen::VectorXd&amp; x, int N, const std::vector&lt;EdgeSE2&gt;&amp; edges,
+    Eigen::SparseMatrix&lt;double&gt;&amp; H, Eigen::VectorXd&amp; g, double&amp; cost,
+    int anchor_idx = 0,
+    const Matrix3d&amp; anchor_Omega = (Matrix3d() &lt;&lt; 1e6,0,0, 0,1e6,0, 0,0,1e6).finished(),
+    const Vector3d&amp; anchor_pose = Vector3d::Zero()
+) {
+  int dim = 3 * N;
+  std::vector&lt;Eigen::Triplet&lt;double&gt;&gt; trips;
+  trips.reserve(edges.size() * 4 * 9 + 9);
+
+  g.setZero(dim);
+  cost = 0.0;
+
+  auto sl = [](int k) { return 3*k; };
+
+  for (const auto&amp; ed : edges) {
+    int i = ed.i, j = ed.j;
+    Vector3d xi = x.segment(sl(i), 3);
+    Vector3d xj = x.segment(sl(j), 3);
+
+    Vector3d e;
+    Matrix3d A, B;
+    residual_and_jacobian(xi, xj, ed.z, e, A, B);
+
+    cost += e.transpose() * ed.Omega * e;
+
+    Matrix3d AtO = A.transpose() * ed.Omega;
+    Matrix3d BtO = B.transpose() * ed.Omega;
+
+    Matrix3d Hii = AtO * A;
+    Matrix3d Hij = AtO * B;
+    Matrix3d Hji = BtO * A;
+    Matrix3d Hjj = BtO * B;
+
+    Vector3d gi = AtO * e;
+    Vector3d gj = BtO * e;
+
+    int si = sl(i), sj = sl(j);
+
+    // Add block triplets
+    for (int r = 0; r &lt; 3; ++r) {
+      for (int c = 0; c &lt; 3; ++c) {
+        trips.emplace_back(si+r, si+c, Hii(r,c));
+        trips.emplace_back(si+r, sj+c, Hij(r,c));
+        trips.emplace_back(sj+r, si+c, Hji(r,c));
+        trips.emplace_back(sj+r, sj+c, Hjj(r,c));
+      }
+    }
+
+    g.segment(si,3) += gi;
+    g.segment(sj,3) += gj;
+  }
+
+  // Anchor prior on node 0 (x0 - anchor_pose)
+  {
+    int s0 = sl(anchor_idx);
+    Vector3d e0 = x.segment(s0,3) - anchor_pose;
+    e0(2) = wrap_angle(e0(2));
+    cost += e0.transpose() * anchor_Omega * e0;
+
+    Matrix3d H0 = anchor_Omega;
+    Vector3d g0 = anchor_Omega * e0;
+
+    for (int r = 0; r &lt; 3; ++r) {
+      for (int c = 0; c &lt; 3; ++c) {
+        trips.emplace_back(s0+r, s0+c, H0(r,c));
+      }
+    }
+    g.segment(s0,3) += g0;
+  }
+
+  H.resize(dim, dim);
+  H.setFromTriplets(trips.begin(), trips.end());
+}
+
+static double traj_rmse_translation(const Eigen::VectorXd&amp; x_est, const std::vector&lt;Vector3d&gt;&amp; x_gt) {
+  int N = (int)x_gt.size();
+  double s = 0.0;
+  for (int k = 0; k &lt; N; ++k) {
+    double dx = x_est(3*k+0) - x_gt;
+    double dy = x_est(3*k+1) - x_gt;
+    s += dx*dx + dy*dy;
+  }
+  return std::sqrt(s / N);
+}
+
+static std::vector&lt;Vector3d&gt; generate_ground_truth(int N, double step=1.0, double turn_rate=0.03) {
+  std::vector&lt;Vector3d&gt; x(N, Vector3d::Zero());
+  for (int k = 1; k &lt; N; ++k) {
+    Vector3d u(step, 0.0, turn_rate);
+    x[k] = se2_compose(x[k-1], u);
+  }
+  return x;
+}
+
+static Vector3d add_noise(const Vector3d&amp; z, double sig_t, double sig_th, std::mt19937&amp; gen) {
+  std::normal_distribution&lt;double&gt; nt(0.0, sig_t);
+  std::normal_distribution&lt;double&gt; nth(0.0, sig_th);
+  Vector3d zn = z;
+  zn(0) += nt(gen);
+  zn(1) += nt(gen);
+  zn(2) = wrap_angle(zn(2) + nth(gen));
+  return zn;
+}
+
+static void build_synthetic_graph(
+    const std::vector&lt;Vector3d&gt;&amp; x_gt,
+    std::vector&lt;EdgeSE2&gt;&amp; edges,
+    Eigen::VectorXd&amp; x0,
+    int num_loops=20,
+    double outlier_frac=0.25,
+    double outlier_scale=8.0,
+    unsigned seed=3)
+{
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution&lt;double&gt; uni(0.0, 1.0);
+
+  int N = (int)x_gt.size();
+  edges.clear();
+
+  double sig_odom_t = 0.05, sig_odom_th = 0.02;
+  double sig_loop_t = 0.10, sig_loop_th = 0.05;
+
+  Matrix3d Omega_odom = info_from_sigmas(sig_odom_t, sig_odom_th);
+  Matrix3d Omega_loop = info_from_sigmas(sig_loop_t, sig_loop_th);
+
+  // Odometry edges
+  for (int i = 0; i &lt; N-1; ++i) {
+    Vector3d z = se2_between(x_gt[i], x_gt[i+1]);
+    Vector3d zn = add_noise(z, sig_odom_t, sig_odom_th, gen);
+    edges.push_back(EdgeSE2{i, i+1, zn, Omega_odom, false});
+  }
+
+  // Initial guess via dead reckoning
+  x0.setZero(3*N);
+  for (int i = 0; i &lt; N-1; ++i) {
+    Vector3d xi = x0.segment(3*i, 3);
+    Vector3d xip1 = se2_compose(xi, edges[i].z);
+    x0.segment(3*(i+1), 3) = xip1;
+  }
+
+  // Candidate loop pairs
+  std::vector&lt;std::pair&lt;int,int&gt;&gt; cand;
+  cand.reserve(N*N);
+  for (int i = 0; i &lt; N; ++i) {
+    for (int j = i+6; j &lt; N; ++j) {
+      cand.emplace_back(i,j);
+    }
+  }
+  std::shuffle(cand.begin(), cand.end(), gen);
+
+  for (int k = 0; k &lt; num_loops &amp;&amp; k &lt; (int)cand.size(); ++k) {
+    int i = cand[k].first;
+    int j = cand[k].second;
+    Vector3d z = se2_between(x_gt[i], x_gt[j]);
+    Vector3d zn = add_noise(z, sig_loop_t, sig_loop_th, gen);
+
+    if (uni(gen) &lt; outlier_frac) {
+      std::normal_distribution&lt;double&gt; nt(0.0, outlier_scale * sig_loop_t);
+      std::normal_distribution&lt;double&gt; nth(0.0, outlier_scale * sig_loop_th);
+      zn(0) += nt(gen);
+      zn(1) += nt(gen);
+      zn(2) = wrap_angle(zn(2) + nth(gen));
+    }
+
+    edges.push_back(EdgeSE2{i, j, zn, Omega_loop, true});
+  }
+}
+
+static Eigen::VectorXd levenberg_marquardt(
+    const Eigen::VectorXd&amp; x_init,
+    int N,
+    const std::vector&lt;EdgeSE2&gt;&amp; edges,
+    int maxIters=30,
+    double lambda0=1e-3,
+    double tol=1e-6)
+{
+  Eigen::VectorXd x = x_init;
+  double lam = lambda0;
+
+  Eigen::SparseMatrix&lt;double&gt; H;
+  Eigen::VectorXd g(3*N);
+  double cost = 0.0;
+
+  for (int it = 1; it &lt;= maxIters; ++it) {
+    // anchor_pose = current pose0 (so the prior is around current? better: anchor at init/gt; here we anchor at x0=0)
+    Vector3d anchor_pose(0.0, 0.0, 0.0);
+    Matrix3d anchor_Omega = (Matrix3d() &lt;&lt; 1e6,0,0, 0,1e6,0, 0,0,1e6).finished();
+
+    build_normal_equations(x, N, edges, H, g, cost, 0, anchor_Omega, anchor_pose);
+
+    // Damping: diag(H)
+    Eigen::VectorXd diag = H.diagonal();
+    Eigen::SparseMatrix&lt;double&gt; D(3*N, 3*N);
+    std::vector&lt;Eigen::Triplet&lt;double&gt;&gt; dtr;
+    dtr.reserve(3*N);
+    for (int k = 0; k &lt; 3*N; ++k) dtr.emplace_back(k,k,diag(k));
+    D.setFromTriplets(dtr.begin(), dtr.end());
+
+    Eigen::SparseMatrix&lt;double&gt; Hlm = H + lam * D;
+
+    // Solve sparse SPD system via SimplicialLDLT
+    Eigen::SimplicialLDLT&lt;Eigen::SparseMatrix&lt;double&gt;&gt; solver;
+    solver.compute(Hlm);
+    if (solver.info() != Eigen::Success) {
+      std::cerr &lt;&lt; "Decomposition failed at iter " &lt;&lt; it &lt;&lt; "\n";
+      break;
+    }
+
+    Eigen::VectorXd dx = solver.solve(-g);
+    if (solver.info() != Eigen::Success) {
+      std::cerr &lt;&lt; "Solve failed at iter " &lt;&lt; it &lt;&lt; "\n";
+      break;
+    }
+
+    Eigen::VectorXd x_new = x + dx;
+    // wrap angles
+    for (int k = 0; k &lt; N; ++k) {
+      x_new(3*k+2) = wrap_angle(x_new(3*k+2));
+    }
+
+    // new cost
+    Eigen::SparseMatrix&lt;double&gt; H2;
+    Eigen::VectorXd g2(3*N);
+    double cost_new = 0.0;
+    build_normal_equations(x_new, N, edges, H2, g2, cost_new, 0, anchor_Omega, anchor_pose);
+
+    if (cost_new &lt; cost) {
+      x = x_new;
+      lam = std::max(lam / 5.0, 1e-12);
+    } else {
+      lam = std::min(lam * 10.0, 1e12);
+    }
+
+    double step_norm = dx.norm();
+    std::cout &lt;&lt; "iter=" &lt;&lt; it
+              &lt;&lt; " cost=" &lt;&lt; cost
+              &lt;&lt; " cost_new=" &lt;&lt; cost_new
+              &lt;&lt; " lam=" &lt;&lt; lam
+              &lt;&lt; " ||dx||=" &lt;&lt; step_norm
+              &lt;&lt; "\n";
+
+    if (step_norm &lt; tol) {
+      std::cout &lt;&lt; "Converged: step norm below tolerance.\n";
+      break;
+    }
+  }
+
+  return x;
+}
+
+int main() {
+  int N = 80;
+  auto x_gt = generate_ground_truth(N, 1.0, 0.03);
+
+  std::vector&lt;EdgeSE2&gt; edges;
+  Eigen::VectorXd x0;
+  x0.resize(3*N);
+
+  build_synthetic_graph(x_gt, edges, x0, 20, 0.25, 8.0, 3);
+
+  std::cout &lt;&lt; "Graph: N=" &lt;&lt; N &lt;&lt; " edges=" &lt;&lt; edges.size()
+            &lt;&lt; " (odom=" &lt;&lt; (N-1) &lt;&lt; ", loops=" &lt;&lt; (edges.size() - (N-1)) &lt;&lt; ")\n";
+
+  std::cout &lt;&lt; "Initial RMSE (translation): " &lt;&lt; traj_rmse_translation(x0, x_gt) &lt;&lt; "\n";
+
+  Eigen::VectorXd x_opt = levenberg_marquardt(x0, N, edges, 30, 1e-3, 1e-6);
+
+  std::cout &lt;&lt; "Final RMSE (translation): " &lt;&lt; traj_rmse_translation(x_opt, x_gt) &lt;&lt; "\n";
+  return 0;
+}
+      </code></pre>
+
+      <h3><strong>Chapter12_Lesson5.java</strong></h3>
+      <pre><code class="language-java">
+// Chapter12_Lesson5.java
+// Lab: Build and Optimize a 2D Pose Graph (SE(2)) using Gauss-Newton / LM
+//
+// Dependencies: EJML (Efficient Java Matrix Library)
+//
+// Maven (example):
+//   &lt;dependency&gt;
+//     &lt;groupId&gt;org.ejml&lt;/groupId&gt;
+//     &lt;artifactId&gt;ejml-simple&lt;/artifactId&gt;
+//     &lt;version&gt;0.43&lt;/version&gt;
+//   &lt;/dependency&gt;
+//
+// Run:
+//   javac -cp .:ejml-simple-0.43.jar Chapter12_Lesson5.java
+//   java  -cp .:ejml-simple-0.43.jar Chapter12_Lesson5
+//
+// This program generates a synthetic trajectory, adds noisy odometry + loop constraints,
+// anchors node 0, and optimizes using LM. For clarity and portability, we assemble dense
+// normal equations (OK for N~80). For large graphs use sparse libraries.
+
+import java.util.*;
+import java.util.stream.Collectors;
+import org.ejml.simple.SimpleMatrix;
+
+public class Chapter12_Lesson5 {
+
+    static class EdgeSE2 {
+        int i, j;
+        double[] z;     // (dx, dy, dtheta)
+        double[][] Omega; // 3x3 information
+        boolean isLoop;
+
+        EdgeSE2(int i, int j, double[] z, double[][] Omega, boolean isLoop) {
+            this.i = i; this.j = j; this.z = z; this.Omega = Omega; this.isLoop = isLoop;
+        }
+    }
+
+    static double wrapAngle(double a) {
+        double twoPi = 2.0*Math.PI;
+        a = (a + Math.PI) % twoPi;
+        if (a &lt; 0) a += twoPi;
+        a -= Math.PI;
+        if (a &lt;= -Math.PI) a += twoPi;
+        return a;
+    }
+
+    static double[][] R(double theta) {
+        double c = Math.cos(theta), s = Math.sin(theta);
+        return new double[][]{
+                {c, -s},
+                {s,  c}
+        };
+    }
+
+    static double[] matVec2(double[][] M, double[] v) {
+        return new double[] {
+                M[0][0]*v[0] + M[0][1]*v[1],
+                M[1][0]*v[0] + M[1][1]*v[1]
+        };
+    }
+
+    static double[] se2Compose(double[] x1, double[] x2) {
+        double[] t1 = new double[]{x1[0], x1[1]};
+        double th1 = x1[2];
+        double[] t2 = new double[]{x2[0], x2[1]};
+        double th2 = x2[2];
+
+        double[][] R1 = R(th1);
+        double[] Rt2 = matVec2(R1, t2);
+        double[] t = new double[]{t1[0] + Rt2[0], t1[1] + Rt2[1]};
+        double th = wrapAngle(th1 + th2);
+        return new double[]{t[0], t[1], th};
+    }
+
+    static double[] se2Inv(double[] x) {
+        double[] t = new double[]{x[0], x[1]};
+        double th = x[2];
+        double[][] Rth = R(th);
+        // transpose
+        double[][] Rt = new double[][]{
+                {Rth[0][0], Rth[1][0]},
+                {Rth[0][1], Rth[1][1]}
+        };
+        double[] tinv = matVec2(Rt, new double[]{-t[0], -t[1]});
+        return new double[]{tinv[0], tinv[1], wrapAngle(-th)};
+    }
+
+    static double[] se2Between(double[] xi, double[] xj) {
+        return se2Compose(se2Inv(xi), xj);
+    }
+
+    static class ResJac {
+        double[] e;       // 3
+        double[][] A;     // 3x3
+        double[][] B;     // 3x3
+        ResJac(double[] e, double[][] A, double[][] B) {
+            this.e = e; this.A = A; this.B = B;
+        }
+    }
+
+    static ResJac residualAndJacobian(double[] xi, double[] xj, double[] z) {
+        double[] ti = new double[]{xi[0], xi[1]};
+        double thi = xi[2];
+        double[] tj = new double[]{xj[0], xj[1]};
+        double thj = xj[2];
+
+        double[][] Ri = R(thi);
+        double[][] RiT = new double[][]{
+                {Ri[0][0], Ri[1][0]},
+                {Ri[0][1], Ri[1][1]}
+        };
+
+        double[] d = new double[]{tj[0]-ti[0], tj[1]-ti[1]};
+        double[] et = matVec2(RiT, d);
+        et[0] -= z[0];
+        et[1] -= z[1];
+        double er = wrapAngle(thj - thi - z[2]);
+
+        double[] e = new double[]{et[0], et[1], er};
+
+        // S = [[0,-1],[1,0]]
+        double[][] S = new double[][]{
+                {0.0, -1.0},
+                {1.0,  0.0}
+        };
+
+        // A and B
+        double[][] A = new double[3][3];
+        double[][] B = new double[3][3];
+
+        // d(et)/d(ti) = -Ri^T
+        A[0][0] = -RiT[0][0]; A[0][1] = -RiT[0][1];
+        A[1][0] = -RiT[1][0]; A[1][1] = -RiT[1][1];
+
+        // d(et)/d(tj) = Ri^T
+        B[0][0] = RiT[0][0]; B[0][1] = RiT[0][1];
+        B[1][0] = RiT[1][0]; B[1][1] = RiT[1][1];
+
+        // d(et)/d(theta_i) = -Ri^T S d
+        double[] Sd = matVec2(S, d);
+        double[] RiTSd = matVec2(RiT, Sd);
+        A[0][2] = -RiTSd[0];
+        A[1][2] = -RiTSd[1];
+
+        // angle part
+        A[2][2] = -1.0;
+        B[2][2] =  1.0;
+
+        return new ResJac(e, A, B);
+    }
+
+    static double[][] infoFromSigmas(double sigT, double sigTh) {
+        double[][] Omega = new double[3][3];
+        Omega[0][0] = 1.0/(sigT*sigT);
+        Omega[1][1] = 1.0/(sigT*sigT);
+        Omega[2][2] = 1.0/(sigTh*sigTh);
+        return Omega;
+    }
+
+    static class NormalEq {
+        SimpleMatrix H;
+        SimpleMatrix g;
+        double cost;
+        NormalEq(SimpleMatrix H, SimpleMatrix g, double cost) {
+            this.H = H; this.g = g; this.cost = cost;
+        }
+    }
+
+    static NormalEq buildNormalEquations(double[] x, int N, List&lt;EdgeSE2&gt; edges) {
+        int dim = 3*N;
+        SimpleMatrix H = new SimpleMatrix(dim, dim);
+        SimpleMatrix g = new SimpleMatrix(dim, 1);
+        double cost = 0.0;
+
+        for (EdgeSE2 ed : edges) {
+            int i = ed.i, j = ed.j;
+            double[] xi = new double[]{x[3*i], x[3*i+1], x[3*i+2]};
+            double[] xj = new double[]{x[3*j], x[3*j+1], x[3*j+2]};
+
+            ResJac rj = residualAndJacobian(xi, xj, ed.z);
+            double[] e = rj.e;
+            double[][] A = rj.A;
+            double[][] B = rj.B;
+            double[][] Omega = ed.Omega;
+
+            // cost += e^T Omega e
+            double s = 0.0;
+            for(int r=0;r&lt;3;r++){
+                for(int c=0;c&lt;3;c++){
+                    s += e[r] * Omega[r][c] * e[c];
+                }
+            }
+            cost += s;
+
+            // Compute AtO = A^T Omega, BtO = B^T Omega
+            double[][] AtO = new double[3][3];
+            double[][] BtO = new double[3][3];
+
+            for(int r=0;r&lt;3;r++){
+                for(int c=0;c&lt;3;c++){
+                    double sumA = 0.0;
+                    double sumB = 0.0;
+                    for(int k=0;k&lt;3;k++){
+                        sumA += A[k][r] * Omega[k][c];
+                        sumB += B[k][r] * Omega[k][c];
+                    }
+                    AtO[r][c] = sumA;
+                    BtO[r][c] = sumB;
+                }
+            }
+
+            // Blocks Hii = AtO*A, Hij=AtO*B, Hji=BtO*A, Hjj=BtO*B
+            double[][] Hii = new double[3][3];
+            double[][] Hij = new double[3][3];
+            double[][] Hji = new double[3][3];
+            double[][] Hjj = new double[3][3];
+
+            for(int r=0;r&lt;3;r++){
+                for(int c=0;c&lt;3;c++){
+                    double sHii=0, sHij=0, sHji=0, sHjj=0;
+                    for(int k=0;k&lt;3;k++){
+                        sHii += AtO[r][k]*A[k][c];
+                        sHij += AtO[r][k]*B[k][c];
+                        sHji += BtO[r][k]*A[k][c];
+                        sHjj += BtO[r][k]*B[k][c];
+                    }
+                    Hii[r][c]=sHii; Hij[r][c]=sHij; Hji[r][c]=sHji; Hjj[r][c]=sHjj;
+                }
+            }
+
+            // gi = AtO*e, gj = BtO*e
+            double[] gi = new double[3];
+            double[] gj = new double[3];
+            for(int r=0;r&lt;3;r++){
+                double sgi=0, sgj=0;
+                for(int k=0;k&lt;3;k++){
+                    sgi += AtO[r][k]*e[k];
+                    sgj += BtO[r][k]*e[k];
+                }
+                gi[r]=sgi; gj[r]=sgj;
+            }
+
+            int si = 3*i;
+            int sj = 3*j;
+
+            // Add blocks into H
+            for(int r=0;r&lt;3;r++){
+                for(int c=0;c&lt;3;c++){
+                    H.set(si+r, si+c, H.get(si+r, si+c) + Hii[r][c]);
+                    H.set(si+r, sj+c, H.get(si+r, sj+c) + Hij[r][c]);
+                    H.set(sj+r, si+c, H.get(sj+r, si+c) + Hji[r][c]);
+                    H.set(sj+r, sj+c, H.get(sj+r, sj+c) + Hjj[r][c]);
+                }
+            }
+
+            // Add g
+            for(int r=0;r&lt;3;r++){
+                g.set(si+r, 0, g.get(si+r, 0) + gi[r]);
+                g.set(sj+r, 0, g.get(sj+r, 0) + gj[r]);
+            }
+        }
+
+        // Anchor prior on node 0 at (0,0,0)
+        double[][] Omega0 = new double[][]{
+                {1e6,0,0},
+                {0,1e6,0},
+                {0,0,1e6}
+        };
+        double[] e0 = new double[]{x[0]-0.0, x[1]-0.0, wrapAngle(x[2]-0.0)};
+        double s0 = 0.0;
+        for(int r=0;r&lt;3;r++){
+            for(int c=0;c&lt;3;c++){
+                s0 += e0[r]*Omega0[r][c]*e0[c];
+            }
+        }
+        cost += s0;
+
+        for(int r=0;r&lt;3;r++){
+            for(int c=0;c&lt;3;c++){
+                H.set(r, c, H.get(r,c) + Omega0[r][c]);
+            }
+        }
+        for(int r=0;r&lt;3;r++){
+            double gr=0.0;
+            for(int k=0;k&lt;3;k++) gr += Omega0[r][k]*e0[k];
+            g.set(r,0, g.get(r,0) + gr);
+        }
+
+        return new NormalEq(H, g, cost);
+    }
+
+    static double rmseTranslation(double[] xEst, double[][] xGt) {
+        int N = xGt.length;
+        double s = 0.0;
+        for (int k = 0; k &lt; N; k++) {
+            double dx = xEst[3*k]   - xGt[k][0];
+            double dy = xEst[3*k+1] - xGt[k][1];
+            s += dx*dx + dy*dy;
+        }
+        return Math.sqrt(s / N);
+    }
+
+    static double[][] generateGroundTruth(int N, double step, double turnRate) {
+        double[][] x = new double[N][3];
+        for(int k=1;k&lt;N;k++){
+            double[] u = new double[]{step, 0.0, turnRate};
+            x[k] = se2Compose(x[k-1], u);
+        }
+        return x;
+    }
+
+    static double[] addNoise(double[] z, double sigT, double sigTh, Random rng) {
+        double[] zn = z.clone();
+        zn[0] += rng.nextGaussian()*sigT;
+        zn[1] += rng.nextGaussian()*sigT;
+        zn[2] = wrapAngle(zn[2] + rng.nextGaussian()*sigTh);
+        return zn;
+    }
+
+    static class GraphInit {
+        List&lt;EdgeSE2&gt; edges;
+        double[] x0;
+        GraphInit(List&lt;EdgeSE2&gt; edges, double[] x0) { this.edges=edges; this.x0=x0; }
+    }
+
+    static GraphInit buildSyntheticGraph(double[][] xGt, int numLoops, double outlierFrac, double outlierScale, long seed) {
+        Random rng = new Random(seed);
+        int N = xGt.length;
+
+        double sigOdomT = 0.05, sigOdomTh = 0.02;
+        double sigLoopT = 0.10, sigLoopTh = 0.05;
+
+        double[][] OmegaOdom = infoFromSigmas(sigOdomT, sigOdomTh);
+        double[][] OmegaLoop = infoFromSigmas(sigLoopT, sigLoopTh);
+
+        List&lt;EdgeSE2&gt; edges = new ArrayList&lt;&gt;();
+
+        // Odometry
+        for(int i=0;i&lt;N-1;i++){
+            double[] xi = xGt[i];
+            double[] xj = xGt[i+1];
+            double[] z = se2Between(xi, xj);
+            double[] zn = addNoise(z, sigOdomT, sigOdomTh, rng);
+            edges.add(new EdgeSE2(i, i+1, zn, OmegaOdom, false));
+        }
+
+        // init by dead reckoning
+        double[] x0 = new double[3*N];
+        for(int i=0;i&lt;N-1;i++){
+            double[] xi = new double[]{x0[3*i], x0[3*i+1], x0[3*i+2]};
+            double[] xip1 = se2Compose(xi, edges.get(i).z);
+            x0[3*(i+1)]   = xip1[0];
+            x0[3*(i+1)+1] = xip1[1];
+            x0[3*(i+1)+2] = xip1[2];
+        }
+
+        // Loop candidates (i, j) with j &gt; i+5
+        List&lt;int[]&gt; cand = new ArrayList&lt;&gt;();
+        for(int i=0;i&lt;N;i++){
+            for(int j=i+6;j&lt;N;j++){
+                cand.add(new int[]{i,j});
+            }
+        }
+        Collections.shuffle(cand, rng);
+        int K = Math.min(numLoops, cand.size());
+
+        for(int k=0;k&lt;K;k++){
+            int i = cand.get(k)[0];
+            int j = cand.get(k)[1];
+            double[] z = se2Between(xGt[i], xGt[j]);
+            double[] zn = addNoise(z, sigLoopT, sigLoopTh, rng);
+
+            if (rng.nextDouble() &lt; outlierFrac) {
+                zn[0] += rng.nextGaussian() * outlierScale * sigLoopT;
+                zn[1] += rng.nextGaussian() * outlierScale * sigLoopT;
+                zn[2] = wrapAngle(zn[2] + rng.nextGaussian() * outlierScale * sigLoopTh);
+            }
+
+            edges.add(new EdgeSE2(i, j, zn, OmegaLoop, true));
+        }
+
+        return new GraphInit(edges, x0);
+    }
+
+    static double[] levenbergMarquardt(double[] xInit, int N, List&lt;EdgeSE2&gt; edges, int maxIters, double lambda0, double tol) {
+        double[] x = xInit.clone();
+        double lam = lambda0;
+
+        for(int it=1; it&lt;=maxIters; it++){
+            NormalEq ne = buildNormalEquations(x, N, edges);
+            SimpleMatrix H = ne.H;
+            SimpleMatrix g = ne.g;
+            double cost = ne.cost;
+
+            // D = diag(H)
+            SimpleMatrix D = new SimpleMatrix(3*N, 3*N);
+            for(int k=0;k&lt;3*N;k++){
+                D.set(k,k, H.get(k,k));
+            }
+
+            SimpleMatrix Hlm = H.plus(D.scale(lam));
+
+            // Solve Hlm dx = -g
+            SimpleMatrix dx = Hlm.solve(g.negative());
+
+            double[] xNew = x.clone();
+            for(int k=0;k&lt;3*N;k++){
+                xNew[k] += dx.get(k,0);
+            }
+            for(int k=0;k&lt;N;k++){
+                xNew[3*k+2] = wrapAngle(xNew[3*k+2]);
+            }
+
+            double costNew = buildNormalEquations(xNew, N, edges).cost;
+
+            if (costNew &lt; cost) {
+                x = xNew;
+                lam = Math.max(lam/5.0, 1e-12);
+            } else {
+                lam = Math.min(lam*10.0, 1e12);
+            }
+
+            double stepNorm = dx.normF();
+            System.out.printf("iter=%02d cost=%.6e costNew=%.6e lam=%.2e ||dx||=%.3e%n", it, cost, costNew, lam, stepNorm);
+
+            if (stepNorm &lt; tol) {
+                System.out.println("Converged: step norm below tolerance.");
+                break;
+            }
+        }
+
+        return x;
+    }
+
+    public static void main(String[] args) {
+        int N = 80;
+        double[][] xGt = generateGroundTruth(N, 1.0, 0.03);
+
+        GraphInit gi = buildSyntheticGraph(xGt, 20, 0.25, 8.0, 3L);
+        List&lt;EdgeSE2&gt; edges = gi.edges;
+        double[] x0 = gi.x0;
+
+        long loops = edges.stream().filter(e -&gt; e.isLoop).count();
+        System.out.println("Graph: N=" + N + " edges=" + edges.size() + " (odom=" + (N-1) + ", loops=" + loops + ")");
+        System.out.println("Initial RMSE (translation): " + rmseTranslation(x0, xGt));
+
+        double[] xOpt = levenbergMarquardt(x0, N, edges, 30, 1e-3, 1e-6);
+
+        System.out.println("Final RMSE (translation): " + rmseTranslation(xOpt, xGt));
+    }
+}
+      </code></pre>
+
+      <h3><strong>Chapter12_Lesson5.m</strong></h3>
+      <pre><code class="language-matlab">
+% Chapter12_Lesson5.m
+% Lab: Build and Optimize a 2D Pose Graph (SE(2)) using Gauss-Newton / LM
+%
+% Requirements:
+%   - MATLAB base (sparse matrices)
+%
+% Run:
+%   Chapter12_Lesson5
+%
+% This script generates a synthetic trajectory, adds noisy odometry and loop closures (with outliers),
+% anchors node 0, and optimizes using LM with sparse normal equations.
+
+function Chapter12_Lesson5()
+
+  N = 80;
+  x_gt = generate_ground_truth(N, 1.0, 0.03);
+
+  params.sig_odom_t = 0.05;
+  params.sig_odom_th = 0.02;
+  params.sig_loop_t = 0.10;
+  params.sig_loop_th = 0.05;
+  params.num_loops = 20;
+  params.outlier_frac = 0.25;
+  params.outlier_scale = 8.0;
+  params.seed = 3;
+
+  [edges, x0] = build_synthetic_graph(x_gt, params);
+
+  fprintf('Graph: N=%d edges=%d (odom=%d, loops=%d)\\n', N, numel(edges), N-1, numel(edges)-(N-1));
+  fprintf('Initial RMSE (translation): %.6f\\n', rmse_translation(x0, x_gt));
+
+  [x_opt, costs] = levenberg_marquardt(x0, edges, N, 30, 1e-3, 1e-6);
+
+  fprintf('Final RMSE (translation): %.6f\\n', rmse_translation(x_opt, x_gt));
+  fprintf('First 10 costs: ');
+  fprintf('%.3e ', costs(1:min(10,end)));
+  fprintf('\\n');
+end
+
+% ----------------------------
+% SE(2) utilities
+% ----------------------------
+function a = wrap_angle(a)
+  a = mod(a + pi, 2*pi) - pi;
+  if a &lt;= -pi
+    a = a + 2*pi;
+  end
+end
+
+function M = R(theta)
+  c = cos(theta); s = sin(theta);
+  M = [c -s; s c];
+end
+
+function x = se2_compose(x1, x2)
+  t1 = x1(1:2); th1 = x1(3);
+  t2 = x2(1:2); th2 = x2(3);
+  t = t1 + R(th1) * t2;
+  th = wrap_angle(th1 + th2);
+  x = [t; th];
+end
+
+function xinv = se2_inv(x)
+  t = x(1:2); th = x(3);
+  Rt = R(th)';
+  tinv = -Rt * t;
+  xinv = [tinv; wrap_angle(-th)];
+end
+
+function z = se2_between(xi, xj)
+  z = se2_compose(se2_inv(xi), xj);
+end
+
+% ----------------------------
+% Edge struct
+% ----------------------------
+function ed = make_edge(i, j, z, Omega, is_loop)
+  ed.i = i;
+  ed.j = j;
+  ed.z = z;
+  ed.Omega = Omega;
+  ed.is_loop = is_loop;
+end
+
+function Omega = info_from_sigmas(sig_t, sig_th)
+  Sigma = diag([sig_t^2, sig_t^2, sig_th^2]);
+  Omega = inv(Sigma);
+end
+
+% ----------------------------
+% Residual and Jacobians
+% ----------------------------
+function [e, A, B] = residual_and_jacobian(xi, xj, z_ij)
+  ti = xi(1:2); thi = xi(3);
+  tj = xj(1:2); thj = xj(3);
+
+  RiT = R(thi)';
+  d = tj - ti;
+
+  et = RiT * d - z_ij(1:2);
+  er = wrap_angle(thj - thi - z_ij(3));
+  e = [et; er];
+
+  S = [0 -1; 1 0];
+
+  A = zeros(3,3);
+  B = zeros(3,3);
+
+  A(1:2,1:2) = -RiT;
+  B(1:2,1:2) =  RiT;
+
+  A_t_th = -(RiT * (S * d));
+  A(1:2,3) = A_t_th;
+
+  A(3,3) = -1;
+  B(3,3) =  1;
+end
+
+% ----------------------------
+% Normal equations
+% ----------------------------
+function [H, g, cost] = build_normal_equations(x, edges, N)
+  dim = 3*N;
+  H = spalloc(dim, dim, 36*numel(edges) + 9);
+  g = zeros(dim, 1);
+  cost = 0.0;
+
+  for idx = 1:numel(edges)
+    ed = edges(idx);
+    i = ed.i; j = ed.j;
+
+    xi = x(3*i+1:3*i+3);
+    xj = x(3*j+1:3*j+3);
+
+    [e, A, B] = residual_and_jacobian(xi, xj, ed.z);
+    Omega = ed.Omega;
+
+    cost = cost + e' * Omega * e;
+
+    AtO = A' * Omega;
+    BtO = B' * Omega;
+
+    Hii = AtO * A;
+    Hij = AtO * B;
+    Hji = BtO * A;
+    Hjj = BtO * B;
+
+    gi = AtO * e;
+    gj = BtO * e;
+
+    si = 3*i+1;
+    sj = 3*j+1;
+
+    H(si:si+2, si:si+2) = H(si:si+2, si:si+2) + Hii;
+    H(si:si+2, sj:sj+2) = H(si:si+2, sj:sj+2) + Hij;
+    H(sj:sj+2, si:si+2) = H(sj:sj+2, si:si+2) + Hji;
+    H(sj:sj+2, sj:sj+2) = H(sj:sj+2, sj:sj+2) + Hjj;
+
+    g(si:si+2) = g(si:si+2) + gi;
+    g(sj:sj+2) = g(sj:sj+2) + gj;
+  end
+
+  % Anchor prior on node 0 to remove gauge
+  Omega0 = diag([1e6, 1e6, 1e6]);
+  e0 = x(1:3) - [0;0;0];
+  e0(3) = wrap_angle(e0(3));
+  cost = cost + e0' * Omega0 * e0;
+
+  H(1:3, 1:3) = H(1:3, 1:3) + Omega0;
+  g(1:3) = g(1:3) + Omega0 * e0;
+end
+
+% ----------------------------
+% LM
+% ----------------------------
+function [x, costs] = levenberg_marquardt(x0, edges, N, max_iters, lambda0, tol)
+  x = x0;
+  lam = lambda0;
+  costs = zeros(max_iters,1);
+
+  for it = 1:max_iters
+    [H, g, cost] = build_normal_equations(x, edges, N);
+    costs(it) = cost;
+
+    D = spdiags(diag(H), 0, 3*N, 3*N);
+    Hlm = H + lam * D;
+
+    dx = - (Hlm \ g);
+
+    x_new = x + dx;
+    for k = 0:N-1
+      x_new(3*k+3) = wrap_angle(x_new(3*k+3));
+    end
+
+    [~, ~, cost_new] = build_normal_equations(x_new, edges, N);
+
+    if cost_new &lt; cost
+      x = x_new;
+      lam = max(lam / 5.0, 1e-12);
+    else
+      lam = min(lam * 10.0, 1e12);
+    end
+
+    step_norm = norm(dx);
+    fprintf('iter=%02d cost=%.6e cost_new=%.6e lam=%.2e ||dx||=%.3e\\n', it, cost, cost_new, lam, step_norm);
+
+    if step_norm &lt; tol
+      fprintf('Converged: step norm below tolerance.\\n');
+      costs = costs(1:it);
+      return;
+    end
+  end
+end
+
+% ----------------------------
+% Synthetic graph
+% ----------------------------
+function x_gt = generate_ground_truth(N, step, turn_rate)
+  x_gt = zeros(N, 3);
+  for k = 2:N
+    u = [step; 0; turn_rate];
+    x_gt(k,:) = se2_compose(x_gt(k-1,:)', u)';
+  end
+end
+
+function zn = add_noise(z, sig_t, sig_th, rng)
+  zn = z;
+  zn(1) = zn(1) + randn(rng)*sig_t;
+  zn(2) = zn(2) + randn(rng)*sig_t;
+  zn(3) = wrap_angle(zn(3) + randn(rng)*sig_th);
+end
+
+function [edges, x0] = build_synthetic_graph(x_gt, params)
+  rng = RandStream('mt19937ar','Seed', params.seed);
+  N = size(x_gt,1);
+
+  Omega_odom = info_from_sigmas(params.sig_odom_t, params.sig_odom_th);
+  Omega_loop = info_from_sigmas(params.sig_loop_t, params.sig_loop_th);
+
+  edges = repmat(make_edge(0,0,zeros(3,1), eye(3), false), 0, 1);
+
+  % Odometry edges
+  for i = 0:N-2
+    z = se2_between(x_gt(i+1,:)', x_gt(i+2,:)');
+    zn = add_noise(z, params.sig_odom_t, params.sig_odom_th, rng);
+    edges(end+1) = make_edge(i, i+1, zn, Omega_odom, false);
+  end
+
+  % Dead reckoning init
+  x0 = zeros(3*N, 1);
+  for i = 0:N-2
+    xi = x0(3*i+1:3*i+3);
+    xip1 = se2_compose(xi, edges(i+1).z);
+    x0(3*(i+1)+1:3*(i+1)+3) = xip1;
+  end
+
+  % Loop candidates
+  cand = [];
+  for i = 0:N-1
+    for j = i+6:N-1
+      cand = [cand; i j]; %#ok&lt;AGROW&gt;
+    end
+  end
+
+  cand = cand(randperm(rng, size(cand,1)), :);
+  K = min(params.num_loops, size(cand,1));
+
+  for k = 1:K
+    i = cand(k,1);
+    j = cand(k,2);
+    z = se2_between(x_gt(i+1,:)', x_gt(j+1,:)');
+    zn = add_noise(z, params.sig_loop_t, params.sig_loop_th, rng);
+
+    if rand(rng) &lt; params.outlier_frac
+      zn(1:2) = zn(1:2) + randn(rng,2,1) * (params.outlier_scale * params.sig_loop_t);
+      zn(3) = wrap_angle(zn(3) + randn(rng) * (params.outlier_scale * params.sig_loop_th));
+    end
+
+    edges(end+1) = make_edge(i, j, zn, Omega_loop, true);
+  end
+end
+
+function r = rmse_translation(x_est, x_gt)
+  N = size(x_gt,1);
+  xe = reshape(x_est, 3, N)';
+  d = xe(:,1:2) - x_gt(:,1:2);
+  r = sqrt(mean(sum(d.^2,2)));
+end
+      </code></pre>
+
+      <h3><strong>Chapter12_Lesson5.nb</strong></h3>
+      <pre><code class="language-mathematica">
+(* Chapter12_Lesson5.nb *)
+(* Lab: Build and Optimize a 2D Pose Graph (SE(2)) in Wolfram Language.
+   This is a plain-text Notebook expression. Open in Mathematica, then evaluate cells. *)
+
+Notebook[{
+ Cell[BoxData[
+  RowBox[{"(*", " ", 
+   RowBox[{"Chapter12_Lesson5", ".", "nb"}], " ", "*)"}]], "Input"],
+ Cell[BoxData[
+  RowBox[{"ClearAll", "[", "\"Global`*\"", "]"}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"wrapAngle", "[", "a_", "]"}], ":=", 
+   RowBox[{"Module", "[", 
+    RowBox[{
+     RowBox[{"{", "x", "}"}], ",", 
+     RowBox[{
+      RowBox[{"x", "=", 
+       RowBox[{"Mod", "[", 
+        RowBox[{
+         RowBox[{"a", "+", "Pi"}], ",", 
+         RowBox[{"2", "Pi"}]}], "]"}]}], ";", 
+      RowBox[{"x", "=", 
+       RowBox[{"x", "-", "Pi"}]}], ";", 
+      RowBox[{"If", "[", 
+       RowBox[{
+        RowBox[{"x", "\[LessEqual]", 
+         RowBox[{"-", "Pi"}]}], ",", 
+        RowBox[{"x", "=", 
+         RowBox[{"x", "+", 
+          RowBox[{"2", "Pi"}]}]}]}], "]"}], ";", "x"}]}], "]"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"R2", "[", "\[Theta]_", "]"}], ":=", 
+   RowBox[{"{", 
+    RowBox[{
+     RowBox[{"{", 
+      RowBox[{
+       RowBox[{"Cos", "[", "\[Theta]", "]"}], ",", 
+       RowBox[{"-", 
+        RowBox[{"Sin", "[", "\[Theta]", "]"}]}]}], "}"}], ",", 
+     RowBox[{"{", 
+      RowBox[{
+       RowBox[{"Sin", "[", "\[Theta]", "]"}], ",", 
+       RowBox[{"Cos", "[", "\[Theta]", "]"}]}], "}"}]}], "}"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"se2Compose", "[", 
+    RowBox[{"x1_", ",", "x2_"}], "]"}], ":=", 
+   RowBox[{"Module", "[", 
+    RowBox[{
+     RowBox[{"{", 
+      RowBox[{"t1", ",", "th1", ",", "t2", ",", "th2", ",", "t", ",", "th"}], 
+      "}"}], ",", 
+     RowBox[{
+      RowBox[{"t1", "=", 
+       RowBox[{"x1", "[", 
+        RowBox[{"[", 
+         RowBox[{"1", ";;", "2"}], "]"}], "]"}]}], ";", 
+      RowBox[{"th1", "=", 
+       RowBox[{"x1", "[", 
+        RowBox[{"[", "3", "]"}], "]"}]}], ";", 
+      RowBox[{"t2", "=", 
+       RowBox[{"x2", "[", 
+        RowBox[{"[", 
+         RowBox[{"1", ";;", "2"}], "]"}], "]"}]}], ";", 
+      RowBox[{"th2", "=", 
+       RowBox[{"x2", "[", 
+        RowBox[{"[", "3", "]"}], "]"}]}], ";", 
+      RowBox[{"t", "=", 
+       RowBox[{"t1", "+", 
+        RowBox[{
+         RowBox[{"R2", "[", "th1", "]"}], ".", "t2"}]}]}], ";", 
+      RowBox[{"th", "=", 
+       RowBox[{"wrapAngle", "[", 
+        RowBox[{"th1", "+", "th2"}], "]"}]}], ";", 
+      RowBox[{"{", 
+       RowBox[{
+        RowBox[{"t", "[", 
+         RowBox[{"[", "1", "]"}], "]"}], ",", 
+        RowBox[{"t", "[", 
+         RowBox[{"[", "2", "]"}], "]"}], ",", "th"}], "}"}]}]}], "]"}]}]], 
+  "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"se2Inv", "[", "x_", "]"}], ":=", 
+   RowBox[{"Module", "[", 
+    RowBox[{
+     RowBox[{"{", 
+      RowBox[{"t", ",", "th", ",", "Rt", ",", "tinv"}], "}"}], ",", 
+     RowBox[{
+      RowBox[{"t", "=", 
+       RowBox[{"x", "[", 
+        RowBox[{"[", 
+         RowBox[{"1", ";;", "2"}], "]"}], "]"}]}], ";", 
+      RowBox[{"th", "=", 
+       RowBox[{"x", "[", 
+        RowBox[{"[", "3", "]"}], "]"}]}], ";", 
+      RowBox[{"Rt", "=", 
+       RowBox[{"Transpose", "[", 
+        RowBox[{"R2", "[", "th", "]"}], "]"}]}], ";", 
+      RowBox[{"tinv", "=", 
+       RowBox[{"-", 
+        RowBox[{"Rt", ".", "t"}]}]}], ";", 
+      RowBox[{"{", 
+       RowBox[{
+        RowBox[{"tinv", "[", 
+         RowBox[{"[", "1", "]"}], "]"}], ",", 
+        RowBox[{"tinv", "[", 
+         RowBox[{"[", "2", "]"}], "]"}], ",", 
+        RowBox[{"wrapAngle", "[", 
+         RowBox[{"-", "th"}], "]"}]}], "}"}]}]}], "]"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"se2Between", "[", 
+    RowBox[{"xi_", ",", "xj_"}], "]"}], ":=", 
+   RowBox[{"se2Compose", "[", 
+    RowBox[{
+     RowBox[{"se2Inv", "[", "xi", "]"}], ",", "xj"}], "]"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"infoFromSigmas", "[", 
+    RowBox[{"sigT_", ",", "sigTh_"}], "]"}], ":=", 
+   RowBox[{"Inverse", "[", 
+    RowBox[{"DiagonalMatrix", "[", 
+     RowBox[{"{", 
+      RowBox[{
+       RowBox[{"sigT", "^", "2"}], ",", 
+       RowBox[{"sigT", "^", "2"}], ",", 
+       RowBox[{"sigTh", "^", "2"}]}], "}"}], "]"}], "]"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"resJac", "[", 
+    RowBox[{"xi_", ",", "xj_", ",", "zij_"}], "]"}], ":=", 
+   RowBox[{"Module", "[", 
+    RowBox[{
+     RowBox[{"{", 
+      RowBox[{
+      "ti", ",", "thi", ",", "tj", ",", "thj", ",", "RiT", ",", "d", ",", 
+       "et", ",", "er", ",", "e", ",", "S", ",", "A", ",", "B"}], "}"}], ",", 
+     RowBox[{
+      RowBox[{"ti", "=", 
+       RowBox[{"xi", "[", 
+        RowBox[{"[", 
+         RowBox[{"1", ";;", "2"}], "]"}], "]"}]}], ";", 
+      RowBox[{"thi", "=", 
+       RowBox[{"xi", "[", 
+        RowBox[{"[", "3", "]"}], "]"}]}], ";", 
+      RowBox[{"tj", "=", 
+       RowBox[{"xj", "[", 
+        RowBox[{"[", 
+         RowBox[{"1", ";;", "2"}], "]"}], "]"}]}], ";", 
+      RowBox[{"thj", "=", 
+       RowBox[{"xj", "[", 
+        RowBox[{"[", "3", "]"}], "]"}]}], ";", 
+      RowBox[{"RiT", "=", 
+       RowBox[{"Transpose", "[", 
+        RowBox[{"R2", "[", "thi", "]"}], "]"}]}], ";", 
+      RowBox[{"d", "=", 
+       RowBox[{"tj", "-", "ti"}]}], ";", 
+      RowBox[{"et", "=", 
+       RowBox[{
+        RowBox[{"RiT", ".", "d"}], "-", 
+        RowBox[{"zij", "[", 
+         RowBox[{"[", 
+          RowBox[{"1", ";;", "2"}], "]"}], "]"}]}]}], ";", 
+      RowBox[{"er", "=", 
+       RowBox[{"wrapAngle", "[", 
+        RowBox[{"thj", "-", "thi", "-", 
+         RowBox[{"zij", "[", 
+          RowBox[{"[", "3", "]"}], "]"}]}], "]"}]}], ";", 
+      RowBox[{"e", "=", 
+       RowBox[{"Join", "[", 
+        RowBox[{"et", ",", 
+         RowBox[{"{", "er", "}"}]}], "]"}]}], ";", 
+      RowBox[{"S", "=", 
+       RowBox[{"{", 
+        RowBox[{
+         RowBox[{"{", 
+          RowBox[{"0", ",", 
+           RowBox[{"-", "1"}]}], "}"}], ",", 
+         RowBox[{"{", 
+          RowBox[{"1", ",", "0"}], "}"}]}], "}"}]}], ";", 
+      RowBox[{"A", "=", 
+       RowBox[{"ConstantArray", "[", 
+        RowBox[{"0", ",", 
+         RowBox[{"{", 
+          RowBox[{"3", ",", "3"}], "}"}]}], "]"}]}], ";", 
+      RowBox[{"B", "=", 
+       RowBox[{"ConstantArray", "[", 
+        RowBox[{"0", ",", 
+         RowBox[{"{", 
+          RowBox[{"3", ",", "3"}], "}"}]}], "]"}]}], ";", 
+      RowBox[{"A", "[", 
+       RowBox[{"[", 
+        RowBox[{
+         RowBox[{"1", ";;", "2"}], ",", 
+         RowBox[{"1", ";;", "2"}]}], "]"}], "]"}], "=", 
+      RowBox[{"-", "RiT"}], ";", 
+      RowBox[{"B", "[", 
+       RowBox[{"[", 
+        RowBox[{
+         RowBox[{"1", ";;", "2"}], ",", 
+         RowBox[{"1", ";;", "2"}]}], "]"}], "]"}], "=", "RiT", ";", 
+      RowBox[{"A", "[", 
+       RowBox[{"[", 
+        RowBox[{
+         RowBox[{"1", ";;", "2"}], ",", "3"}], "]"}], "]"}], "=", 
+      RowBox[{"-", 
+       RowBox[{"(", 
+        RowBox[{"RiT", ".", 
+         RowBox[{"S", ".", "d"}]}], ")"}]}], ";", 
+      RowBox[{"A", "[", 
+       RowBox[{"[", 
+        RowBox[{"3", ",", "3"}], "]"}], "]"}], "=", 
+      RowBox[{"-", "1"}], ";", 
+      RowBox[{"B", "[", 
+       RowBox[{"[", 
+        RowBox[{"3", ",", "3"}], "]"}], "]"}], "=", "1", ";", 
+      RowBox[{"{", 
+       RowBox[{"e", ",", "A", ",", "B"}], "}"}]}]}], "]"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"generateGroundTruth", "[", 
+    RowBox[{"N_", ",", "step_", ",", "turnRate_"}], "]"}], ":=", 
+   RowBox[{"Module", "[", 
+    RowBox[{
+     RowBox[{"{", "x", "}"}], ",", 
+     RowBox[{
+      RowBox[{"x", "=", 
+       RowBox[{"ConstantArray", "[", 
+        RowBox[{
+         RowBox[{"{", 
+          RowBox[{"0.", ",", "0.", ",", "0."}], "}"}], ",", "N"}], "]"}]}], 
+      ";", 
+      RowBox[{"Do", "[", 
+       RowBox[{
+        RowBox[{
+         RowBox[{"x", "[", 
+          RowBox[{"[", "k", "]"}], "]"}], "=", 
+         RowBox[{"se2Compose", "[", 
+          RowBox[{
+           RowBox[{"x", "[", 
+            RowBox[{"[", 
+             RowBox[{"k", "-", "1"}], "]"}], "]"}], ",", 
+           RowBox[{"{", 
+            RowBox[{"step", ",", "0.", ",", "turnRate"}], "}"}]}], "]"}]}], 
+        ",", 
+        RowBox[{"{", 
+         RowBox[{"k", ",", "2", ",", "N"}], "}"}]}], "]"}], ";", "x"}]}], 
+    "]"}]}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"(*", " ", 
+    RowBox[{
+     RowBox[{"A", " ", "compact", " ", "LM", " ", "loop", " ", "is", " ", 
+      "included", " ", "in", " ", "the", " ", "Python"}], "/", "C", "++", "/", 
+     RowBox[{"MATLAB", " ", "versions"}]}], " ", "*)"}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"N", "=", "80"}], ";", 
+   RowBox[{"xgt", "=", 
+    RowBox[{"generateGroundTruth", "[", 
+     RowBox[{"N", ",", "1.0", ",", "0.03"}], "]"}]}], ";", 
+   RowBox[{"Print", "[", 
+    RowBox[{"\"N=\",", "N"}], "]"}], ";"}]], "Input"]
+},
+WindowSize-&gt;{1200, 800},
+WindowMargins-&gt;{ {Automatic, 0}, {Automatic, 0} },
+FrontEndVersion-&gt;"13.3 for Microsoft Windows (64-bit) (June 3, 2023)",
+StyleDefinitions-&gt;"Default.nb"
+]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Gauge and Singularity):</strong>
+        Consider a pose graph with only relative constraints and no absolute
+        prior. Prove that the Hessian
+        <strong> \( \mathbf{H} \)</strong> is singular (has at least 3 zero
+        modes) in 2D.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        Let a fixed global transform
+        <strong> \( \mathbf{T}_\Delta \in SE(2) \)</strong> act on every pose as
+        <strong> \( \mathbf{T}'_i=\mathbf{T}_\Delta\mathbf{T}_i \)</strong>.
+        Then each predicted relative transform is invariant:
+        <strong>
+          \( (\mathbf{T}'_i)^{-1}\mathbf{T}'_j = \mathbf{T}_i^{-1}\mathbf{T}_j
+          \)</strong
+        >. Hence every residual
+        <strong> \( \mathbf{e}_{ij}(\mathbf{x}) \)</strong> and the total
+        objective <strong> \( F(\mathbf{x}) \)</strong> are unchanged. Therefore
+        the cost has a 3-dimensional flat direction (2 translations + 1
+        rotation). Differentiating at any point along those infinitesimal
+        directions yields
+        <strong> \( \mathbf{H}\mathbf{v}=\mathbf{0} \)</strong> for three
+        independent stacked vectors <strong> \( \mathbf{v} \)</strong>. Thus
+        <strong> \( \mathbf{H} \)</strong> is singular with nullity at least 3.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 2 (Jacobian Blocks):</strong>
+        Derive the Jacobian blocks <strong> \( \mathbf{A}_{ij} \)</strong> and
+        <strong> \( \mathbf{B}_{ij} \)</strong> for the residual used in this
+        lesson.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        Let <strong> \( \mathbf{d}=\mathbf{t}_j-\mathbf{t}_i \)</strong>,
+        <strong> \( \mathbf{R}_i=\mathbf{R}(\theta_i) \)</strong>, and
+        <strong>
+          \( \mathbf{r}_t=\mathbf{R}_i^\top\mathbf{d}-\mathbf{t}_{ij} \)</strong
+        >. Then
+        <strong>
+          \( \partial\mathbf{r}_t/\partial\mathbf{t}_i=-\mathbf{R}_i^\top
+          \)</strong
+        >
+        and
+        <strong>
+          \( \partial\mathbf{r}_t/\partial\mathbf{t}_j=\mathbf{R}_i^\top
+          \)</strong
+        >. With
+        <strong>
+          \( \mathbf{S}=\begin{bmatrix}0&amp;-1\\1&amp;0\end{bmatrix} \)</strong
+        >,
+        <strong>
+          \( \partial(\mathbf{R}_i^\top\mathbf{d})/\partial\theta_i =
+          -\mathbf{R}_i^\top\mathbf{S}\mathbf{d} \)</strong
+        >. The angle residual
+        <strong>
+          \( r_\theta=\mathrm{wrap}(\theta_j-\theta_i-\theta_{ij}) \)</strong
+        >
+        has local derivatives
+        <strong> \( \partial r_\theta/\partial\theta_i=-1 \)</strong>,
+        <strong> \( \partial r_\theta/\partial\theta_j=1 \)</strong>. Combining
+        gives:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}_{ij} = \begin{bmatrix} -\mathbf{R}_i^\top &
+        -\mathbf{R}_i^\top\mathbf{S}(\mathbf{t}_j-\mathbf{t}_i) \\
+        \mathbf{0}^\top & -1 \end{bmatrix},\quad \mathbf{B}_{ij} =
+        \begin{bmatrix} \mathbf{R}_i^\top & 0 \\ \mathbf{0}^\top & 1
+        \end{bmatrix}. \]
+      </h4>
+
+      <hr />
+
+      <p>
+        <strong>Problem 3 (LM as Regularization):</strong>
+        Show that solving
+        <strong>
+          \( (\mathbf{H}+\lambda\mathbf{I})\delta\mathbf{x}=-\mathbf{g}
+          \)</strong
+        >
+        minimizes a regularized quadratic model.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        Consider the GN quadratic model
+        <strong>
+          \(
+          Q(\delta\mathbf{x})=\tfrac{1}{2}\delta\mathbf{x}^\top\mathbf{H}\delta\mathbf{x}+\mathbf{g}^\top\delta\mathbf{x}+c
+          \)</strong
+        >. Add Tikhonov regularization:
+        <strong>
+          \(
+          Q_\lambda(\delta\mathbf{x})=Q(\delta\mathbf{x})+\tfrac{\lambda}{2}\|\delta\mathbf{x}\|^2
+          \)</strong
+        >. Setting the gradient to zero yields
+        <strong>
+          \( (\mathbf{H}+\lambda\mathbf{I})\delta\mathbf{x}=-\mathbf{g}
+          \)</strong
+        >. Thus damping penalizes large steps when the linearization is
+        unreliable.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 4 (Outlier Dominance in Least Squares):</strong>
+        Suppose one loop closure has residual magnitude
+        <strong> \( k \)</strong> times larger than typical edges (with similar
+        information scaling). Quantify how it can dominate the objective and
+        explain why robust kernels reduce its influence.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        In least squares, each edge contributes roughly
+        <strong> \( s=\mathbf{e}^\top\mathbf{\Omega}\mathbf{e} \)</strong>,
+        which scales quadratically with residual magnitude. If typical residual
+        scale is <strong> \( \sigma \)</strong> and the outlier scale is
+        <strong> \( k\sigma \)</strong>, then its contribution is about
+        <strong> \( k^2 \)</strong> times a typical edge. For large
+        <strong> \( k \)</strong>, the optimizer can shift the solution to
+        reduce the outlier, even if that worsens many inliers.
+      </p>
+      <p>
+        Robust kernels use <strong> \( \rho(s) \)</strong> instead of
+        <strong> \( s \)</strong>. The effective weight in the normal equations
+        becomes <strong> \( w(s)=\rho'(s) \)</strong>. For kernels where
+        <strong> \( \rho'(s) \)</strong> decreases when
+        <strong> \( s \)</strong> is large (e.g., Huber transitions to linear
+        growth), the outlier gets downweighted, preventing domination of the
+        objective.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Summary</h2>
+    <div class="down-content">
+      <p>
+        You constructed a full pose-graph lab pipeline: generate edges, assemble
+        a sparse GN/LM system, handle gauge freedom via anchoring, iterate to
+        convergence, and evaluate performance. The provided implementations are
+        explicit about residuals and Jacobians so you can extend them with
+        robust kernels and real front-ends.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. References</h2>
+    <ol>
+      <li>
+        Lu, F., &amp; Milios, E. (1997). Globally consistent range scan
+        alignment for environment mapping.
+        <em>Autonomous Robots</em>, 4(4), 333–349.
+      </li>
+      <li>
+        Dellaert, F., &amp; Kaess, M. (2006). Square Root SAM: Simultaneous
+        localization and mapping via square root information smoothing.
+        <em>The International Journal of Robotics Research</em>, 25(12),
+        1181–1203.
+      </li>
+      <li>
+        Kaess, M., Ranganathan, A., &amp; Dellaert, F. (2008). iSAM: Incremental
+        smoothing and mapping.
+        <em>IEEE Transactions on Robotics</em>, 24(6), 1365–1378.
+      </li>
+      <li>
+        Kümmerle, R., Grisetti, G., Strasdat, H., Konolige, K., &amp; Burgard,
+        W. (2011). g2o: A general framework for graph optimization.
+        <em>IEEE International Conference on Robotics and Automation</em>,
+        3607–3613.
+      </li>
+      <li>
+        Grisetti, G., Kümmerle, R., Stachniss, C., &amp; Burgard, W. (2010). A
+        tutorial on graph-based SLAM.
+        <em>IEEE Intelligent Transportation Systems Magazine</em>, 2(4), 31–43.
+      </li>
+      <li>
+        Olson, E., Agarwal, P., Strom, J., &amp; Grizzle, J. (2013). Fast
+        incremental pose-graph optimization.
+        <em
+          >Proceedings of the IEEE/RSJ International Conference on Intelligent
+          Robots and Systems</em
+        >, 2659–2666.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter12/Lesson4.html">
+          Lesson 4: Handling Outliers (robust kernels)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Visual Odometry for Mobile Robots
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

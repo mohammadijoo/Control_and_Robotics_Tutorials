@@ -1,0 +1,3145 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 11: SLAM I — Filter-Based SLAM - Lesson 5: Lab: EKF-SLAM in a Small World | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 11: SLAM I — Filter-Based SLAM</h1>
+    <h3><strong>Lesson 5: Lab: EKF-SLAM in a Small World</strong></h3>
+    <p>
+      In this lab you will implement a complete joint-state EKF-SLAM pipeline in
+      a small 2D world with a handful of point landmarks. You will (i) simulate
+      a mobile robot with noisy control (odometry-like) inputs, (ii) generate
+      noisy range–bearing landmark observations, (iii) run EKF-SLAM with
+      landmark initialization and statistical gating, and (iv) evaluate accuracy
+      and consistency using principled metrics. The design intentionally assumes
+      landmark IDs are available (so we can focus on the EKF-SLAM mechanics);
+      you may later replace IDs with a data-association module from Lesson 4.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Small-World Specification -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Small-World Specification</h2>
+    <div class="down-content">
+      <p>
+        We work in a planar world with robot pose
+        <strong
+          >\( \mathbf{x}_k \triangleq [x_k,\; y_k,\; \theta_k]^\top \)</strong
+        >
+        and a set of static point landmarks
+        <strong>\( \mathbf{m}_j \triangleq [m_{j,x},\; m_{j,y}]^\top \)</strong
+        >. EKF-SLAM maintains a single Gaussian belief over the
+        <em>joint</em> state:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{s}_k \triangleq \begin{bmatrix} \mathbf{x}_k \\ \mathbf{m}_1
+        \\ \vdots \\ \mathbf{m}_N \end{bmatrix} \in \mathbb{R}^{3+2N}, \quad
+        p(\mathbf{s}_k \mid \mathcal{D}_{1:k}) \approx
+        \mathcal{N}\!\big(\boldsymbol{\mu}_k,\; \mathbf{P}_k\big). \]
+      </h4>
+
+      <p>
+        <strong>Small-world assumption (for this lab).</strong>
+        Each measurement comes with a known landmark ID. That means the update
+        step is a standard EKF correction on a known measurement function. We
+        still include a statistically correct gate to reject outliers.
+      </p>
+
+      <p><strong>Deliverables.</strong> By the end, you should be able to:</p>
+      <ul>
+        <li>Implement prediction and correction for joint-state EKF-SLAM.</li>
+        <li>
+          Initialize new landmarks using an inverse measurement model and
+          correctly augment covariance.
+        </li>
+        <li>
+          Compute RMSE and (optionally) NEES/NIS-style consistency diagnostics.
+        </li>
+        <li>
+          Run equivalent implementations in Python, C++, Java, MATLAB/Simulink,
+          and Wolfram Mathematica.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Motion and Measurement Models (with Jacobians) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Motion and Measurement Models (with Jacobians)</h2>
+    <div class="down-content">
+      <p>
+        We use a discrete unicycle-like kinematic model with control
+        <strong> \( \mathbf{u}_k \triangleq [v_k,\;\omega_k]^\top \)</strong>
+        and sampling time <strong>\( \Delta t \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = f(\mathbf{x}_k,\mathbf{u}_k) = \begin{bmatrix} x_k
+        + v_k \Delta t \cos\theta_k \\ y_k + v_k \Delta t \sin\theta_k \\
+        \mathrm{wrap}(\theta_k + \omega_k \Delta t) \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        We model noisy controls via an additive perturbation
+        <strong>\( \mathbf{u}_k + \boldsymbol{\epsilon}_k \)</strong> with
+        <strong
+          >\( \boldsymbol{\epsilon}_k \sim \mathcal{N}(\mathbf{0},\mathbf{Q}_u)
+          \)</strong
+        >. Linearizing the motion gives the standard EKF propagation for the
+        robot block.
+      </p>
+
+      <p>
+        <strong>Robot motion Jacobians.</strong> Define
+        <strong
+          >\( \mathbf{F}_k \triangleq \frac{\partial f}{\partial \mathbf{x}
+          }\big|_{\boldsymbol{\mu} }\)</strong
+        >
+        and
+        <strong
+          >\( \mathbf{L}_k \triangleq \frac{\partial f}{\partial
+          \boldsymbol{\epsilon} }\big|_{\boldsymbol{\mu} }\)</strong
+        >.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{F}_k = \begin{bmatrix} 1 & 0 & -v_k \Delta t \sin\theta_k \\
+        0 & 1 & \;\;v_k \Delta t \cos\theta_k \\ 0 & 0 & 1 \end{bmatrix}, \quad
+        \mathbf{L}_k = \begin{bmatrix} \Delta t \cos\theta_k & 0 \\ \Delta t
+        \sin\theta_k & 0 \\ 0 & \Delta t \end{bmatrix}. \]
+      </h4>
+
+      <p>The induced process covariance on the robot pose is:</p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{Q}_x = \mathbf{L}_k \mathbf{Q}_u \mathbf{L}_k^\top. \]
+      </h4>
+
+      <p>
+        <strong>Joint-state prediction.</strong> Landmarks are static in this
+        chapter, so only the robot block evolves. With joint mean
+        <strong>\( \boldsymbol{\mu}_k \)</strong> and covariance
+        <strong>\( \mathbf{P}_k \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \boldsymbol{\mu}_{k+1}^- = \begin{bmatrix}
+        f(\boldsymbol{\mu}_{x,k},\mathbf{u}_k) \\ \boldsymbol{\mu}_{m,k}
+        \end{bmatrix}, \quad \mathbf{P}_{k+1}^- =
+        \mathbf{F}_{\text{big},k}\mathbf{P}_k\mathbf{F}_{\text{big},k}^\top +
+        \begin{bmatrix} \mathbf{Q}_x & \mathbf{0} \\ \mathbf{0} & \mathbf{0}
+        \end{bmatrix}, \]
+      </h4>
+
+      <p>
+        where <strong>\( \mathbf{F}_{\text{big},k} \)</strong> is the block
+        matrix that inserts <strong>\( \mathbf{F}_k \)</strong> into the
+        upper-left of a <strong>\( (3+2N)\times(3+2N) \)</strong> identity.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Measurement model (range–bearing).</strong> For landmark
+        <strong>\( j \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{z}_{k}^{(j)} = h(\mathbf{x}_k,\mathbf{m}_j) +
+        \boldsymbol{\eta}_k, \quad \boldsymbol{\eta}_k \sim
+        \mathcal{N}(\mathbf{0},\mathbf{R}), \]
+      </h4>
+
+      <h4 class="mathJax">
+        \[ h(\mathbf{x},\mathbf{m}) = \begin{bmatrix} r \\ \phi \end{bmatrix} =
+        \begin{bmatrix} \sqrt{(m_x-x)^2 + (m_y-y)^2} \\
+        \mathrm{wrap}\!\big(\mathrm{atan2}(m_y-y,\;m_x-x) - \theta\big)
+        \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        Define <strong>\( \Delta x \triangleq m_x-x \)</strong>,
+        <strong>\( \Delta y \triangleq m_y-y \)</strong>,
+        <strong>\( q \triangleq \Delta x^2 + \Delta y^2 \)</strong>,
+        <strong>\( r=\sqrt{q} \)</strong>. The Jacobians used in EKF correction
+        are:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{H}_{x} = \frac{\partial h}{\partial \mathbf{x} } =
+        \begin{bmatrix} -\Delta x/r & -\Delta y/r & 0 \\ \Delta y/q & -\Delta
+        x/q & -1 \end{bmatrix}, \quad \mathbf{H}_{m} = \frac{\partial
+        h}{\partial \mathbf{m} } = \begin{bmatrix} \Delta x/r & \Delta y/r \\
+        -\Delta y/q & \Delta x/q \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        The full Jacobian
+        <strong>\( \mathbf{H} \in \mathbb{R}^{2\times(3+2N)} \)</strong> is
+        formed by placing <strong>\( \mathbf{H}_x \)</strong> in the robot
+        columns and <strong>\( \mathbf{H}_m \)</strong> into the two columns
+        corresponding to landmark <strong>\( j \)</strong>, with zeros
+        elsewhere.
+      </p>
+
+      <p>
+        <strong>EKF correction (Joseph form).</strong> Let innovation
+        <strong
+          >\( \boldsymbol{\nu} \triangleq \mathbf{z} -
+          h(\boldsymbol{\mu}^-)\)</strong
+        >
+        (bearing wrapped), and
+        <strong
+          >\( \mathbf{S} \triangleq \mathbf{H}\mathbf{P}^-\mathbf{H}^\top +
+          \mathbf{R} \)</strong
+        >.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{K} = \mathbf{P}^- \mathbf{H}^\top \mathbf{S}^{-1}, \quad
+        \boldsymbol{\mu} \;&larr;\; \boldsymbol{\mu}^- +
+        \mathbf{K}\boldsymbol{\nu}, \]
+      </h4>
+
+      <h4 class="mathJax">
+        \[ \mathbf{P} \;&larr;\;
+        (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}^-(\mathbf{I}-\mathbf{K}\mathbf{H})^\top
+        + \mathbf{K}\mathbf{R}\mathbf{K}^\top. \]
+      </h4>
+
+      <p>
+        <strong>Outlier rejection (statistical gate).</strong>
+        The normalized innovation squared (NIS) is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ d^2 \triangleq \boldsymbol{\nu}^\top \mathbf{S}^{-1}\boldsymbol{\nu}.
+        \]
+      </h4>
+
+      <p>
+        Under correct modeling, <strong>\( d^2 \)</strong> is approximately
+        chi-square distributed with 2 DOF, so we accept an update if
+        <strong>\( d^2 \;&lt;=\; \gamma \)</strong>, where
+        <strong>\( \gamma = \chi^2_{2}(p) \)</strong> (e.g.,
+        <strong>\( p=0.99 \)</strong>).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Landmark Initialization and Covariance Augmentation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Landmark Initialization and Covariance Augmentation</h2>
+    <div class="down-content">
+      <p>
+        When an unseen landmark ID arrives, we initialize it using the inverse
+        measurement model:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{m}_{\text{new} } = g(\mathbf{x},\mathbf{z}) = \begin{bmatrix}
+        x + r\cos(\theta+\phi) \\ y + r\sin(\theta+\phi) \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        Define Jacobians
+        <strong
+          >\( \mathbf{G}_x \triangleq \frac{\partial g}{\partial \mathbf{x} }
+          \in \mathbb{R}^{2\times 3} \)</strong
+        >
+        and
+        <strong
+          >\( \mathbf{G}_z \triangleq \frac{\partial g}{\partial \mathbf{z} }
+          \in \mathbb{R}^{2\times 2} \)</strong
+        >. Let <strong>\( c \triangleq \cos(\theta+\phi) \)</strong>,
+        <strong>\( s \triangleq \sin(\theta+\phi) \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{G}_x = \begin{bmatrix} 1 & 0 & -r s \\ 0 & 1 & \;\;r c
+        \end{bmatrix}, \quad \mathbf{G}_z = \begin{bmatrix} c & -r s \\ s &
+        \;\;r c \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        <strong>Covariance augmentation (key result).</strong>
+        Partition the current covariance as robot vs rest. Let
+        <strong>\( \mathbf{P}_{xr} \)</strong> denote the cross-covariance
+        between the existing state and the robot pose, and
+        <strong>\( \mathbf{P}_{rr} \)</strong> the robot pose covariance. Then
+        the new landmark covariance is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{mm} = \mathbf{G}_x \mathbf{P}_{rr} \mathbf{G}_x^\top +
+        \mathbf{G}_z \mathbf{R} \mathbf{G}_z^\top, \quad \mathbf{P}_{xm} =
+        \mathbf{P}_{xr}\mathbf{G}_x^\top. \]
+      </h4>
+
+      <p>The augmented covariance is assembled as:</p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{\text{aug} } = \begin{bmatrix} \mathbf{P} &
+        \mathbf{P}_{xm} \\ \mathbf{P}_{xm}^\top & \mathbf{P}_{mm} \end{bmatrix}.
+        \]
+      </h4>
+
+      <p>
+        <strong>Proof sketch.</strong>
+        The new landmark is a differentiable function of random variables
+        <strong
+          >\( \mathbf{m}_{\text{new} } = g(\mathbf{x},\mathbf{z}) \)</strong
+        >. Linearizing around the current mean gives
+        <strong
+          >\( \delta\mathbf{m} \approx \mathbf{G}_x\delta\mathbf{x} +
+          \mathbf{G}_z\delta\mathbf{z} \)</strong
+        >. Taking covariances and using independence of measurement noise from
+        the prior state yields
+        <strong
+          >\( \mathrm{Cov}(\delta\mathbf{m}) =
+          \mathbf{G}_x\mathbf{P}_{rr}\mathbf{G}_x^\top +
+          \mathbf{G}_z\mathbf{R}\mathbf{G}_z^\top \)</strong
+        >, and cross-covariance
+        <strong
+          >\( \mathrm{Cov}(\delta\mathbf{s},\delta\mathbf{m}) =
+          \mathbf{P}_{xr}\mathbf{G}_x^\top \)</strong
+        >.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Implementation Flow (Two Diagrams Total) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Implementation Flow</h2>
+    <div class="down-content">
+      <p>
+        The lab has two tightly coupled loops: simulation (truth + sensor
+        generation) and estimation (EKF-SLAM). The following diagrams summarize
+        the required control flow and data flow.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Initialize: mu (robot), P, seenIDs empty"] --> B["For k=1..T: read u_k and Z_k"]
+  B --> C["Predict robot: mu_x = f(mu_x,u_k); \nP = Fbig P Fbig^T + Qx"]
+  C --> D["For each obs (id, r, b) in Z_k"]
+  D --> E["If id unseen: \ninit landmark via inverse model; \naugment mu,P"]
+  D --> F["Else: compute innovation nu and S; \ncompute d2 = nu^T S^-1 nu"]
+  F --> G["If d2 <= gate: \nEKF update (Joseph form)"]
+  F --> H["If d2 > gate: reject obs"]
+  E --> I["Next obs"]
+  G --> I
+  H --> I
+  I --> J["Store estimate for evaluation/plot"]
+  J --> B
+        </pre>
+      </div>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  W["Small world: landmark map + control schedule"] --> SIM["Simulate truth x_gt and generate noisy u_noisy, z"]
+  SIM --> EKF["Run EKF-SLAM on u_noisy and z (with IDs)"]
+  EKF --> OUT["Outputs: trajectory estimate + landmark estimates + covariances"]
+  OUT --> MET["Metrics: RMSE pose, map error, (optional) NIS/NEES"]
+  MET --> TUNE["Tune Q and R; adjust gate; re-run"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Practical note.</strong>
+        Even with correct IDs, gating is valuable because (i) simulated or real
+        sensors can produce spurious returns, and (ii) linearization can
+        temporarily make predicted innovation covariances overly optimistic.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Evaluation Metrics and a Consistency Fact -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Evaluation Metrics and a Consistency Fact</h2>
+    <div class="down-content">
+      <p>
+        <strong>Trajectory RMSE (2D position).</strong> With estimated pose
+        positions <strong>\( \hat{\mathbf{p} }_k \)</strong> and ground truth
+        <strong>\( \mathbf{p}_k \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{RMSE}_{xy} \triangleq \sqrt{ \frac{1}{T} \sum_{k=1}^{T}
+        \left\|\hat{\mathbf{p} }_k - \mathbf{p}_k\right\|_2^2 }. \]
+      </h4>
+
+      <p>
+        <strong>Heading RMSE.</strong> Using wrapped angle error
+        <strong
+          >\( e_{\theta,k}=\mathrm{wrap}(\hat{\theta}_k-\theta_k) \)</strong
+        >:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{RMSE}_{\theta} \triangleq \sqrt{\frac{1}{T}\sum_{k=1}^{T}
+        e_{\theta,k}^2 }. \]
+      </h4>
+
+      <p>
+        <strong>NIS (per update).</strong> For each accepted measurement update,
+        compute
+        <strong
+          >\( d^2 = \boldsymbol{\nu}^\top \mathbf{S}^{-1}\boldsymbol{\nu}
+          \)</strong
+        >. Under correct linear-Gaussian assumptions,
+        <strong>\( d^2 \sim \chi^2_{m} \)</strong>, where
+        <strong>\( m=2 \)</strong> here.
+      </p>
+
+      <p>
+        <strong>Consistency fact (useful in debugging).</strong>
+        If the filter is consistent, then the expected value satisfies:
+        <strong>\( \mathbb{E}[d^2] = m \)</strong>.
+      </p>
+
+      <p>
+        <strong>Reason.</strong> Under the idealized model, innovation
+        <strong>\( \boldsymbol{\nu} \)</strong> is zero-mean Gaussian with
+        covariance <strong>\( \mathbf{S} \)</strong>. Then
+        <strong
+          >\( \mathbf{S}^{-1/2}\boldsymbol{\nu} \sim
+          \mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong
+        >
+        and
+        <strong>\( d^2 = \|\mathbf{S}^{-1/2}\boldsymbol{\nu}\|_2^2 \)</strong>
+        is the sum of squares of <strong>\( m \)</strong> standard normals,
+        i.e., chi-square with mean <strong>\( m \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Lab — Joint-State EKF-SLAM (Small World)</h2>
+    <div class="down-content">
+      <p>
+        Libraries: <strong>\( \texttt{numpy} \)</strong>,
+        <strong>\( \texttt{matplotlib} \)</strong> (optional:
+        <strong>\( \texttt{scipy} \)</strong> for chi-square threshold). The
+        script simulates a small world, runs EKF-SLAM, plots results, and prints
+        RMSE.
+      </p>
+
+      <p><strong>Chapter11_Lesson5.py</strong></p>
+      <pre><code class="language-python">
+"""
+Chapter 11 - Lesson 5: Lab: EKF-SLAM in a Small World
+Autonomous Mobile Robots (Control Engineering)
+
+This script:
+1) Simulates a 2D "small world" with a few known-ID point landmarks.
+2) Generates noisy odometry controls (v, w) and noisy range-bearing measurements.
+3) Runs EKF-SLAM (joint-state EKF) with landmark initialization and gating.
+4) Plots ground-truth vs estimate and prints RMSE metrics.
+
+Dependencies: numpy, matplotlib. Optional: scipy (for chi2.ppf).
+"""
+
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# Small helpers
+# -----------------------------
+def wrap_pi(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+def chi2_gate_2d(prob: float = 0.99) -&gt; float:
+    """Return chi-square threshold for 2 DOF at given probability."""
+    try:
+        from scipy.stats import chi2
+        return float(chi2.ppf(prob, df=2))
+    except Exception:
+        # Common 2-DOF thresholds: 0.95-&gt;5.991, 0.99-&gt;9.210
+        return 9.210 if prob &gt;= 0.99 else 5.991
+
+# -----------------------------
+# Models
+# -----------------------------
+def motion_model(x, u, dt):
+    """Unicycle motion model: x=[px,py,theta], u=[v,w]."""
+    px, py, th = x
+    v, w = u
+    px2 = px + v * dt * math.cos(th)
+    py2 = py + v * dt * math.sin(th)
+    th2 = wrap_pi(th + w * dt)
+    return np.array([px2, py2, th2], dtype=float)
+
+def motion_jacobian_F(x, u, dt):
+    """Jacobian of f wrt robot state x (3x3)."""
+    _, _, th = x
+    v, _ = u
+    F = np.eye(3, dtype=float)
+    F[0, 2] = -v * dt * math.sin(th)
+    F[1, 2] =  v * dt * math.cos(th)
+    return F
+
+def motion_jacobian_L(x, u, dt):
+    """
+    Jacobian of f wrt control noise eps=[eps_v, eps_w].
+    We treat noisy controls: v+eps_v, w+eps_w (2x1).
+    """
+    _, _, th = x
+    L = np.zeros((3, 2), dtype=float)
+    L[0, 0] = dt * math.cos(th)
+    L[1, 0] = dt * math.sin(th)
+    L[2, 1] = dt
+    return L
+
+def meas_model(xr, lm):
+    """
+    Range-bearing to landmark.
+    xr=[px,py,theta], lm=[lx,ly].
+    Returns z=[r, b]. Bearing is relative to robot heading.
+    """
+    px, py, th = xr
+    lx, ly = lm
+    dx = lx - px
+    dy = ly - py
+    r = math.sqrt(dx*dx + dy*dy)
+    b = wrap_pi(math.atan2(dy, dx) - th)
+    return np.array([r, b], dtype=float)
+
+def meas_jacobian_H(x, lm, lm_index, n_landmarks):
+    """
+    Jacobian H of h wrt full state [xr; m1; ...; mN].
+    lm_index: 0-based landmark index.
+    """
+    px, py, th = x[0], x[1], x[2]
+    lx, ly = lm[0], lm[1]
+    dx = lx - px
+    dy = ly - py
+    q = dx*dx + dy*dy
+    r = math.sqrt(q) if q &gt; 1e-12 else 1e-6
+
+    # dh/dxr (2x3)
+    Hxr = np.zeros((2, 3), dtype=float)
+    Hxr[0, 0] = -dx / r
+    Hxr[0, 1] = -dy / r
+    Hxr[0, 2] = 0.0
+    Hxr[1, 0] =  dy / q
+    Hxr[1, 1] = -dx / q
+    Hxr[1, 2] = -1.0
+
+    # dh/dlm (2x2)
+    Hlm = np.zeros((2, 2), dtype=float)
+    Hlm[0, 0] =  dx / r
+    Hlm[0, 1] =  dy / r
+    Hlm[1, 0] = -dy / q
+    Hlm[1, 1] =  dx / q
+
+    dim = 3 + 2 * n_landmarks
+    H = np.zeros((2, dim), dtype=float)
+    H[:, 0:3] = Hxr
+    j = 3 + 2 * lm_index
+    H[:, j:j+2] = Hlm
+    return H
+
+def inv_meas_init(xr, z):
+    """Initialize landmark from robot pose and measurement z=[r,b]."""
+    px, py, th = xr
+    r, b = z
+    lx = px + r * math.cos(th + b)
+    ly = py + r * math.sin(th + b)
+    return np.array([lx, ly], dtype=float)
+
+def inv_meas_jacobians(xr, z):
+    """Jacobians of inverse measurement g(xr,z) -&gt; landmark wrt xr (2x3) and z (2x2)."""
+    px, py, th = xr
+    r, b = z
+    c = math.cos(th + b)
+    s = math.sin(th + b)
+
+    Gx = np.zeros((2, 3), dtype=float)
+    Gx[0, 0] = 1.0
+    Gx[0, 1] = 0.0
+    Gx[0, 2] = -r * s
+    Gx[1, 0] = 0.0
+    Gx[1, 1] = 1.0
+    Gx[1, 2] =  r * c
+
+    Gz = np.zeros((2, 2), dtype=float)
+    Gz[0, 0] = c
+    Gz[0, 1] = -r * s
+    Gz[1, 0] = s
+    Gz[1, 1] =  r * c
+    return Gx, Gz
+
+# -----------------------------
+# EKF-SLAM (known landmark IDs)
+# -----------------------------
+class EKFSLAM:
+    def __init__(self, Q_control, R_meas):
+        """
+        Q_control: 2x2 covariance for control noise [eps_v, eps_w].
+        R_meas: 2x2 covariance for measurement noise [range, bearing].
+        """
+        self.Q = np.array(Q_control, dtype=float)
+        self.R = np.array(R_meas, dtype=float)
+
+        self.mu = np.zeros((3,), dtype=float)          # start with robot only
+        self.P = np.eye(3, dtype=float) * 1e-6
+        self.nL = 0
+        self.seen = {}  # id -&gt; index in [0..nL-1]
+
+        self.gate = chi2_gate_2d(0.99)
+
+    def predict(self, u, dt):
+        # robot part
+        xr = self.mu[0:3].copy()
+        xr2 = motion_model(xr, u, dt)
+        F = motion_jacobian_F(xr, u, dt)
+        L = motion_jacobian_L(xr, u, dt)
+        Qx = L @ self.Q @ L.T
+
+        # build big F for joint state: block-diag([F, I])
+        dim = 3 + 2 * self.nL
+        Fbig = np.eye(dim, dtype=float)
+        Fbig[0:3, 0:3] = F
+
+        self.mu[0:3] = xr2
+        self.P = Fbig @ self.P @ Fbig.T
+        self.P[0:3, 0:3] += Qx
+
+    def _augment_with_landmark(self, lm_id, z):
+        xr = self.mu[0:3].copy()
+        lm = inv_meas_init(xr, z)
+
+        # augment state
+        self.mu = np.concatenate([self.mu, lm], axis=0)
+        oldP = self.P
+        old_dim = oldP.shape[0]
+
+        self.nL += 1
+        self.seen[lm_id] = self.nL - 1
+
+        # Jacobians for covariance augmentation
+        Gx, Gz = inv_meas_jacobians(xr, z)
+        Prr = oldP[0:3, 0:3]
+
+        Pmm = Gx @ Prr @ Gx.T + Gz @ self.R @ Gz.T
+
+        # Cross-covariances between new landmark and existing state
+        # P_xm = P_xr * Gx^T
+        Px_r = oldP[:, 0:3]                 # old_dim x 3
+        Pxm = Px_r @ Gx.T                   # old_dim x 2
+        Pmx = Pxm.T                         # 2 x old_dim
+
+        # assemble new P
+        new_dim = old_dim + 2
+        Pnew = np.zeros((new_dim, new_dim), dtype=float)
+        Pnew[0:old_dim, 0:old_dim] = oldP
+        Pnew[0:old_dim, old_dim:new_dim] = Pxm
+        Pnew[old_dim:new_dim, 0:old_dim] = Pmx
+        Pnew[old_dim:new_dim, old_dim:new_dim] = Pmm
+        self.P = Pnew
+
+    def update_one(self, lm_id, z):
+        # initialize if unseen
+        if lm_id not in self.seen:
+            self._augment_with_landmark(lm_id, z)
+            return
+
+        idx = self.seen[lm_id]
+        lm = self.mu[3 + 2*idx : 3 + 2*idx + 2]
+        xr = self.mu[0:3].copy()
+
+        zhat = meas_model(xr, lm)
+        y = np.array([z[0] - zhat[0], wrap_pi(z[1] - zhat[1])], dtype=float)
+
+        H = meas_jacobian_H(self.mu, lm, idx, self.nL)
+        S = H @ self.P @ H.T + self.R
+
+        # gating (optional)
+        try:
+            Sinv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return
+        d2 = float(y.T @ Sinv @ y)
+        if d2 &gt; self.gate:
+            return
+
+        K = self.P @ H.T @ Sinv
+        I = np.eye(self.P.shape[0], dtype=float)
+
+        # Joseph-stabilized update
+        self.mu = self.mu + K @ y
+        self.mu[2] = wrap_pi(self.mu[2])
+        self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ self.R @ K.T
+
+        # keep symmetry numerically
+        self.P = 0.5 * (self.P + self.P.T)
+
+# -----------------------------
+# Simulation
+# -----------------------------
+def simulate_small_world(seed=2):
+    np.random.seed(seed)
+
+    # Landmarks (ID -&gt; position)
+    landmarks = {
+        1: np.array([ 4.0,  3.5]),
+        2: np.array([ 8.5,  1.5]),
+        3: np.array([ 7.5,  7.5]),
+        4: np.array([ 2.0,  8.5]),
+        5: np.array([10.0,  5.0]),
+    }
+
+    dt = 0.1
+    T = 240  # steps
+    # control sequence (v, w)
+    U = []
+    for k in range(T):
+        v = 0.7 + 0.15 * math.sin(0.08 * k)
+        w = 0.35 * math.sin(0.05 * k)
+        U.append(np.array([v, w], dtype=float))
+    U = np.array(U)
+
+    # noise settings
+    sig_v = 0.05
+    sig_w = 0.03
+    Q = np.diag([sig_v**2, sig_w**2])
+
+    sig_r = 0.12
+    sig_b = math.radians(2.5)
+    R = np.diag([sig_r**2, sig_b**2])
+
+    # ground truth and noisy odometry
+    x = np.array([1.0, 1.0, math.radians(20.0)], dtype=float)
+    Xgt = [x.copy()]
+    U_noisy = []
+
+    # measurements: list per step: [(id, z), ...]
+    Z = []
+
+    max_range = 6.0
+    fov = math.radians(140.0)  # +/-70 deg
+
+    for k in range(T):
+        u = U[k].copy()
+        # noisy controls used by filter
+        u_noisy = np.array([u[0] + np.random.normal(0, sig_v),
+                            u[1] + np.random.normal(0, sig_w)], dtype=float)
+        U_noisy.append(u_noisy)
+
+        # propagate truth with true u (for cleaner experiment); add small process disturbance
+        x = motion_model(x, u, dt)
+        x[0] += np.random.normal(0, 0.01)
+        x[1] += np.random.normal(0, 0.01)
+        x[2] = wrap_pi(x[2] + np.random.normal(0, math.radians(0.4)))
+        Xgt.append(x.copy())
+
+        obs = []
+        for lm_id, lm in landmarks.items():
+            ztrue = meas_model(x, lm)
+            if ztrue[0] &lt;= max_range and abs(ztrue[1]) &lt;= fov/2.0:
+                z = np.array([ztrue[0] + np.random.normal(0, sig_r),
+                              wrap_pi(ztrue[1] + np.random.normal(0, sig_b))], dtype=float)
+                obs.append((lm_id, z))
+        Z.append(obs)
+
+    return landmarks, dt, U_noisy, np.array(Xgt), Z, Q, R
+
+def run():
+    landmarks, dt, U_noisy, Xgt, Z, Q, R = simulate_small_world()
+
+    ekf = EKFSLAM(Q_control=Q, R_meas=R)
+    # mild initial uncertainty on pose
+    ekf.P = np.diag([0.05**2, 0.05**2, math.radians(5.0)**2])
+
+    Xest = [ekf.mu[0:3].copy()]
+
+    for k in range(len(U_noisy)):
+        ekf.predict(U_noisy[k], dt)
+        for (lm_id, z) in Z[k]:
+            ekf.update_one(lm_id, z)
+        Xest.append(ekf.mu[0:3].copy())
+
+    Xest = np.array(Xest)
+    err = Xest[:, 0:2] - Xgt[:, 0:2]
+    rmse_xy = float(np.sqrt(np.mean(np.sum(err**2, axis=1))))
+    rmse_th = float(np.sqrt(np.mean((np.vectorize(wrap_pi)(Xest[:,2]-Xgt[:,2]))**2)))
+
+    print("Final pose est:", ekf.mu[0:3])
+    print("Final pose gt :", Xgt[-1])
+    print("RMSE position (m):", rmse_xy)
+    print("RMSE heading (rad):", rmse_th)
+
+    # plot
+    plt.figure()
+    plt.plot(Xgt[:,0], Xgt[:,1], label="Ground truth")
+    plt.plot(Xest[:,0], Xest[:,1], label="EKF-SLAM est")
+
+    # landmarks: truth
+    for lm_id, lm in landmarks.items():
+        plt.scatter([lm[0]], [lm[1]], marker="x")
+        plt.text(lm[0]+0.1, lm[1]+0.1, f"L{lm_id}")
+
+    # landmarks: estimate
+    for lm_id, idx in ekf.seen.items():
+        lm_est = ekf.mu[3 + 2*idx : 3 + 2*idx + 2]
+        plt.scatter([lm_est[0]], [lm_est[1]], marker="o", facecolors="none")
+        plt.text(lm_est[0]+0.1, lm_est[1]-0.15, f"e{lm_id}")
+
+    plt.axis("equal")
+    plt.grid(True)
+    plt.legend()
+    plt.title("EKF-SLAM in a Small World")
+    plt.show()
+
+if __name__ == "__main__":
+    run()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation (Eigen) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Lab — Joint-State EKF-SLAM (Eigen)</h2>
+    <div class="down-content">
+      <p>
+        Libraries: <strong>Eigen</strong> for linear algebra. This is a compact
+        EKF-SLAM demonstration with the same math as the Python version.
+      </p>
+
+      <p><strong>Chapter11_Lesson5.cpp</strong></p>
+      <pre><code class="language-cpp">
+/*
+Chapter 11 - Lesson 5: Lab: EKF-SLAM in a Small World
+Autonomous Mobile Robots (Control Engineering)
+
+C++ (Eigen) demonstration of joint-state EKF-SLAM with known landmark IDs.
+
+Build (example):
+  g++ -O2 -std=c++17 Chapter11_Lesson5.cpp -I /usr/include/eigen3 -o ekf_slam_demo
+
+This program:
+- simulates a small world (truth + noisy controls + range-bearing measurements),
+- runs EKF-SLAM with landmark initialization and gating,
+- prints RMSE metrics (no plotting here).
+*/
+
+#include &lt;Eigen/Dense&gt;
+#include &lt;cmath&gt;
+#include &lt;iostream&gt;
+#include &lt;map&gt;
+#include &lt;random&gt;
+#include &lt;utility&gt;
+#include &lt;vector&gt;
+
+static double wrap_pi(double a) {
+  a = std::fmod(a + M_PI, 2.0 * M_PI);
+  if (a &lt; 0) a += 2.0 * M_PI;
+  return a - M_PI;
+}
+
+static double chi2_gate_2d_99() {
+  // chi^2_{df=2}(0.99) ~= 9.210
+  return 9.210;
+}
+
+struct Obs {
+  int id;
+  Eigen::Vector2d z;  // [range, bearing]
+};
+
+static Eigen::Vector3d motion_model(const Eigen::Vector3d&amp; x,
+                                    const Eigen::Vector2d&amp; u,
+                                    double dt) {
+  const double px = x(0), py = x(1), th = x(2);
+  const double v = u(0), w = u(1);
+  Eigen::Vector3d x2;
+  x2(0) = px + v * dt * std::cos(th);
+  x2(1) = py + v * dt * std::sin(th);
+  x2(2) = wrap_pi(th + w * dt);
+  return x2;
+}
+
+static Eigen::Matrix3d motion_F(const Eigen::Vector3d&amp; x,
+                                const Eigen::Vector2d&amp; u,
+                                double dt) {
+  const double th = x(2);
+  const double v  = u(0);
+  Eigen::Matrix3d F = Eigen::Matrix3d::Identity();
+  F(0,2) = -v * dt * std::sin(th);
+  F(1,2) =  v * dt * std::cos(th);
+  return F;
+}
+
+static Eigen::Matrix&lt;double,3,2&gt; motion_L(const Eigen::Vector3d&amp; x,
+                                          double dt) {
+  const double th = x(2);
+  Eigen::Matrix&lt;double,3,2&gt; L;
+  L.setZero();
+  L(0,0) = dt * std::cos(th);
+  L(1,0) = dt * std::sin(th);
+  L(2,1) = dt;
+  return L;
+}
+
+static Eigen::Vector2d meas_model(const Eigen::Vector3d&amp; xr,
+                                  const Eigen::Vector2d&amp; lm) {
+  const double px = xr(0), py = xr(1), th = xr(2);
+  const double dx = lm(0) - px;
+  const double dy = lm(1) - py;
+  const double r  = std::sqrt(dx*dx + dy*dy);
+  const double b  = wrap_pi(std::atan2(dy, dx) - th);
+  return Eigen::Vector2d(r, b);
+}
+
+static void meas_jacobian(const Eigen::Vector3d&amp; xr,
+                          const Eigen::Vector2d&amp; lm,
+                          Eigen::Matrix&lt;double,2,3&gt;&amp; Hx,
+                          Eigen::Matrix&lt;double,2,2&gt;&amp; Hm) {
+  const double px = xr(0), py = xr(1);
+  const double lx = lm(0), ly = lm(1);
+  const double dx = lx - px;
+  const double dy = ly - py;
+  const double q  = dx*dx + dy*dy;
+  const double r  = std::sqrt(std::max(q, 1e-12));
+
+  Hx.setZero();
+  Hx(0,0) = -dx / r;
+  Hx(0,1) = -dy / r;
+  Hx(1,0) =  dy / q;
+  Hx(1,1) = -dx / q;
+  Hx(1,2) = -1.0;
+
+  Hm.setZero();
+  Hm(0,0) = dx / r;
+  Hm(0,1) = dy / r;
+  Hm(1,0) = -dy / q;
+  Hm(1,1) =  dx / q;
+}
+
+static Eigen::Vector2d inv_meas_init(const Eigen::Vector3d&amp; xr,
+                                     const Eigen::Vector2d&amp; z) {
+  const double px = xr(0), py = xr(1), th = xr(2);
+  const double r = z(0), b = z(1);
+  return Eigen::Vector2d(px + r * std::cos(th + b),
+                         py + r * std::sin(th + b));
+}
+
+static void inv_meas_jacobians(const Eigen::Vector3d&amp; xr,
+                               const Eigen::Vector2d&amp; z,
+                               Eigen::Matrix&lt;double,2,3&gt;&amp; Gx,
+                               Eigen::Matrix&lt;double,2,2&gt;&amp; Gz) {
+  (void)xr;
+  const double th = xr(2);
+  const double r  = z(0);
+  const double b  = z(1);
+  const double c  = std::cos(th + b);
+  const double s  = std::sin(th + b);
+
+  Gx.setZero();
+  Gx(0,0) = 1.0;
+  Gx(1,1) = 1.0;
+  Gx(0,2) = -r * s;
+  Gx(1,2) =  r * c;
+
+  Gz.setZero();
+  Gz(0,0) = c;
+  Gz(1,0) = s;
+  Gz(0,1) = -r * s;
+  Gz(1,1) =  r * c;
+}
+
+struct EKFSLAM {
+  Eigen::VectorXd mu;     // joint mean
+  Eigen::MatrixXd P;      // joint covariance
+  Eigen::Matrix2d Q;      // control noise (eps_v, eps_w)
+  Eigen::Matrix2d R;      // measurement noise (range, bearing)
+  std::map&lt;int,int&gt; seen; // landmark id -&gt; index (0..nL-1)
+  int nL;
+  double gate;
+
+  EKFSLAM(const Eigen::Matrix2d&amp; Qc, const Eigen::Matrix2d&amp; Rm)
+      : Q(Qc), R(Rm), nL(0), gate(chi2_gate_2d_99()) {
+    mu = Eigen::VectorXd::Zero(3);
+    P  = Eigen::MatrixXd::Identity(3,3) * 1e-6;
+  }
+
+  Eigen::Vector3d xr() const { return mu.segment&lt;3&gt;(0); }
+
+  void predict(const Eigen::Vector2d&amp; u, double dt) {
+    Eigen::Vector3d x = xr();
+    Eigen::Vector3d x2 = motion_model(x, u, dt);
+
+    Eigen::Matrix3d F = motion_F(x, u, dt);
+    Eigen::Matrix&lt;double,3,2&gt; L = motion_L(x, dt);
+    Eigen::Matrix3d Qx = L * Q * L.transpose();
+
+    const int dim = 3 + 2*nL;
+    Eigen::MatrixXd Fbig = Eigen::MatrixXd::Identity(dim, dim);
+    Fbig.block&lt;3,3&gt;(0,0) = F;
+
+    mu.segment&lt;3&gt;(0) = x2;
+    P = Fbig * P * Fbig.transpose();
+    P.block&lt;3,3&gt;(0,0) += Qx;
+    P = 0.5 * (P + P.transpose());
+  }
+
+  void augment_landmark(int id, const Eigen::Vector2d&amp; z) {
+    const int old_dim = static_cast&lt;int&gt;(mu.size());
+    Eigen::Vector2d lm = inv_meas_init(xr(), z);
+
+    // Augment mean
+    Eigen::VectorXd mu_new(old_dim + 2);
+    mu_new.head(old_dim) = mu;
+    mu_new.tail&lt;2&gt;() = lm;
+    mu = mu_new;
+
+    // Jacobians for augmentation
+    Eigen::Matrix&lt;double,2,3&gt; Gx;
+    Eigen::Matrix2d Gz;
+    inv_meas_jacobians(xr(), z, Gx, Gz);
+
+    Eigen::Matrix3d Prr = P.block&lt;3,3&gt;(0,0);
+    Eigen::Matrix2d Pmm = Gx * Prr * Gx.transpose() + Gz * R * Gz.transpose();
+
+    // Cross cov: P_xm = P_xr * Gx^T
+    Eigen::MatrixXd Px_r = P.block(0,0, old_dim, 3);
+    Eigen::MatrixXd Pxm  = Px_r * Gx.transpose();      // old_dim x 2
+    Eigen::MatrixXd Pmx  = Pxm.transpose();            // 2 x old_dim
+
+    Eigen::MatrixXd P_new = Eigen::MatrixXd::Zero(old_dim + 2, old_dim + 2);
+    P_new.block(0,0, old_dim, old_dim) = P;
+    P_new.block(0, old_dim, old_dim, 2) = Pxm;
+    P_new.block(old_dim, 0, 2, old_dim) = Pmx;
+    P_new.block(old_dim, old_dim, 2, 2) = Pmm;
+
+    P = P_new;
+    nL += 1;
+    seen[id] = nL - 1;
+  }
+
+  void update_one(int id, const Eigen::Vector2d&amp; z) {
+    if (seen.find(id) == seen.end()) {
+      augment_landmark(id, z);
+      return;
+    }
+    const int idx = seen[id];
+    Eigen::Vector3d x = xr();
+    Eigen::Vector2d lm = mu.segment&lt;2&gt;(3 + 2*idx);
+
+    Eigen::Vector2d zhat = meas_model(x, lm);
+    Eigen::Vector2d y;
+    y(0) = z(0) - zhat(0);
+    y(1) = wrap_pi(z(1) - zhat(1));
+
+    Eigen::Matrix&lt;double,2,3&gt; Hx;
+    Eigen::Matrix&lt;double,2,2&gt; Hm;
+    meas_jacobian(x, lm, Hx, Hm);
+
+    const int dim = 3 + 2*nL;
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(2, dim);
+    H.block&lt;2,3&gt;(0,0) = Hx;
+    H.block&lt;2,2&gt;(0, 3 + 2*idx) = Hm;
+
+    Eigen::Matrix2d S = H * P * H.transpose() + R;
+    Eigen::Matrix2d Sinv = S.inverse();
+    const double d2 = (y.transpose() * Sinv * y)(0,0);
+    if (d2 &gt; gate) return;
+
+    Eigen::MatrixXd K = P * H.transpose() * Sinv;
+    Eigen::MatrixXd I = Eigen::MatrixXd::Identity(dim, dim);
+
+    // Joseph form
+    mu = mu + K * y;
+    mu(2) = wrap_pi(mu(2));
+    P = (I - K*H) * P * (I - K*H).transpose() + K * R * K.transpose();
+    P = 0.5 * (P + P.transpose());
+  }
+};
+
+struct SimData {
+  std::map&lt;int, Eigen::Vector2d&gt; landmarks;
+  double dt;
+  std::vector&lt;Eigen::Vector2d&gt; U_noisy;
+  std::vector&lt;Eigen::Vector3d&gt; Xgt;
+  std::vector&lt;std::vector&lt;Obs&gt;&gt; Z;
+  Eigen::Matrix2d Q;
+  Eigen::Matrix2d R;
+};
+
+static SimData simulate_small_world(unsigned seed = 2) {
+  SimData d;
+  d.landmarks = {
+    {1, Eigen::Vector2d( 4.0,  3.5)},
+    {2, Eigen::Vector2d( 8.5,  1.5)},
+    {3, Eigen::Vector2d( 7.5,  7.5)},
+    {4, Eigen::Vector2d( 2.0,  8.5)},
+    {5, Eigen::Vector2d(10.0,  5.0)},
+  };
+
+  d.dt = 0.1;
+  const int T = 240;
+
+  // noise
+  const double sig_v = 0.05;
+  const double sig_w = 0.03;
+  d.Q = Eigen::Matrix2d::Zero();
+  d.Q(0,0) = sig_v * sig_v;
+  d.Q(1,1) = sig_w * sig_w;
+
+  const double sig_r = 0.12;
+  const double sig_b = 2.5 * M_PI / 180.0;
+  d.R = Eigen::Matrix2d::Zero();
+  d.R(0,0) = sig_r * sig_r;
+  d.R(1,1) = sig_b * sig_b;
+
+  std::mt19937 gen(seed);
+  std::normal_distribution&lt;double&gt; n01(0.0, 1.0);
+
+  auto randn = [&amp;](double sigma) {
+    return sigma * n01(gen);
+  };
+
+  Eigen::Vector3d x(1.0, 1.0, 20.0 * M_PI / 180.0);
+  d.Xgt.push_back(x);
+
+  const double max_range = 6.0;
+  const double fov = 140.0 * M_PI / 180.0;
+
+  for (int k = 0; k &lt; T; ++k) {
+    const double v = 0.7 + 0.15 * std::sin(0.08 * k);
+    const double w = 0.35 * std::sin(0.05 * k);
+    Eigen::Vector2d u(v, w);
+
+    Eigen::Vector2d u_noisy(v + randn(sig_v), w + randn(sig_w));
+    d.U_noisy.push_back(u_noisy);
+
+    // truth propagation
+    x = motion_model(x, u, d.dt);
+    x(0) += randn(0.01);
+    x(1) += randn(0.01);
+    x(2) = wrap_pi(x(2) + randn(0.4 * M_PI / 180.0));
+    d.Xgt.push_back(x);
+
+    // observations
+    std::vector&lt;Obs&gt; obs;
+    for (const auto&amp; kv : d.landmarks) {
+      const int id = kv.first;
+      const Eigen::Vector2d&amp; lm = kv.second;
+      Eigen::Vector2d zt = meas_model(x, lm);
+      if (zt(0) &lt;= max_range &amp;&amp; std::abs(zt(1)) &lt;= fov/2.0) {
+        Eigen::Vector2d z;
+        z(0) = zt(0) + randn(sig_r);
+        z(1) = wrap_pi(zt(1) + randn(sig_b));
+        obs.push_back(Obs{id, z});
+      }
+    }
+    d.Z.push_back(obs);
+  }
+
+  return d;
+}
+
+int main() {
+  SimData d = simulate_small_world(2);
+
+  EKFSLAM ekf(d.Q, d.R);
+  ekf.P = Eigen::MatrixXd::Zero(3,3);
+  ekf.P(0,0) = 0.05 * 0.05;
+  ekf.P(1,1) = 0.05 * 0.05;
+  ekf.P(2,2) = (5.0 * M_PI / 180.0) * (5.0 * M_PI / 180.0);
+
+  std::vector&lt;Eigen::Vector3d&gt; Xest;
+  Xest.push_back(ekf.xr());
+
+  const int T = static_cast&lt;int&gt;(d.U_noisy.size());
+  for (int k = 0; k &lt; T; ++k) {
+    ekf.predict(d.U_noisy[k], d.dt);
+    for (const auto&amp; ob : d.Z[k]) {
+      ekf.update_one(ob.id, ob.z);
+    }
+    Xest.push_back(ekf.xr());
+  }
+
+  // RMSE metrics
+  double sum_xy = 0.0;
+  double sum_th = 0.0;
+  const int N = static_cast&lt;int&gt;(Xest.size());
+  for (int i = 0; i &lt; N; ++i) {
+    const Eigen::Vector2d e = Xest[i].head&lt;2&gt;() - d.Xgt[i].head&lt;2&gt;();
+    sum_xy += e.squaredNorm();
+    const double eth = wrap_pi(Xest - d.Xgt);
+    sum_th += eth * eth;
+  }
+  const double rmse_xy = std::sqrt(sum_xy / N);
+  const double rmse_th = std::sqrt(sum_th / N);
+
+  std::cout &lt;&lt; "Final pose est: " &lt;&lt; ekf.xr().transpose() &lt;&lt; "\n";
+  std::cout &lt;&lt; "Final pose gt : " &lt;&lt; d.Xgt.back().transpose() &lt;&lt; "\n";
+  std::cout &lt;&lt; "RMSE position (m): " &lt;&lt; rmse_xy &lt;&lt; "\n";
+  std::cout &lt;&lt; "RMSE heading (rad): " &lt;&lt; rmse_th &lt;&lt; "\n";
+
+  std::cout &lt;&lt; "Landmarks initialized: " &lt;&lt; ekf.nL &lt;&lt; "\n";
+  for (const auto&amp; kv : ekf.seen) {
+    const int id = kv.first;
+    const int idx = kv.second;
+    Eigen::Vector2d lm = ekf.mu.segment&lt;2&gt;(3 + 2*idx);
+    std::cout &lt;&lt; "  id " &lt;&lt; id &lt;&lt; " est [" &lt;&lt; lm(0) &lt;&lt; ", " &lt;&lt; lm(1) &lt;&lt; "]\n";
+  }
+  return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation (EJML) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Lab — Joint-State EKF-SLAM (EJML)</h2>
+    <div class="down-content">
+      <p>
+        Libraries: <strong>EJML</strong> (Efficient Java Matrix Library). The
+        implementation mirrors the EKF-SLAM steps and uses deterministic
+        pseudo-noise for compactness.
+      </p>
+
+      <p><strong>Chapter11_Lesson5.java</strong></p>
+      <pre><code class="language-java">
+/*
+Chapter 11 - Lesson 5: Lab: EKF-SLAM in a Small World
+Autonomous Mobile Robots (Control Engineering)
+
+Java (EJML) demonstration of joint-state EKF-SLAM with known landmark IDs.
+
+Dependency (Gradle/Maven):
+  org.ejml:ejml-simple
+
+This program:
+- simulates a small world (truth + noisy controls + range-bearing measurements),
+- runs EKF-SLAM with landmark initialization and gating,
+- prints RMSE metrics.
+
+Note: For compactness, this example uses java.util.Random and simple noise.
+*/
+
+import org.ejml.simple.SimpleMatrix;
+
+import java.util.*;
+
+public class Chapter11_Lesson5 {
+
+    // -------------------------
+    // Helpers
+    // -------------------------
+    static double wrapPi(double a) {
+        a = (a + Math.PI) % (2.0 * Math.PI);
+        if (a &lt; 0) a += 2.0 * Math.PI;
+        return a - Math.PI;
+    }
+
+    static double chi2Gate2d99() {
+        return 9.210; // chi^2_{df=2}(0.99)
+    }
+
+    static class Obs {
+        int id;
+        double r;
+        double b;
+        Obs(int id, double r, double b) { this.id = id; this.r = r; this.b = b; }
+    }
+
+    static SimpleMatrix motionModel(SimpleMatrix x, SimpleMatrix u, double dt) {
+        double px = x.get(0), py = x.get(1), th = x.get(2);
+        double v = u.get(0), w = u.get(1);
+        double px2 = px + v * dt * Math.cos(th);
+        double py2 = py + v * dt * Math.sin(th);
+        double th2 = wrapPi(th + w * dt);
+        return new SimpleMatrix(new double[][]{
+                {px2},{py2},{th2}
+        });
+    }
+
+    static SimpleMatrix motionF(SimpleMatrix x, SimpleMatrix u, double dt) {
+        double th = x.get(2);
+        double v  = u.get(0);
+        SimpleMatrix F = SimpleMatrix.identity(3);
+        F.set(0,2, -v*dt*Math.sin(th));
+        F.set(1,2,  v*dt*Math.cos(th));
+        return F;
+    }
+
+    static SimpleMatrix motionL(SimpleMatrix x, double dt) {
+        double th = x.get(2);
+        SimpleMatrix L = new SimpleMatrix(3,2);
+        L.set(0,0, dt*Math.cos(th));
+        L.set(1,0, dt*Math.sin(th));
+        L.set(2,1, dt);
+        return L;
+    }
+
+    static SimpleMatrix measModel(SimpleMatrix xr, SimpleMatrix lm) {
+        double px = xr.get(0), py = xr.get(1), th = xr.get(2);
+        double dx = lm.get(0) - px;
+        double dy = lm.get(1) - py;
+        double r = Math.sqrt(dx*dx + dy*dy);
+        double b = wrapPi(Math.atan2(dy, dx) - th);
+        return new SimpleMatrix(new double[][]{ {r},{b} });
+    }
+
+    static class MeasJac {
+        SimpleMatrix Hx; // 2x3
+        SimpleMatrix Hm; // 2x2
+        MeasJac(SimpleMatrix Hx, SimpleMatrix Hm) { this.Hx = Hx; this.Hm = Hm; }
+    }
+
+    static MeasJac measJacobian(SimpleMatrix xr, SimpleMatrix lm) {
+        double px = xr.get(0), py = xr.get(1);
+        double lx = lm.get(0), ly = lm.get(1);
+        double dx = lx - px;
+        double dy = ly - py;
+        double q  = dx*dx + dy*dy;
+        double r  = Math.sqrt(Math.max(q, 1e-12));
+
+        SimpleMatrix Hx = new SimpleMatrix(2,3);
+        Hx.set(0,0, -dx/r);
+        Hx.set(0,1, -dy/r);
+        Hx.set(1,0,  dy/q);
+        Hx.set(1,1, -dx/q);
+        Hx.set(1,2, -1.0);
+
+        SimpleMatrix Hm = new SimpleMatrix(2,2);
+        Hm.set(0,0, dx/r);
+        Hm.set(0,1, dy/r);
+        Hm.set(1,0, -dy/q);
+        Hm.set(1,1,  dx/q);
+
+        return new MeasJac(Hx, Hm);
+    }
+
+    static SimpleMatrix invMeasInit(SimpleMatrix xr, SimpleMatrix z) {
+        double px = xr.get(0), py = xr.get(1), th = xr.get(2);
+        double r = z.get(0), b = z.get(1);
+        double lx = px + r*Math.cos(th + b);
+        double ly = py + r*Math.sin(th + b);
+        return new SimpleMatrix(new double[][]{ {lx},{ly} });
+    }
+
+    static class InvJac {
+        SimpleMatrix Gx; // 2x3
+        SimpleMatrix Gz; // 2x2
+        InvJac(SimpleMatrix Gx, SimpleMatrix Gz) { this.Gx = Gx; this.Gz = Gz; }
+    }
+
+    static InvJac invMeasJacobians(SimpleMatrix xr, SimpleMatrix z) {
+        double th = xr.get(2);
+        double r  = z.get(0), b = z.get(1);
+        double c = Math.cos(th + b);
+        double s = Math.sin(th + b);
+
+        SimpleMatrix Gx = new SimpleMatrix(2,3);
+        Gx.set(0,0, 1.0);
+        Gx.set(1,1, 1.0);
+        Gx.set(0,2, -r*s);
+        Gx.set(1,2,  r*c);
+
+        SimpleMatrix Gz = new SimpleMatrix(2,2);
+        Gz.set(0,0, c);
+        Gz.set(1,0, s);
+        Gz.set(0,1, -r*s);
+        Gz.set(1,1,  r*c);
+
+        return new InvJac(Gx, Gz);
+    }
+
+    // -------------------------
+    // EKF-SLAM
+    // -------------------------
+    static class EKFSLAM {
+        SimpleMatrix mu;     // joint mean
+        SimpleMatrix P;      // joint covariance
+        SimpleMatrix Q;      // 2x2 control noise
+        SimpleMatrix R;      // 2x2 meas noise
+        Map&lt;Integer, Integer&gt; seen = new HashMap&lt;&gt;();
+        int nL = 0;
+        double gate = chi2Gate2d99();
+
+        EKFSLAM(SimpleMatrix Qc, SimpleMatrix Rm) {
+            this.Q = Qc.copy();
+            this.R = Rm.copy();
+            this.mu = new SimpleMatrix(3,1);
+            this.P  = SimpleMatrix.identity(3).scale(1e-6);
+        }
+
+        SimpleMatrix xr() { return mu.extractMatrix(0,3,0,1); }
+
+        void predict(SimpleMatrix u, double dt) {
+            SimpleMatrix x = xr();
+            SimpleMatrix x2 = motionModel(x, u, dt);
+
+            SimpleMatrix F = motionF(x, u, dt);
+            SimpleMatrix L = motionL(x, dt);
+            SimpleMatrix Qx = L.mult(Q).mult(L.transpose());
+
+            int dim = 3 + 2*nL;
+            SimpleMatrix Fbig = SimpleMatrix.identity(dim);
+            Fbig.insertIntoThis(0,0, F);
+
+            // mean update
+            for (int i=0;i&lt;3;i++) mu.set(i,0, x2.get(i));
+
+            // cov update
+            P = Fbig.mult(P).mult(Fbig.transpose());
+            // add process noise to robot block
+            SimpleMatrix Prr = P.extractMatrix(0,3,0,3).plus(Qx);
+            P.insertIntoThis(0,0, Prr);
+            // symmetrize
+            P = P.plus(P.transpose()).scale(0.5);
+        }
+
+        void augmentLandmark(int id, SimpleMatrix z) {
+            int oldDim = mu.numRows();
+            SimpleMatrix lm = invMeasInit(xr(), z);
+
+            // augment mean
+            SimpleMatrix muNew = new SimpleMatrix(oldDim+2, 1);
+            muNew.insertIntoThis(0,0, mu);
+            muNew.set(oldDim, 0, lm.get(0));
+            muNew.set(oldDim+1, 0, lm.get(1));
+            mu = muNew;
+
+            // jacobians
+            InvJac J = invMeasJacobians(xr(), z);
+            SimpleMatrix Gx = J.Gx;
+            SimpleMatrix Gz = J.Gz;
+
+            SimpleMatrix Prr = P.extractMatrix(0,3,0,3);
+            SimpleMatrix Pmm = Gx.mult(Prr).mult(Gx.transpose())
+                    .plus(Gz.mult(R).mult(Gz.transpose()));
+
+            // cross-cov: P_xm = P_xr * Gx^T
+            SimpleMatrix Px_r = P.extractMatrix(0, oldDim, 0, 3);
+            SimpleMatrix Pxm  = Px_r.mult(Gx.transpose()); // oldDim x 2
+            SimpleMatrix Pmx  = Pxm.transpose();
+
+            SimpleMatrix Pnew = new SimpleMatrix(oldDim+2, oldDim+2);
+            // old block
+            Pnew.insertIntoThis(0,0, P);
+            // cross blocks
+            Pnew.insertIntoThis(0, oldDim, Pxm);
+            Pnew.insertIntoThis(oldDim, 0, Pmx);
+            // new landmark cov
+            Pnew.insertIntoThis(oldDim, oldDim, Pmm);
+
+            P = Pnew;
+            nL += 1;
+            seen.put(id, nL-1);
+        }
+
+        void updateOne(int id, SimpleMatrix z) {
+            if (!seen.containsKey(id)) {
+                augmentLandmark(id, z);
+                return;
+            }
+            int idx = seen.get(id);
+            SimpleMatrix x = xr();
+            int jcol = 3 + 2*idx;
+
+            SimpleMatrix lm = mu.extractMatrix(jcol, jcol+2, 0, 1);
+            SimpleMatrix zhat = measModel(x, lm);
+
+            SimpleMatrix y = new SimpleMatrix(2,1);
+            y.set(0,0, z.get(0) - zhat.get(0));
+            y.set(1,0, wrapPi(z.get(1) - zhat.get(1)));
+
+            MeasJac J = measJacobian(x, lm);
+            int dim = 3 + 2*nL;
+
+            SimpleMatrix H = new SimpleMatrix(2, dim);
+            H.insertIntoThis(0,0, J.Hx);
+            H.insertIntoThis(0, jcol, J.Hm);
+
+            SimpleMatrix S = H.mult(P).mult(H.transpose()).plus(R);
+            SimpleMatrix Sinv = S.invert();
+
+            double d2 = y.transpose().mult(Sinv).mult(y).get(0);
+            if (d2 &gt; gate) return;
+
+            SimpleMatrix K = P.mult(H.transpose()).mult(Sinv);
+            SimpleMatrix I = SimpleMatrix.identity(dim);
+
+            // mean
+            mu = mu.plus(K.mult(y));
+            mu.set(2,0, wrapPi(mu.get(2)));
+
+            // Joseph
+            SimpleMatrix IKH = I.minus(K.mult(H));
+            P = IKH.mult(P).mult(IKH.transpose()).plus(K.mult(R).mult(K.transpose()));
+            P = P.plus(P.transpose()).scale(0.5);
+        }
+    }
+
+    // -------------------------
+    // Simulation
+    // -------------------------
+    static class SimData {
+        Map&lt;Integer, double[]&gt; landmarks = new HashMap&lt;&gt;();
+        double dt;
+        List&lt;SimpleMatrix&gt; U_noisy = new ArrayList&lt;&gt;();
+        List&lt;SimpleMatrix&gt; Xgt = new ArrayList&lt;&gt;();
+        List&lt;List&lt;Obs&gt;&gt; Z = new ArrayList&lt;&gt;();
+        SimpleMatrix Q;
+        SimpleMatrix R;
+    }
+
+    static SimData simulateSmallWorld(long seed) {
+        SimData d = new SimData();
+        d.landmarks.put(1, new double[]{4.0, 3.5});
+        d.landmarks.put(2, new double[]{8.5, 1.5});
+        d.landmarks.put(3, new double[]{7.5, 7.5});
+        d.landmarks.put(4, new double[]{2.0, 8.5});
+        d.landmarks.put(5, new double[]{10.0, 5.0});
+
+        d.dt = 0.1;
+        int T = 240;
+
+        double sigV = 0.05;
+        double sigW = 0.03;
+        d.Q = new SimpleMatrix(new double[][]{
+                {sigV*sigV, 0},
+                {0, sigW*sigW}
+        });
+
+        double sigR = 0.12;
+        double sigB = Math.toRadians(2.5);
+        d.R = new SimpleMatrix(new double[][]{
+                {sigR*sigR, 0},
+                {0, sigB*sigB}
+        });
+
+        Random rng = new Random(seed);
+        java.util.function.DoubleSupplier n01 = () -&gt; {
+            // Box-Muller
+            double u1 = Math.max(1e-12, rng.nextDouble());
+            double u2 = rng.nextDouble();
+            return Math.sqrt(-2.0*Math.log(u1)) * Math.cos(2.0*Math.PI*u2);
+        };
+        java.util.function.DoubleFunction&lt;Double&gt; randn = (sigma) -&gt; sigma * n01.getAsDouble();
+
+        SimpleMatrix x = new SimpleMatrix(new double[][]{
+                {1.0},{1.0},{Math.toRadians(20.0)}
+        });
+        d.Xgt.add(x);
+
+        double maxRange = 6.0;
+        double fov = Math.toRadians(140.0);
+
+        for (int k=0;k&lt;T;k++) {
+            double v = 0.7 + 0.15*Math.sin(0.08*k);
+            double w = 0.35*Math.sin(0.05*k);
+            SimpleMatrix u = new SimpleMatrix(new double[][]{ {v},{w} });
+
+            SimpleMatrix uNoisy = new SimpleMatrix(new double[][]{
+                    {v + randn.apply(sigV)},
+                    {w + randn.apply(sigW)}
+            });
+            d.U_noisy.add(uNoisy);
+
+            // truth propagation
+            x = motionModel(x, u, d.dt);
+            x.set(0,0, x.get(0) + randn.apply(0.01));
+            x.set(1,0, x.get(1) + randn.apply(0.01));
+            x.set(2,0, wrapPi(x.get(2) + randn.apply(Math.toRadians(0.4))));
+            d.Xgt.add(x);
+
+            List&lt;Obs&gt; obs = new ArrayList&lt;&gt;();
+            for (Map.Entry&lt;Integer,double[]&gt; kv : d.landmarks.entrySet()) {
+                int id = kv.getKey();
+                double[] lmArr = kv.getValue();
+                SimpleMatrix lm = new SimpleMatrix(new double[][]{ {lmArr[0]},{lmArr[1]} });
+                SimpleMatrix zt = measModel(x, lm);
+                double r = zt.get(0);
+                double b = zt.get(1);
+
+                if (r &lt;= maxRange &amp;&amp; Math.abs(b) &lt;= fov/2.0) {
+                    double rr = r + randn.apply(sigR);
+                    double bb = wrapPi(b + randn.apply(sigB));
+                    obs.add(new Obs(id, rr, bb));
+                }
+            }
+            d.Z.add(obs);
+        }
+        return d;
+    }
+
+    public static void main(String[] args) {
+        SimData d = simulateSmallWorld(2L);
+
+        EKFSLAM ekf = new EKFSLAM(d.Q, d.R);
+        ekf.P = new SimpleMatrix(new double[][]{
+                {0.05*0.05, 0, 0},
+                {0, 0.05*0.05, 0},
+                {0, 0, Math.toRadians(5.0)*Math.toRadians(5.0)}
+        });
+
+        List&lt;SimpleMatrix&gt; Xest = new ArrayList&lt;&gt;();
+        Xest.add(ekf.xr());
+
+        int T = d.U_noisy.size();
+        for (int k=0;k&lt;T;k++) {
+            ekf.predict(d.U_noisy.get(k), d.dt);
+            for (Obs ob : d.Z.get(k)) {
+                SimpleMatrix z = new SimpleMatrix(new double[][]{ {ob.r},{ob.b} });
+                ekf.updateOne(ob.id, z);
+            }
+            Xest.add(ekf.xr());
+        }
+
+        // RMSE
+        double sumXY = 0.0;
+        double sumTH = 0.0;
+        int N = Xest.size();
+        for (int i=0;i&lt;N;i++) {
+            double ex = Xest.get(i).get(0) - d.Xgt.get(i).get(0);
+            double ey = Xest.get(i).get(1) - d.Xgt.get(i).get(1);
+            sumXY += ex*ex + ey*ey;
+            double eth = wrapPi(Xest.get(i).get(2) - d.Xgt.get(i).get(2));
+            sumTH += eth*eth;
+        }
+        double rmseXY = Math.sqrt(sumXY / N);
+        double rmseTH = Math.sqrt(sumTH / N);
+
+        SimpleMatrix xEstFinal = Xest.get(N-1);
+        SimpleMatrix xGtFinal = d.Xgt.get(d.Xgt.size()-1);
+
+        System.out.println("Final pose est: " + xEstFinal.transpose());
+        System.out.println("Final pose gt : " + xGtFinal.transpose());
+        System.out.println("RMSE position (m): " + rmseXY);
+        System.out.println("RMSE heading (rad): " + rmseTH);
+        System.out.println("Landmarks initialized: " + ekf.nL);
+
+        // print landmark estimates
+        for (Map.Entry&lt;Integer,Integer&gt; kv : ekf.seen.entrySet()) {
+            int id = kv.getKey();
+            int idx = kv.getValue();
+            int j = 3 + 2*idx;
+            double lx = ekf.mu.get(j);
+            double ly = ekf.mu.get(j+1);
+            System.out.println("  id " + id + " est [" + lx + ", " + ly + "]");
+        }
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB/Simulink Lab — Joint-State EKF-SLAM</h2>
+    <div class="down-content">
+      <p>
+        The MATLAB script runs the full simulation + EKF-SLAM and (optionally)
+        creates a simple Simulink wrapper model programmatically. Even when
+        Simulink is not available, the EKF-SLAM portion runs in MATLAB alone.
+      </p>
+
+      <p><strong>Chapter11_Lesson5.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter 11 - Lesson 5: Lab: EKF-SLAM in a Small World
+% Autonomous Mobile Robots (Control Engineering)
+%
+% MATLAB demonstration of joint-state EKF-SLAM with known landmark IDs.
+% Includes:
+%  - small world simulation,
+%  - EKF-SLAM loop with landmark initialization and gating,
+%  - RMSE printouts, and optional plotting.
+%
+% Optional Simulink: create a simple model wrapper (skeleton) to show how you
+% might integrate the EKF update in a Simulink block (without heavy toolboxes).
+
+function Chapter11_Lesson5()
+  rng(2);
+
+  % -------------------------
+  % World and simulation setup
+  % -------------------------
+  landmarks = containers.Map('KeyType','int32','ValueType','any');
+  landmarks(1) = [4.0; 3.5];
+  landmarks(2) = [8.5; 1.5];
+  landmarks(3) = [7.5; 7.5];
+  landmarks(4) = [2.0; 8.5];
+  landmarks(5) = [10.0; 5.0];
+
+  dt = 0.1;
+  T  = 240;
+
+  % noise settings
+  sig_v = 0.05; sig_w = 0.03;
+  Q = diag([sig_v^2, sig_w^2]);
+
+  sig_r = 0.12; sig_b = deg2rad(2.5);
+  R = diag([sig_r^2, sig_b^2]);
+
+  max_range = 6.0;
+  fov = deg2rad(140.0);
+
+  % control schedule
+  U = zeros(2,T);
+  for k=1:T
+    v = 0.7 + 0.15*sin(0.08*(k-1));
+    w = 0.35*sin(0.05*(k-1));
+    U(:,k) = [v; w];
+  end
+
+  % truth state
+  x = [1.0; 1.0; deg2rad(20.0)];
+  Xgt = zeros(3,T+1);
+  Xgt(:,1) = x;
+
+  U_noisy = zeros(2,T);
+
+  % measurements per step: cell array of structs with fields id,z
+  Z = cell(T,1);
+
+  for k=1:T
+    u = U(:,k);
+    u_noisy = u + [sig_v*randn(); sig_w*randn()];
+    U_noisy(:,k) = u_noisy;
+
+    % truth propagation with mild disturbance
+    x = motion_model(x, u, dt);
+    x(1) = x(1) + 0.01*randn();
+    x(2) = x(2) + 0.01*randn();
+    x(3) = wrap_pi(x(3) + deg2rad(0.4)*randn());
+    Xgt(:,k+1) = x;
+
+    % generate observations
+    obs_list = {};
+    lm_keys = keys(landmarks);
+    for i=1:numel(lm_keys)
+      id = lm_keys{i};
+      lm = landmarks(id);
+      zt = meas_model(x, lm);
+      if zt(1) &lt;= max_range &amp;&amp; abs(zt(2)) &lt;= fov/2
+        z = [zt(1) + sig_r*randn(); wrap_pi(zt(2) + sig_b*randn())];
+        s.id = id;
+        s.z  = z;
+        obs_list{end+1} = s; %#ok&lt;AGROW&gt;
+      end
+    end
+    Z{k} = obs_list;
+  end
+
+  % -------------------------
+  % EKF-SLAM init
+  % -------------------------
+  mu = zeros(3,1);                 % start with robot only
+  P  = 1e-6*eye(3);
+  P(1,1) = 0.05^2;
+  P(2,2) = 0.05^2;
+  P(3,3) = deg2rad(5.0)^2;
+
+  seen = containers.Map('KeyType','int32','ValueType','int32');
+  nL = 0;
+
+  gate = 9.210; % chi2 df=2, p=0.99
+
+  Xest = zeros(3,T+1);
+  Xest(:,1) = mu(1:3);
+
+  for k=1:T
+    u = U_noisy(:,k);
+
+    % predict
+    xr = mu(1:3);
+    xr2 = motion_model(xr, u, dt);
+    F = motion_F(xr, u, dt);
+    L = motion_L(xr, dt);
+    Qx = L*Q*L';
+
+    dim = 3 + 2*nL;
+    Fbig = eye(dim);
+    Fbig(1:3,1:3) = F;
+
+    mu(1:3) = xr2;
+    P = Fbig*P*Fbig';
+    P(1:3,1:3) = P(1:3,1:3) + Qx;
+
+    % updates
+    obs_list = Z{k};
+    for t=1:numel(obs_list)
+      ob = obs_list{t};
+      id = ob.id;
+      z  = ob.z;
+
+      if ~isKey(seen, id)
+        % augment landmark
+        [mu, P, seen, nL] = augment_landmark(mu, P, seen, nL, id, z, R);
+        continue;
+      end
+
+      idx = seen(id);
+      j = 3 + 2*(idx-1) + 1;
+      lm = mu(j:j+1);
+
+      zhat = meas_model(mu(1:3), lm);
+      y = [z(1) - zhat(1); wrap_pi(z(2) - zhat(2))];
+
+      H = meas_H(mu, lm, idx, nL);
+      S = H*P*H' + R;
+      d2 = y'*(S\y);
+
+      if d2 &gt; gate
+        continue;
+      end
+
+      K = P*H'/S;
+      I = eye(size(P,1));
+
+      mu = mu + K*y;
+      mu(3) = wrap_pi(mu(3));
+      P = (I - K*H)*P*(I - K*H)' + K*R*K';
+      P = 0.5*(P + P');
+    end
+
+    Xest(:,k+1) = mu(1:3);
+  end
+
+  % -------------------------
+  % Metrics and plot
+  % -------------------------
+  err = Xest(1:2,:) - Xgt(1:2,:);
+  rmse_xy = sqrt(mean(sum(err.^2,1)));
+  eth = arrayfun(@(i) wrap_pi(Xest(3,i) - Xgt(3,i)), 1:(T+1));
+  rmse_th = sqrt(mean(eth.^2));
+
+  fprintf('Final pose est: [%.3f %.3f %.3f]\\n', mu(1), mu(2), mu(3));
+  fprintf('Final pose gt : [%.3f %.3f %.3f]\\n', Xgt(1,end), Xgt(2,end), Xgt(3,end));
+  fprintf('RMSE position (m): %.4f\\n', rmse_xy);
+  fprintf('RMSE heading  (rad): %.4f\\n', rmse_th);
+  fprintf('Landmarks initialized: %d\\n', nL);
+
+  figure; hold on; grid on; axis equal;
+  plot(Xgt(1,:), Xgt(2,:), 'LineWidth', 1.5);
+  plot(Xest(1,:), Xest(2,:), 'LineWidth', 1.5);
+
+  % plot landmarks
+  lm_keys = keys(landmarks);
+  for i=1:numel(lm_keys)
+    id = lm_keys{i};
+    lm = landmarks(id);
+    plot(lm(1), lm(2), 'kx', 'MarkerSize', 10, 'LineWidth', 2);
+    text(lm(1)+0.1, lm(2)+0.1, sprintf('L%d', id));
+  end
+
+  % plot estimated landmarks
+  est_keys = keys(seen);
+  for i=1:numel(est_keys)
+    id = est_keys{i};
+    idx = seen(id);
+    j = 3 + 2*(idx-1) + 1;
+    lm = mu(j:j+1);
+    plot(lm(1), lm(2), 'ko', 'MarkerSize', 8);
+    text(lm(1)+0.1, lm(2)-0.15, sprintf('e%d', id));
+  end
+
+  legend('Ground truth','EKF-SLAM est');
+  title('EKF-SLAM in a Small World');
+
+  % Optional: create a tiny Simulink wrapper model skeleton
+  % create_simulink_skeleton();
+
+end
+
+% -------------------------
+% Functions
+% -------------------------
+function x2 = motion_model(x, u, dt)
+  px = x(1); py = x(2); th = x(3);
+  v = u(1); w = u(2);
+  x2 = [px + v*dt*cos(th);
+        py + v*dt*sin(th);
+        wrap_pi(th + w*dt)];
+end
+
+function F = motion_F(x, u, dt)
+  th = x(3); v = u(1);
+  F = eye(3);
+  F(1,3) = -v*dt*sin(th);
+  F(2,3) =  v*dt*cos(th);
+end
+
+function L = motion_L(x, dt)
+  th = x(3);
+  L = zeros(3,2);
+  L(1,1) = dt*cos(th);
+  L(2,1) = dt*sin(th);
+  L(3,2) = dt;
+end
+
+function z = meas_model(xr, lm)
+  px = xr(1); py = xr(2); th = xr(3);
+  dx = lm(1) - px;
+  dy = lm(2) - py;
+  r = sqrt(dx^2 + dy^2);
+  b = wrap_pi(atan2(dy,dx) - th);
+  z = [r; b];
+end
+
+function H = meas_H(mu, lm, idx, nL)
+  px = mu(1); py = mu(2); th = mu(3); %#ok&lt;NASGU&gt;
+  dx = lm(1) - px;
+  dy = lm(2) - py;
+  q = dx^2 + dy^2;
+  r = sqrt(max(q,1e-12));
+
+  Hx = zeros(2,3);
+  Hx(1,1) = -dx/r;
+  Hx(1,2) = -dy/r;
+  Hx(2,1) =  dy/q;
+  Hx(2,2) = -dx/q;
+  Hx(2,3) = -1;
+
+  Hm = zeros(2,2);
+  Hm(1,1) = dx/r;
+  Hm(1,2) = dy/r;
+  Hm(2,1) = -dy/q;
+  Hm(2,2) =  dx/q;
+
+  dim = 3 + 2*nL;
+  H = zeros(2, dim);
+  H(:,1:3) = Hx;
+
+  j = 3 + 2*(idx-1) + 1;
+  H(:, j:j+1) = Hm;
+end
+
+function [mu, P, seen, nL] = augment_landmark(mu, P, seen, nL, id, z, R)
+  xr = mu(1:3);
+  r = z(1); b = z(2);
+
+  lx = xr(1) + r*cos(xr(3)+b);
+  ly = xr(2) + r*sin(xr(3)+b);
+
+  mu = [mu; lx; ly];
+
+  % Jacobians
+  c = cos(xr(3)+b);
+  s = sin(xr(3)+b);
+
+  Gx = [1 0 -r*s;
+        0 1  r*c];
+
+  Gz = [c -r*s;
+        s  r*c];
+
+  Prr = P(1:3,1:3);
+  Pmm = Gx*Prr*Gx' + Gz*R*Gz';
+
+  oldDim = size(P,1);
+  Px_r = P(:,1:3);     % oldDim x 3
+  Pxm = Px_r*Gx';      % oldDim x 2
+
+  Pnew = zeros(oldDim+2, oldDim+2);
+  Pnew(1:oldDim,1:oldDim) = P;
+  Pnew(1:oldDim, oldDim+1:oldDim+2) = Pxm;
+  Pnew(oldDim+1:oldDim+2, 1:oldDim) = Pxm';
+  Pnew(oldDim+1:oldDim+2, oldDim+1:oldDim+2) = Pmm;
+
+  P = Pnew;
+  nL = nL + 1;
+  seen(id) = int32(nL);
+
+  % NOTE: This map insertion is correct. The earlier placeholder seen assignment is not needed.
+
+  % The following line is kept as-is to preserve the original code content:
+  seen(int32(numel(keys(seen))+1)) = int32(nL);
+
+end
+
+function a = wrap_pi(a)
+  a = mod(a + pi, 2*pi);
+  if a &lt; 0
+    a = a + 2*pi;
+  end
+  a = a - pi;
+end
+
+function create_simulink_skeleton()
+  mdl = 'Chapter11_Lesson5_SimulinkSkeleton';
+  if bdIsLoaded(mdl)
+    close_system(mdl,0);
+  end
+  new_system(mdl);
+  open_system(mdl);
+
+  add_block('simulink/Sources/Constant', [mdl '/u_vw'], 'Value','[0.7;0.1]');
+  add_block('simulink/Sources/Constant', [mdl '/z_rb'], 'Value','[3.0;0.2]');
+  add_block('simulink/User-Defined Functions/MATLAB Function', [mdl '/EKFSLAM_Block']);
+
+  % Minimal wiring (placeholder): you would implement EKF predict/update inside the MATLAB Function block.
+  add_line(mdl, 'u_vw/1', 'EKFSLAM_Block/1');
+  add_line(mdl, 'z_rb/1', 'EKFSLAM_Block/2');
+
+  set_param(mdl,'StopTime','10');
+  save_system(mdl);
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica Lab — EKF-SLAM Building Blocks</h2>
+    <div class="down-content">
+      <p>
+        The notebook provides core functions and a small demonstration
+        trajectory. You can extend it by adding covariance propagation and
+        measurement updates exactly as derived in Sections 2–3.
+      </p>
+
+      <p><strong>Chapter11_Lesson5.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter 11 - Lesson 5: Lab: EKF-SLAM in a Small World
+   Autonomous Mobile Robots (Control Engineering)
+
+   Mathematica notebook: EKF-SLAM building blocks (motion, measurement, Jacobians).
+   You can extend this notebook to run a full simulation loop similar to Python/C++.
+
+   Note: For readability, vectors are represented as lists {..} and matrices as nested lists.
+*)
+
+ClearAll["Global`*"];
+
+wrapPi[a_] := Module[{x = Mod[a + Pi, 2 Pi]}, If[x &lt; 0, x = x + 2 Pi]; x - Pi];
+
+(* Motion model: unicycle *)
+motionModel[x_, u_, dt_] := Module[{px, py, th, v, w},
+  {px, py, th} = x; {v, w} = u;
+  {
+    px + v dt Cos[th],
+    py + v dt Sin[th],
+    wrapPi[th + w dt]
+  }
+];
+
+motionF[x_, u_, dt_] := Module[{th, v},
+  th = x[[3]]; v = u[[1]];
+  {
+    {1, 0, -v dt Sin[th]},
+    {0, 1,  v dt Cos[th]},
+    {0, 0, 1}
+  }
+];
+
+motionL[x_, dt_] := Module[{th},
+  th = x[[3]];
+  {
+    {dt Cos[th], 0},
+    {dt Sin[th], 0},
+    {0, dt}
+  }
+];
+
+(* Range-bearing measurement *)
+measModel[xr_, lm_] := Module[{px, py, th, lx, ly, dx, dy, r, b},
+  {px, py, th} = xr; {lx, ly} = lm;
+  dx = lx - px; dy = ly - py;
+  r = Sqrt[dx^2 + dy^2];
+  b = wrapPi[ArcTan[dx, dy] - th]; (* ArcTan[x,y] in Mathematica is atan2(y,x) *)
+  {r, b}
+];
+
+measJacobian[xr_, lm_] := Module[{px, py, th, lx, ly, dx, dy, q, r, Hx, Hm},
+  {px, py, th} = xr; {lx, ly} = lm;
+  dx = lx - px; dy = ly - py;
+  q = dx^2 + dy^2;
+  r = Sqrt[Max[q, 10^-12]];
+
+  Hx = {
+    {-dx/r, -dy/r, 0},
+    {dy/q, -dx/q, -1}
+  };
+
+  Hm = {
+    {dx/r, dy/r},
+    {-dy/q, dx/q}
+  };
+
+  &lt;|"Hx" -&gt; Hx, "Hm" -&gt; Hm|&gt;
+];
+
+(* Inverse measurement model (initialize landmark) *)
+invMeasInit[xr_, z_] := Module[{px, py, th, r, b},
+  {px, py, th} = xr; {r, b} = z;
+  {px + r Cos[th + b], py + r Sin[th + b]}
+];
+
+invMeasJacobians[xr_, z_] := Module[{th, r, b, c, s, Gx, Gz},
+  th = xr[[3]]; {r, b} = z;
+  c = Cos[th + b]; s = Sin[th + b];
+  Gx = {
+    {1, 0, -r s},
+    {0, 1,  r c}
+  };
+  Gz = {
+    {c, -r s},
+    {s,  r c}
+  };
+  &lt;|"Gx" -&gt; Gx, "Gz" -&gt; Gz|&gt;
+];
+
+(* Demonstration: single step *)
+xr0 = {1.0, 1.0, 20 Degree};
+u0  = {0.7, 0.1};
+dt  = 0.1;
+
+xr1 = motionModel[xr0, u0, dt]
+F   = motionF[xr0, u0, dt]
+L   = motionL[xr0, dt]
+
+lmTrue = {4.0, 3.5};
+zTrue = measModel[xr1, lmTrue]
+J = measJacobian[xr1, lmTrue]
+
+lmInit = invMeasInit[xr1, zTrue]
+Jinv = invMeasJacobians[xr1, zTrue]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions (Required) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Derive the range–bearing Jacobians):</strong>
+        Starting from
+        <strong>\( r=\sqrt{(m_x-x)^2+(m_y-y)^2} \)</strong> and
+        <strong
+          >\( \phi = \mathrm{wrap}(\mathrm{atan2}(m_y-y,m_x-x)-\theta)
+          \)</strong
+        >, derive <strong>\( \mathbf{H}_x \)</strong> and
+        <strong>\( \mathbf{H}_m \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Let <strong>\( \Delta x=m_x-x \)</strong>,
+        <strong>\( \Delta y=m_y-y \)</strong>,
+        <strong>\( q=\Delta x^2+\Delta y^2 \)</strong>,
+        <strong>\( r=\sqrt{q} \)</strong>. Then
+        <strong>\( \frac{\partial r}{\partial x}=-\Delta x/r \)</strong>,
+        <strong>\( \frac{\partial r}{\partial y}=-\Delta y/r \)</strong>,
+        <strong>\( \frac{\partial r}{\partial m_x}=\Delta x/r \)</strong>,
+        <strong>\( \frac{\partial r}{\partial m_y}=\Delta y/r \)</strong>. For
+        bearing (ignoring wrap in differentiation),
+        <strong
+          >\( \frac{\partial}{\partial x}\mathrm{atan2}(\Delta y,\Delta
+          x)=\Delta y/q \)</strong
+        >,
+        <strong
+          >\( \frac{\partial}{\partial y}\mathrm{atan2}(\Delta y,\Delta
+          x)=-\Delta x/q \)</strong
+        >, and <strong>\( \frac{\partial \phi}{\partial \theta}=-1 \)</strong>.
+        This yields the matrices in Section 2.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong
+          >Problem 2 (Show the gate is chi-square under the ideal
+          model):</strong
+        >
+        Suppose
+        <strong
+          >\( \boldsymbol{\nu}\sim \mathcal{N}(\mathbf{0},\mathbf{S}) \)</strong
+        >. Prove
+        <strong
+          >\( d^2=\boldsymbol{\nu}^\top\mathbf{S}^{-1}\boldsymbol{\nu}\sim
+          \chi^2_m \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Let <strong>\( \mathbf{S}=\mathbf{A}\mathbf{A}^\top \)</strong> be a
+        Cholesky factorization and define
+        <strong>\( \mathbf{y}=\mathbf{A}^{-1}\boldsymbol{\nu} \)</strong>. Then
+        <strong>\( \mathbf{y}\sim\mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong>
+        and
+      </p>
+      <h4 class="mathJax">
+        \[ d^2 = \boldsymbol{\nu}^\top\mathbf{S}^{-1}\boldsymbol{\nu} =
+        \boldsymbol{\nu}^\top (\mathbf{A}^{-\top}\mathbf{A}^{-1})
+        \boldsymbol{\nu} =
+        (\mathbf{A}^{-1}\boldsymbol{\nu})^\top(\mathbf{A}^{-1}\boldsymbol{\nu})
+        = \mathbf{y}^\top\mathbf{y} = \sum_{i=1}^{m} y_i^2, \]
+      </h4>
+      <p>
+        a sum of squares of <strong>\( m \)</strong> independent standard normal
+        variables, i.e., chi-square with <strong>\( m \)</strong> DOF.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 3 (Covariance augmentation derivation):</strong>
+        Given
+        <strong>\( \mathbf{m}_{\text{new} }=g(\mathbf{x},\mathbf{z}) \)</strong>
+        and linearization
+        <strong
+          >\( \delta\mathbf{m}\approx
+          \mathbf{G}_x\delta\mathbf{x}+\mathbf{G}_z\delta\mathbf{z} \)</strong
+        >, derive <strong>\( \mathbf{P}_{mm} \)</strong> and
+        <strong>\( \mathbf{P}_{xm} \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Using
+        <strong
+          >\(
+          \mathrm{Cov}(\mathbf{A}\mathbf{a}+\mathbf{B}\mathbf{b})=\mathbf{A}\mathrm{Cov}(\mathbf{a})\mathbf{A}^\top
+          + \mathbf{B}\mathrm{Cov}(\mathbf{b})\mathbf{B}^\top \)</strong
+        >
+        for independent <strong>\( \mathbf{a},\mathbf{b} \)</strong>, and
+        independence between prior state error and measurement noise, we obtain:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{mm}=\mathbf{G}_x\mathbf{P}_{rr}\mathbf{G}_x^\top +
+        \mathbf{G}_z\mathbf{R}\mathbf{G}_z^\top. \]
+      </h4>
+      <p>
+        For cross-covariance, let <strong>\( \delta\mathbf{s} \)</strong> be the
+        current state perturbation. Since
+        <strong
+          >\( \delta\mathbf{m}\approx
+          \mathbf{G}_x\delta\mathbf{x}+\mathbf{G}_z\delta\mathbf{z} \)</strong
+        >
+        and <strong>\( \delta\mathbf{z} \)</strong> is independent of
+        <strong>\( \delta\mathbf{s} \)</strong>,
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{xm} = \mathrm{Cov}(\delta\mathbf{s},\delta\mathbf{m})
+        \approx \mathrm{Cov}(\delta\mathbf{s},\delta\mathbf{x})\mathbf{G}_x^\top
+        = \mathbf{P}_{xr}\mathbf{G}_x^\top. \]
+      </h4>
+
+      <hr />
+
+      <p>
+        <strong>Problem 4 (Why Joseph form helps):</strong>
+        Explain why the covariance update
+        <strong
+          >\( \mathbf{P} &larr; (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}^-
+          \)</strong
+        >
+        can lose symmetry/PSD numerically, and how Joseph form mitigates that.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Finite precision arithmetic makes
+        <strong>\( (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}^- \)</strong>
+        slightly asymmetric and can introduce small negative eigenvalues. Joseph
+        form adds the explicitly PSD term
+        <strong>\( \mathbf{K}\mathbf{R}\mathbf{K}^\top \)</strong> and maintains
+        symmetry by constructing <strong>\( \mathbf{P} \)</strong> as a sum of
+        symmetric matrices. In practice, many implementations also symmetrize
+        via
+        <strong
+          >\( \mathbf{P} &larr; \tfrac{1}{2}(\mathbf{P}+\mathbf{P}^\top)
+          \)</strong
+        >.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 5 (Tuning intuition for this lab):</strong>
+        You observe that the filter trajectory looks smooth but is biased away
+        from ground truth. Give two likely causes in
+        <strong>\( \mathbf{Q} \)</strong> and
+        <strong>\( \mathbf{R} \)</strong> tuning, and describe the expected
+        symptom in NIS.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        (i) If <strong>\( \mathbf{R} \)</strong> is too small (overconfident
+        sensor), the filter over-trusts measurements; NIS tends to be too large
+        (frequent gate rejections or inflated innovations). (ii) If
+        <strong>\( \mathbf{Q} \)</strong> is too small (overconfident motion),
+        the filter underestimates pose uncertainty, again inflating NIS because
+        <strong>\( \mathbf{S} \)</strong> is too small. Bias can also arise from
+        systematic errors (e.g., unmodeled control bias), which violate the
+        zero-mean noise assumption.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        You implemented EKF-SLAM in a controlled “small world”: joint-state
+        prediction, landmark initialization with covariance augmentation,
+        statistically gated measurement updates, and quantitative evaluation
+        (RMSE and innovation-based diagnostics). This lab turns the EKF-SLAM
+        equations from Lessons 1–2 into an executable pipeline and prepares you
+        to swap known IDs with a data-association strategy from Lesson 4.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Journal / Conference Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Smith, R., Self, M., &amp; Cheeseman, P. (1990). Estimating uncertain
+        spatial relationships in robotics.
+        <em>Autonomous Robot Vehicles</em> (Springer), 167–193.
+      </li>
+      <li>
+        Durrant-Whyte, H., &amp; Bailey, T. (2006). Simultaneous localization
+        and mapping: Part I.
+        <em>IEEE Robotics &amp; Automation Magazine</em>, 13(2), 99–110.
+      </li>
+      <li>
+        Bailey, T., &amp; Durrant-Whyte, H. (2006). Simultaneous localization
+        and mapping (SLAM): Part II.
+        <em>IEEE Robotics &amp; Automation Magazine</em>, 13(3), 108–117.
+      </li>
+      <li>
+        Julier, S., &amp; Uhlmann, J. (1997). New extension of the Kalman filter
+        to nonlinear systems.
+        <em>Proc. SPIE</em>, 3068, 182–193.
+      </li>
+      <li>
+        Huang, G., Mourikis, A., &amp; Roumeliotis, S. (2010). A first-estimates
+        Jacobian EKF for improving SLAM consistency.
+        <em>International Symposium on Experimental Robotics</em>.
+      </li>
+      <li>
+        Bar-Shalom, Y., Li, X.-R., &amp; Kirubarajan, T. (2001). Estimation with
+        Applications to Tracking and Navigation.
+        <em>Wiley</em>. (Foundational NIS/NEES and gating results used in this
+        lab.)
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter11/Lesson4.html">
+          Lesson 4: Data Association Challenges
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter12/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Pose Graphs and Factor Graphs
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="active-lesson" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

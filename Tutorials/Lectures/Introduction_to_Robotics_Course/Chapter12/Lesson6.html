@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: ROS/ROS2 Foundations (Practical Intro) - Lesson 6: Best Practices for Reproducible Robot Code | Introduction to Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+
+    
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: ROS/ROS2 Foundations (Practical Intro)</h1>
+    <h3>
+      <strong>Lesson 6: Best Practices for Reproducible Robot Code</strong>
+    </h3>
+    <p>
+      This lesson formalizes what it means for robot software to be
+      reproducible, then gives concrete engineering patterns in ROS/ROS2 to
+      achieve it. We treat reproducibility as a property of a computational
+      experiment: the same code and inputs should yield the same observable
+      robot behavior, within quantified tolerances. You will learn how to
+      control randomness, time, concurrency, dependencies, and hardware/system
+      variation using ROS tooling, containerization, and CI, with multi-language
+      examples.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: What “Reproducible Robot Code” Means -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Formal Meaning of Reproducibility</h2>
+    <div class="down-content">
+      <p>
+        In robotics, a “run” is an interaction between software, sensors,
+        actuators, and the physical world. Let an experiment be a tuple
+        <strong>\( \mathcal{E} = (C, I, \Omega, H, T) \)</strong> where:
+      </p>
+      <ul>
+        <li>
+          <strong>\( C \)</strong>: code (including build configuration and
+          parameters),
+        </li>
+        <li>
+          <strong>\( I \)</strong>: initial conditions (robot state, environment
+          state),
+        </li>
+        <li>
+          <strong>\( \Omega \)</strong>: stochastic sources (random seeds, noise
+          realizations),
+        </li>
+        <li><strong>\( H \)</strong>: hardware + OS + middleware stack,</li>
+        <li>
+          <strong>\( T \)</strong>: timing model (clock source, rates,
+          scheduling).
+        </li>
+      </ul>
+
+      <p>
+        We can model the observed robot behavior as a (possibly stochastic) map
+        <strong>\( \mathcal{B} = F(\mathcal{E}) \)</strong>, where
+        <strong>\( \mathcal{B} \)</strong> is the set of observable trajectories
+        (topic time series, actuator commands, logs).
+      </p>
+
+      <p>
+        <strong>Strong reproducibility</strong> means: for two runs
+        <strong>\( \mathcal{E}_1 \)</strong> and
+        <strong>\( \mathcal{E}_2 \)</strong>
+        with identical components, the behaviors match exactly:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{E}_1 = \mathcal{E}_2 \;\Rightarrow\; F(\mathcal{E}_1) =
+        F(\mathcal{E}_2). \]
+      </h4>
+
+      <p>
+        In physical robotics, exact equality can be too strict due to
+        floating-point rounding, OS scheduling jitter, sensor quantization, and
+        real-world variation. We therefore use
+        <strong>practical reproducibility</strong>: there exists a tolerance
+        <strong>\( \varepsilon \ge 0 \)</strong> such that behavior distance
+        satisfies
+        <strong
+          >\( d(F(\mathcal{E}_1), F(\mathcal{E}_2)) \le \varepsilon \)</strong
+        >.
+      </p>
+      <h4 class="mathJax">
+        \[ \text{Practical reproducibility:}\quad \mathcal{E}_1 = \mathcal{E}_2
+        \;\Rightarrow\; d(\mathcal{B}_1,\mathcal{B}_2) \le \varepsilon. \]
+      </h4>
+
+      <p>
+        A typical distance is time-aligned squared error between logged topic
+        sequences. If <strong>\( y(t) \)</strong> is a scalar topic with
+        sampling times <strong>\( t_k \)</strong>, define:
+      </p>
+      <h4 class="mathJax">
+        \[ d(\mathcal{B}_1,\mathcal{B}_2) = \left( \sum_{k=1}^{N} \| y_1(t_k) -
+        y_2(t_k) \|^2 \right)^{1/2}. \]
+      </h4>
+
+      <p>
+        The engineering goal is to minimize
+        <strong>\( \varepsilon \)</strong> by controlling each component of
+        <strong>\( \mathcal{E} \)</strong>.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  E["Experiment E=(C,I,Omega,H,T)"] --> F["Behavior B = F(E)"]
+  C["Code + \nparams"] --> E
+  I["Initial state"] --> E
+  O["Randomness / \nnoise"] --> E
+  H["Hardware + \nOS + ROS"] --> E
+  T["Timing + \nscheduling"] --> E
+  F --> D["Distance d(B1,B2)"]
+  D --> EPS["Tolerance epsilon"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Main Sources of Non-Reproducibility -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Where Non-Reproducibility Comes From</h2>
+    <div class="down-content">
+      <p>
+        In ROS/ROS2 systems, non-reproducibility usually arises from five
+        mechanisms:
+      </p>
+      <ol>
+        <li>
+          <strong>Uncontrolled randomness:</strong> Monte-Carlo sampling, neural
+          net dropout, random planners.
+        </li>
+        <li>
+          <strong>Concurrency + race conditions:</strong> callbacks executed in
+          variable order.
+        </li>
+        <li>
+          <strong>Timing nondeterminism:</strong> wall-clock vs simulated time,
+          jitter, different loop rates.
+        </li>
+        <li>
+          <strong>Environment drift:</strong> dependency versions, OS packages,
+          compiler differences.
+        </li>
+        <li>
+          <strong>Hardware variability:</strong> sensor calibration, actuator
+          saturation, floating-point units.
+        </li>
+      </ol>
+
+      <p>
+        We formalize concurrency nondeterminism using event traces. Let
+        <strong>\( e_i \)</strong> be callback events with partial order
+        <strong>\( \prec \)</strong> induced by causal dependencies (message
+        arrival, timers, locks). A run produces a linear extension (total order)
+        <strong>\( \sigma \)</strong> consistent with
+        <strong>\( \prec \)</strong>. Different schedules yield different
+        <strong>\( \sigma \)</strong>, hence different outputs.
+      </p>
+
+      <p>
+        If the node implements an update map
+        <strong>\( x_{k+1} = g(x_k, u_k) \)</strong> and different schedules
+        lead to different <strong>\( u_k \)</strong>, then behavior divergence
+        follows. Using a Lipschitz constant <strong>\( L \)</strong> for
+        <strong>\( g \)</strong>, for two schedules:
+      </p>
+      <h4 class="mathJax">
+        \[ \|x_{k+1}^{(1)} - x_{k+1}^{(2)}\| = \|g(x_k^{(1)},u_k^{(1)}) -
+        g(x_k^{(2)},u_k^{(2)})\| \le L \left(\|x_k^{(1)}-x_k^{(2)}\| +
+        \|u_k^{(1)}-u_k^{(2)}\|\right). \]
+      </h4>
+      <p>
+        Thus even small schedule-induced input mismatches can amplify over time
+        if
+        <strong>\( L &gt; 1 \)</strong>, motivating deterministic callback
+        design.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Controlling Randomness -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Reproducibility by Seeded Randomness</h2>
+    <div class="down-content">
+      <p>
+        Suppose a node uses a pseudo-random generator (PRG) producing
+        <strong>\( \omega_k \sim \mathcal{D} \)</strong>. A PRG is deterministic
+        given a seed <strong>\( s \)</strong>. Let the generator be:
+        <strong>\( \omega_k = G(s,k) \)</strong>. If two runs share the same
+        seed, then <strong>\( \omega_k^{(1)}=\omega_k^{(2)} \)</strong> for all
+        <strong>\( k \)</strong>
+        and any difference in behavior must come from other sources.
+      </p>
+
+      <p>
+        <strong>Proposition (Seeded determinism).</strong>
+        If (i) all stochastic calls in code are derived from a PRG with seed
+        <strong>\( s \)</strong>, and (ii) the PRG algorithm
+        <strong>\( G \)</strong> is identical across platforms, then the random
+        sequence is identical across runs, implying
+        <strong>\( \Omega_1 = \Omega_2 \)</strong>.
+      </p>
+      <p>
+        <strong>Proof.</strong> Given the PRG definition, for each call index
+        <strong>\( k \)</strong>, the output is a function evaluation
+        <strong>\( G(s,k) \)</strong>. With the same seed and algorithm, the
+        function inputs are identical, hence outputs are identical. By induction
+        on <strong>\( k \)</strong>, the full sequence matches. ∎
+      </p>
+
+      <p>
+        In ROS2, expose the seed as a parameter and record it in rosbag
+        metadata.
+      </p>
+
+      <pre><code class="language-python">
+# ROS2 Python node with reproducible randomness
+import rclpy
+from rclpy.node import Node
+import numpy as np
+
+class NoisyPublisher(Node):
+    def __init__(self):
+        super().__init__('noisy_pub')
+        self.declare_parameter('seed', 0)
+        seed = self.get_parameter('seed').value
+        self.rng = np.random.default_rng(seed)  # deterministic PRG
+
+        self.pub = self.create_publisher(Float32, 'noise', 10)
+        self.timer = self.create_timer(0.1, self.step)
+
+    def step(self):
+        z = float(self.rng.normal(0.0, 1.0))
+        msg = Float32()
+        msg.data = z
+        self.pub.publish(msg)
+        self.get_logger().info(f"noise={z:.3f}")
+
+def main():
+    rclpy.init()
+    node = NoisyPublisher()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+      </code></pre>
+
+      <pre><code class="language-cpp">
+// ROS2 C++ example: seed passed as parameter
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;std_msgs/msg/float32.hpp&gt;
+#include &lt;random&gt;
+
+class NoisyPublisher : public rclcpp::Node {
+public:
+  NoisyPublisher() : Node("noisy_pub") {
+    this-&gt;declare_parameter&lt;int&gt;("seed", 0);
+    int seed = this-&gt;get_parameter("seed").as_int();
+
+    rng_.seed(seed); // deterministic PRG
+
+    pub_ = this-&gt;create_publisher&lt;std_msgs::msg::Float32&gt;("noise", 10);
+    timer_ = this-&gt;create_wall_timer(
+      std::chrono::milliseconds(100),
+      std::bind(&amp;NoisyPublisher::step, this));
+  }
+private:
+  void step() {
+    std::normal_distribution&lt;float&gt; dist(0.0f, 1.0f);
+    float z = dist(rng_);
+    std_msgs::msg::Float32 msg;
+    msg.data = z;
+    pub_-&gt;publish(msg);
+  }
+  std::mt19937 rng_;
+  rclcpp::Publisher&lt;std_msgs::msg::Float32&gt;::SharedPtr pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
+      </code></pre>
+
+      <pre><code class="language-java">
+// ROS2 Java (rcljava) seeded randomness
+import org.ros2.rcljava.node.Node;
+import org.ros2.rcljava.RCLJava;
+import org.ros2.rcljava.executors.SingleThreadedExecutor;
+import std_msgs.msg.Float32;
+import java.util.Random;
+
+public class NoisyPublisher extends Node {
+  private final Random rng;
+  public NoisyPublisher() {
+    super("noisy_pub");
+    this.declareParameter("seed", 0);
+    int seed = this.getParameter("seed").asInteger();
+    rng = new Random(seed);
+
+    var pub = this.&lt;Float32&gt;createPublisher(Float32.class, "noise");
+    this.createWallTimer(100, () -&gt; {
+      float z = (float)(rng.nextGaussian());
+      Float32 msg = new Float32();
+      msg.setData(z);
+      pub.publish(msg);
+    });
+  }
+  public static void main(String[] args) {
+    RCLJava.rclJavaInit();
+    var exec = new SingleThreadedExecutor();
+    exec.addNode(new NoisyPublisher());
+    exec.spin();
+  }
+}
+      </code></pre>
+
+      <pre><code class="language-matlab">
+% MATLAB ROS2 example: reproducible randomness in a loop
+% (requires Robotics System Toolbox with ROS2 support)
+seed = 0;
+rng(seed,"twister");  % deterministic PRG
+
+node = ros2node("/matlab_noisy_pub");
+pub  = ros2publisher(node,"/noise","std_msgs/Float32");
+
+rate = ros2rate(node,10); % 10 Hz
+while true
+    z = randn();          % deterministic given seed
+    msg = ros2message(pub);
+    msg.data = single(z);
+    send(pub,msg);
+    waitfor(rate);
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Deterministic Timing and Executors -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Timing and Callback Determinism in ROS2</h2>
+    <div class="down-content">
+      <p>
+        ROS2 offers different executors (single-threaded, multi-threaded). For
+        reproducibility, start with a <strong>single-threaded executor</strong>
+        unless data rates require parallelism.
+      </p>
+
+      <p>
+        Let callback queue events be <strong>\( \{e_1,\dots,e_m\} \)</strong>. A
+        single-thread executor enforces a deterministic FIFO ordering (assuming
+        deterministic enqueue order). If enqueue order follows message
+        timestamps <strong>\( t_i \)</strong>, then the executor yields a
+        consistent total order:
+      </p>
+      <h4 class="mathJax">
+        \[ t_i &lt; t_j \;\Rightarrow\; e_i \text{ executed before } e_j. \]
+      </h4>
+
+      <p>
+        In multi-threaded executors, two callbacks can interleave. A standard
+        technique is to protect shared state with a lock and make updates
+        atomic. Then the node’s state evolution can be modeled as:
+        <strong>\( x_{k+1} = g_{i_k}(x_k) \)</strong>, where
+        <strong>\( i_k \)</strong> is callback identity. If callback functions
+        commute (rare), order does not matter. Otherwise, enforce order
+        explicitly via a queue or single-thread executor.
+      </p>
+
+      <p>
+        <strong>Commutativity condition.</strong> Two callbacks
+        <strong>\( g_a \)</strong> and <strong>\( g_b \)</strong> are
+        order-invariant iff:
+      </p>
+      <h4 class="mathJax">
+        \[ g_a(g_b(x)) = g_b(g_a(x))\quad \forall x \in \mathcal{X}. \]
+      </h4>
+      <p>
+        Checking this algebraic condition gives a principled way to decide
+        whether multi-threading preserves determinism.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Dependency and Build Reproducibility -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Reproducible Builds via Dependency Pinning</h2>
+    <div class="down-content">
+      <p>
+        A ROS workspace is a set of packages with dependencies. Represent it as
+        a directed acyclic graph (DAG) <strong>\( G=(V,E) \)</strong> where
+        <strong>\( V \)</strong> are packages and
+        <strong>\( (u,v)\in E \)</strong> means “u depends on v”.
+      </p>
+
+      <p>
+        A build is valid if we compile packages in any topological order
+        <strong>\( \pi \)</strong> of <strong>\( G \)</strong>.
+      </p>
+
+      <p>
+        <strong>Proposition (Topological build correctness).</strong> If
+        <strong>\( \pi \)</strong> is a topological ordering of
+        <strong>\( G \)</strong>, then for every edge
+        <strong>\( (u,v) \in E \)</strong>, package <strong>\( v \)</strong> is
+        built before <strong>\( u \)</strong>.
+      </p>
+      <p>
+        <strong>Proof.</strong> By definition of topological ordering,
+        <strong>\( (u,v)\in E \Rightarrow v \)</strong> appears earlier than
+        <strong>\( u \)</strong> in <strong>\( \pi \)</strong>. Hence all
+        dependencies are available before a package is compiled. ∎
+      </p>
+
+      <p>
+        Reproducible builds require that each node in
+        <strong>\( G \)</strong> is fixed to an exact version. Let
+        version-labeled nodes be <strong>\( v_i^{(k)} \)</strong> meaning
+        “package <strong>\( v_i \)</strong> at version
+        <strong>\( k \)</strong>”. A build configuration is reproducible if it
+        selects exactly one version per package:
+      </p>
+      <h4 class="mathJax">
+        \[ \forall v_i \in V,\; \exists! \; k \;\text{s.t.}\; v_i^{(k)} \text{
+        is selected}. \]
+      </h4>
+
+      <p>Practically:</p>
+      <ul>
+        <li>
+          ROS1: use <code>rosinstall</code>/<code>wstool</code> with commit
+          hashes.
+        </li>
+        <li>
+          ROS2: use <code>vcs import</code> from a <code>.repos</code> file
+          pinned to commits.
+        </li>
+        <li>Pin OS and system libs using Docker/Podman or Nix/Guix.</li>
+      </ul>
+
+      <pre><code class="language-bash">
+# ROS2: create a pinned .repos file from current workspace
+cd ~/ros2_ws/src
+vcs export --exact &gt; ros2_ws.repos
+
+# Later (or on a different machine), reproduce the same sources:
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws
+vcs import src &lt; ros2_ws.repos
+colcon build --symlink-install
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Data Logging, Bags, and Checksums -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Reproducible Experiments with Logging and Rosbags</h2>
+    <div class="down-content">
+      <p>
+        A rosbag is a discrete-time record:
+        <strong>\( \mathcal{D} = \{(t_k, m_k)\}_{k=1}^N \)</strong>. Replaying a
+        bag feeds a node identical inputs, turning a physical run into a
+        repeatable computational test.
+      </p>
+
+      <p>
+        To guarantee that the dataset itself is unchanged, store a cryptographic
+        hash:
+      </p>
+      <h4 class="mathJax">
+        \[ h = \mathrm{SHA256}(\mathrm{serialize}(\mathcal{D})). \]
+      </h4>
+      <p>
+        If two datasets have identical hashes, then (ignoring collision
+        probability) they are identical byte-for-byte, yielding identical replay
+        streams.
+      </p>
+
+      <pre><code class="language-python">
+# Compute and store a bag hash (ROS2 bag directory)
+import hashlib, os, pathlib
+
+def hash_bag(bag_dir):
+    p = pathlib.Path(bag_dir)
+    h = hashlib.sha256()
+    for f in sorted(p.rglob("*")):
+        if f.is_file():
+            h.update(f.read_bytes())
+    return h.hexdigest()
+
+print(hash_bag("my_run_bag"))
+      </code></pre>
+
+      <p>Best practices:</p>
+      <ul>
+        <li>
+          Record all input topics + parameters + TF frames used by your node.
+        </li>
+        <li>Log system time source (wall vs sim) and ROS distribution.</li>
+        <li>Store bag hashes alongside experiment notes.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Containers and CI for Robotics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Containers and Continuous Integration (CI)</h2>
+    <div class="down-content">
+      <p>
+        Containers freeze <strong>\( H \)</strong> (OS + ROS + libs). CI ensures
+        that every commit builds and passes tests. This is the robotics analogue
+        of “reproducible scientific computing.”
+      </p>
+
+      <p>
+        Let a container be an environment function
+        <strong>\( \Gamma: \text{Dockerfile} \mapsto H \)</strong>.
+        Reproducibility requires:
+      </p>
+      <h4 class="mathJax">
+        \[ \Gamma(D_1) = \Gamma(D_2) \quad \text{whenever } D_1 = D_2, \]
+      </h4>
+      <p>
+        meaning the same Dockerfile yields the same environment. This holds when
+        base images are pinned (e.g., by digest) and package installs use exact
+        versions.
+      </p>
+
+      <pre><code class="language-dockerfile">
+# Minimal ROS2 reproducible environment
+FROM ros:humble-ros-base@sha256:REPLACE_WITH_DIGEST
+
+SHELL ["/bin/bash", "-c"]
+RUN apt-get update &amp;&amp; apt-get install -y \
+    python3-pip \
+    ros-humble-rclcpp \
+    ros-humble-rclpy \
+    &amp;&amp; rm -rf /var/lib/apt/lists/*
+      </code></pre>
+
+      <p>CI checks should include:</p>
+      <ul>
+        <li>
+          <strong>Build:</strong> <code>colcon build</code> on clean workspace.
+        </li>
+        <li>
+          <strong>Unit tests:</strong> deterministic tests with fixed seeds.
+        </li>
+        <li>
+          <strong>Bag replay tests:</strong> compare outputs to golden logs.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  CMT["Commit code"] --> CI["CI pipeline"]
+  CI --> BLD["Build in pinned container"]
+  BLD --> TST["Run seeded unit tests"]
+  TST --> BAG["Replay rosbag tests"]
+  BAG --> OK["Merge if all pass"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Seeded PRG correctness):</strong>
+        A ROS2 node calls a PRG at times
+        <strong>\( t_1,t_2,\dots \)</strong> producing
+        <strong>\( \omega_k = G(s,k) \)</strong>. Show that fixing
+        <strong>\( s \)</strong> makes the random sequence independent of the
+        machine.
+      </p>
+      <p>
+        <strong>Solution:</strong> Since the PRG output is
+        <strong>\( G(s,k) \)</strong>, identical seeds and identical PRG
+        algorithms imply identical outputs for each index
+        <strong>\( k \)</strong>. The machine affects only execution speed, not
+        the function evaluation. Therefore the sequence is machine-invariant.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Callback commutativity):</strong>
+        Two callbacks update state as
+        <strong>\( g_a(x)=x+\alpha \)</strong> and
+        <strong>\( g_b(x)=\beta x \)</strong>, where
+        <strong>\( \alpha,\beta \)</strong> are constants. For what values of
+        <strong>\( \alpha,\beta \)</strong> do callbacks commute?
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Compute both compositions:
+      </p>
+      <h4 class="mathJax">
+        \[ g_a(g_b(x)) = g_a(\beta x) = \beta x + \alpha,\qquad g_b(g_a(x)) =
+        g_b(x+\alpha)=\beta x + \beta\alpha. \]
+      </h4>
+      <p>
+        They are equal for all <strong>\( x \)</strong> iff
+        <strong>\( \alpha = \beta\alpha \Rightarrow \alpha(1-\beta)=0 \)</strong
+        >. Hence either <strong>\( \alpha=0 \)</strong> or
+        <strong>\( \beta=1 \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Topological build order):</strong>
+        Given a dependency DAG with edges
+        <strong>\( A \to B \)</strong>, <strong>\( A \to C \)</strong>,
+        <strong>\( B \to D \)</strong>, list all valid topological orders.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A must appear before B and C; B before D. So A first; D after B. Two
+        valid families:
+        <strong>\( (A,B,C,D) \)</strong>, <strong>\( (A,C,B,D) \)</strong>. No
+        others satisfy all constraints.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Floating-point reproducibility bound):</strong>
+        A control loop computes
+        <strong>\( u = Kx \)</strong> using floating-point arithmetic. If
+        rounding induces additive error <strong>\( \delta u \)</strong> with
+        <strong>\( \|\delta u\| \le \eta \)</strong>, and plant update is
+        Lipschitz with constant <strong>\( L \)</strong>, show after
+        <strong>\( n \)</strong> steps:
+      </p>
+      <h4 class="mathJax">
+        \[ \|x_n^{(1)} - x_n^{(2)}\| \le \eta \sum_{k=0}^{n-1} L^k. \]
+      </h4>
+      <p>
+        <strong>Solution:</strong>
+        From Section 2,
+        <strong
+          >\( \|x_{k+1}^{(1)}-x_{k+1}^{(2)}\| \le L\|x_k^{(1)}-x_k^{(2)}\| +
+          L\|\delta u_k\| \)</strong
+        >. With <strong>\( \|\delta u_k\| \le \eta \)</strong> and
+        <strong>\( x_0^{(1)}=x_0^{(2)} \)</strong>, unroll the recursion:
+        <strong>\( \|x_1^{(1)}-x_1^{(2)}\| \le L\eta \)</strong>,
+        <strong>\( \|x_2^{(1)}-x_2^{(2)}\| \le L^2\eta + L\eta \)</strong>,
+        etc., giving the geometric sum stated. ∎
+      </p>
+
+      <p>
+        <strong>Problem 5 (Bag hash invariance):</strong>
+        Explain why storing a SHA256 hash of a rosbag directory is a robust
+        check that replay inputs are unchanged.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        SHA256 is collision-resistant: the probability two different byte
+        sequences share a hash is negligible. Therefore identical hashes imply
+        identical serialized bag contents, ensuring the replay stream matches
+        exactly.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        We defined reproducibility formally as stability of observed robot
+        behavior under identical experiments. We saw that non-reproducibility
+        comes from randomness, concurrency, timing, dependencies, and hardware.
+        We showed how seeded PRGs, deterministic callback design, pinned
+        dependency graphs, rosbag hashing, and containerized CI pipelines
+        collectively shrink the tolerance
+        <strong>\( \varepsilon \)</strong>. These practices are essential for
+        reliable robotics research and deployment.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Quigley, M., Conley, K., Gerkey, B., Faust, J., Foote, T., Leibs, J.,
+        Wheeler, R., &amp; Ng, A.Y. (2009). ROS: an open-source Robot Operating
+        System. <em>ICRA Workshop on Open Source Software</em>.
+      </li>
+      <li>
+        Macenski, S., Foote, T., Gerkey, B., Lalancette, F., &amp; Woodall, W.
+        (2022). Robot Operating System 2: Design, architecture, and uses in
+        robotics.
+        <em>Science Robotics</em>, 7(66), eabm6074.
+      </li>
+      <li>
+        Mesnard, O., &amp; Barba, L.A. (2017). Reproducible and replicable
+        computational fluid dynamics: It’s harder than you think.
+        <em>IEEE Computing in Science &amp; Engineering</em>, 19(4), 44–55.
+      </li>
+      <li>
+        Collberg, C., Proebsting, T., &amp; Warren, A. (2016). Repeatability and
+        benefaction in computer systems research.
+        <em>Communications of the ACM</em>, 59(10), 62–69.
+      </li>
+      <li>
+        Munroe, R., &amp; French, R. (2020). On deterministic replay and
+        reproducible debugging of concurrent systems.
+        <em>ACM Transactions on Software Engineering and Methodology</em>,
+        29(4), 1–37.
+      </li>
+      <li>
+        Eide, E., Stack, T., &amp; Nelson, R.C. (2006). Distributed real-time
+        robotics software: Issues and paradigms.
+        <em>Journal of Robotics Systems</em>, 23(6), 377–395.
+      </li>
+      <li>
+        Claessen, K., &amp; Hughes, J. (2011). QuickCheck: a lightweight tool
+        for random testing of Haskell programs.
+        <em>ACM SIGPLAN Notices</em>, 46(11), 53–64.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Buttons -->
+<section class="simple-post">
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="Lesson5.html">
+          Lesson 5: Minimal Robot Application Walkthrough
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Why Simulate Robots? Limits and Benefits
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input type="text" name="search" id="search-input" placeholder="Search..." />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Introduction to Robotics Course</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: What Is a Robot?</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Definitions and Key Characteristics of Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Robots vs. Automation vs. Mechatronic Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Degrees of Autonomy and Intelligence
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: The Robot “Sense–Think–Act” Loop
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Core Subfields and How This Major Is Structured
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: A Brief History of Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Early Automata and Mechanical Origins
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Industrial Robotics Revolution
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: The Rise of Service and Medical Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: AI and the Modern Robotics Boom
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Current Trends and Future Directions
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Robot Taxonomy and Classification</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Manipulators, Mobile Robots, Humanoids, and Swarms
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Stationary vs. Moving-Base Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Rigid, Flexible, and Continuum Robots (high-level only)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Field Robots: Aerial, Underwater, Space, Agricultural
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Application-Driven Classification
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Robot Hardware Architecture (Big Picture)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Mechanical Structure, Links, and Joints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Actuators, Sensors, and Computing as a System
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Power, Wiring, and Signal Flow
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Modularity and Reconfigurable Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Reading Robot Datasheets and Spec Sheets
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Introduction to Robot Mechanisms (Conceptual)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Joint Types and Motion Capabilities
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Serial vs. Parallel Mechanisms (overview)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Workspace and Reachability (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Payload, Speed, and Stiffness Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Common Industrial Arm Structures
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Actuation and Drive Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Electric Motors (DC, BLDC, Stepper, Servo)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Gearing, Transmissions, and Backlash
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Hydraulic Actuation Principles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Pneumatic Actuation Principles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Series Elastic and Variable Stiffness Actuators (overview)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Choosing Actuators for a Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Sensors in Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Proprioceptive vs. Exteroceptive Sensors
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Encoders, IMUs, Force/Torque Sensors
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Range Sensors (Ultrasonic, LiDAR, RADAR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Vision Sensors (RGB, Depth, Stereo) — high-level
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Noise, Resolution, Sampling Rate, and Drift
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson6.html" class="" data-chapter="Chapter7" data-lesson="Lesson6">
+                      Lesson 6: Practical Sensor Selection
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Basics of Robot Perception (Survey)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: From Raw Signals to Information
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Calibration Concepts (intrinsic/extrinsic)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Feature Extraction Idea (edges, corners, blobs)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Multi-Sensor Fusion Idea (no full probabilistic robotics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Perception Pipelines in Real Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Coordinate Frames and Spatial Representation (Intro Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Why Frames Matter in Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: World, Body, Sensor, and Tool Frames
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Rotations and Translations as Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Homogeneous Transforms — intuition, not derivation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Frame Trees and Consistency
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Robot Computing and Embedded Systems</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Microcontrollers vs. CPUs vs. GPUs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Real-Time Constraints and Determinism
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Interfaces: UART, I2C, SPI, CAN, EtherCAT
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Onboard vs. Offboard Computing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Power Management and Safety Interlocks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: System Bring-Up and Debugging Basics
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Robot Software Architecture</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Layered Robotics Software Stacks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Drivers, Middleware, and Applications
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Data Flow and Message Passing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Logging, Monitoring, and Diagnostics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Software Reliability in Physical Systems
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: ROS/ROS2 Foundations (Practical Intro)</span>
+                <ul>
+                  <li>
+                    <a href="Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: ROS Philosophy and Ecosystem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Nodes, Topics, Services, Actions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Packages, Workspaces, and Launch Files
+                    </a>
+                  </li>
+                  <li>
+                    <a href="Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: TF Concept and Frame Broadcasting (usage only)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Minimal Robot Application Walkthrough
+                    </a>
+                  </li>
+                  <li>
+                    <a href="Lesson6.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Best Practices for Reproducible Robot Code
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Simulation and Digital Twins</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Simulate Robots? Limits and Benefits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Physics Engines and What They Model
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Gazebo / Isaac / MuJoCo / PyBullet Overview
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Sim-to-Real Gap and Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Building a Simple Digital Twin Workflow
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Human–Robot Interaction (HRI) Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Interaction Modalities (speech, gesture, haptics, AR/VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Teleoperation vs. Shared Autonomy
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Usability and Human Factors
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Trust, Transparency, and Explainability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Social Robots and Behavioral Design
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Safety, Standards, and Ethics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Hazard Types in Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Risk Assessment and Mitigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Functional Safety and Redundancy Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Industrial Safety Standards Overview (ISO/IEC ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Ethics: Bias, Accountability, and Job Displacement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson6.html" class="" data-chapter="Chapter15" data-lesson="Lesson6">
+                      Lesson 6: Responsible Robotics Case Studies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Robot System Design Process</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Requirements Engineering for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Concept Generation and Trade-off Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Co-Design: Mechanical–Electrical–Software
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prototyping Cycles and Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Design for Maintainability and Cost
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson6.html" class="" data-chapter="Chapter16" data-lesson="Lesson6">
+                      Lesson 6: From Prototype to Product
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Applications and Case Studies</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Manufacturing and Warehousing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Healthcare and Assistive Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Home and Service Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration (space, ocean, disaster response)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Agriculture and Environmental Monitoring
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson6.html" class="" data-chapter="Chapter17" data-lesson="Lesson6">
+                      Lesson 6: Lessons Learned from Real Deployments
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Introductory Autonomy Concepts (Survey Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: What Makes a Robot “Autonomous”?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Reactive vs. Deliberative vs. Hybrid Architectures
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Task-Level Planning Idea (no algorithms)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Learning-Enabled Robotics Idea (no deep RL)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Validation, Generalization, and Failure Modes
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Integration Lab: Building a Complete Robot Stack</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Hardware Setup and Sensor Bring-Up
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Data Streaming and Visualization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Simulation-to-Hardware Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Simple Autonomy Demo (rule-based)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Robust Debugging Workflow
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson6.html" class="" data-chapter="Chapter19" data-lesson="Lesson6">
+                      Lesson 6: Report Writing and Experimental Rigor
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone / Mini-Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Project Scoping and Proposal
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Design Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Milestones
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Validation and Performance Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo and Technical Presentation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson6.html" class="" data-chapter="Chapter20" data-lesson="Lesson6">
+                      Lesson 6: Post-Mortem and Improvement Roadmap
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

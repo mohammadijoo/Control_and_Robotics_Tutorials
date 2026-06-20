@@ -1,0 +1,1794 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 13: Safety-Critical Robot Control (Technical Layer Only) - Lesson 4: Safe Control Under Input Limits | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</h1>
+    <h3><strong>Lesson 4: Safe Control Under Input Limits</strong></h3>
+    <p>
+      This lesson develops safety-critical feedback laws for robots when
+      actuator commands are bounded (torque, force, voltage, or rate
+      saturations). We place input limits explicitly into the
+      control-barrier-function (CBF) framework, analyze feasibility of safety
+      constraints under bounded inputs, and construct control laws and quadratic
+      programs (QPs) that guarantee safety whenever the CBF constraints remain
+      feasible inside the admissible input set.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Motivation and Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Motivation: Safety Meets Actuator Limits</h2>
+    <div class="down-content">
+      <p>
+        In previous lessons of this chapter, you learned how control barrier
+        functions (CBFs) enforce forward invariance of a safe set
+        <strong>\( \mathcal{C} = \{ x \mid h(x) \ge 0 \} \)</strong> for
+        control-affine robot models
+        <strong>\( \dot{x} = f(x) + g(x)u \)</strong>. Those results typically
+        assumed that any control input
+        <strong>\( u \in \mathbb{R}^m \)</strong> is available. Real robots,
+        however, obey actuator limits:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{U} = \{ u \in \mathbb{R}^m \mid u_{\min} \le u \le u_{\max}
+        \}, \]
+      </h4>
+      <p>
+        where inequalities are understood componentwise. If the CBF-based
+        constraint requires an input
+        <strong>\( u \)</strong> outside <strong>\( \mathcal{U} \)</strong>, the
+        CBF-QP becomes infeasible, and your actual saturated controller may
+        violate safety.
+      </p>
+      <p>
+        Conceptually, safe control under input limits comes down to three
+        questions:
+      </p>
+      <ul>
+        <li>
+          For which states <strong>\( x \)</strong> does there exist an input
+          <strong>\( u \in \mathcal{U} \)</strong> that satisfies the CBF
+          inequality?
+        </li>
+        <li>
+          How do we design the CBF (and the safe set) so that this feasible
+          region is large enough for the robot's intended tasks?
+        </li>
+        <li>
+          How do we implement a controller that <em>never</em> commands inputs
+          outside <strong>\( \mathcal{U} \)</strong>, while remaining as close
+          as possible to a nominal performance-oriented input
+          <strong>\( u_{\text{des}}(x) \)</strong>?
+        </li>
+      </ul>
+      <p>
+        The following diagram summarizes the typical safety-critical loop with
+        input limits, where the CBF-QP (or its closed-form equivalent) acts as a
+        <em>safety filter</em> on top of a nominal controller:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  X["State x_k"] --> UDES["Nominal input u_des(x_k)"]
+  UDES --> CBF["Compute barrier constraint from h(x_k)"]
+  CBF --> BOX["Intersect with actuator box U"]
+  BOX --> PROJ["Project u_des into admissible set"]
+  PROJ --> APPLY["Apply safe input u_k to robot"]
+  APPLY --> XNEXT["Next state x_{k+1}"]
+  XNEXT --> X
+        </pre>
+      </div>
+      <p>
+        In the rest of this lesson, we make this loop mathematically precise,
+        derive key feasibility conditions, and implement the resulting safety
+        filter in several programming languages.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: System Model, Safe Set, and Input Constraints -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. System Model with Input Constraints</h2>
+    <div class="down-content">
+      <p>
+        We adopt the now-standard control-affine model for robot control at the
+        state level:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{x} = f(x) + g(x)u, \quad x \in \mathbb{R}^n,\; u \in
+        \mathbb{R}^m, \]
+      </h4>
+      <p>
+        where <strong>\( f \)</strong> and <strong>\( g \)</strong> are locally
+        Lipschitz. The safe set is given by a continuously differentiable
+        barrier function <strong>\( h:\mathbb{R}^n \to \mathbb{R} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{C} = \{ x \in \mathbb{R}^n \mid h(x) \ge 0 \}. \]
+      </h4>
+      <p>
+        Recall from Lesson 1 that <strong>\( h \)</strong> is a (zeroing)
+        control barrier function if there exists an extended
+        class-\(\mathcal{K}\) function <strong>\( \alpha \)</strong> such that
+        for all <strong>\( x \)</strong> in a domain
+        <strong>\( \mathcal{D} \supset \mathcal{C} \)</strong>,
+      </p>
+      <h4 class="mathJax">
+        \[ \sup_{u \in \mathbb{R}^m} \left\{ L_f h(x) + L_g h(x)u \right\} +
+        \alpha\big(h(x)\big) \ge 0, \]
+      </h4>
+      <p>
+        where
+        <strong>\( L_f h(x) = \frac{\partial h}{\partial x}(x) f(x) \)</strong>
+        and
+        <strong>\( L_g h(x) = \frac{\partial h}{\partial x}(x) g(x) \)</strong>.
+        Under this condition, any feedback law satisfying
+      </p>
+      <h4 class="mathJax">
+        \[ L_f h(x) + L_g h(x)u(x) + \alpha\big(h(x)\big) \ge 0 \]
+      </h4>
+      <p>
+        for all <strong>\( x \in \mathcal{C} \)</strong> renders
+        <strong>\( \mathcal{C} \)</strong>
+        forward invariant.
+      </p>
+      <p>Now we introduce componentwise actuator constraints:</p>
+      <h4 class="mathJax">
+        \[ \mathcal{U} = \{ u \in \mathbb{R}^m \mid u_{\min} \le u \le u_{\max}
+        \}, \]
+      </h4>
+      <p>
+        where <strong>\( u_{\min}, u_{\max} \in \mathbb{R}^m \)</strong> with
+        <strong>\( u_{\min} \le u_{\max} \)</strong> componentwise. We must now
+        demand that the CBF inequality be satisfied by some
+        <strong>\( u \in \mathcal{U} \)</strong>, not by an arbitrary real
+        vector.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Input-Constrained Control Barrier Functions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Input-Constrained Control Barrier Functions</h2>
+    <div class="down-content">
+      <p>
+        We formalize the idea of a CBF that respects input bounds by modifying
+        the defining inequality to optimize over the admissible input set
+        <strong>\( \mathcal{U} \)</strong>.
+      </p>
+      <h4 class="mathJax">
+        \[ \delta(x) := \max_{u \in \mathcal{U}} L_g h(x) u, \]
+      </h4>
+      <p>
+        which is the value of a small linear program because the expression is
+        affine in
+        <strong>\( u \)</strong>. Then we define:
+      </p>
+      <p>
+        <strong>Definition 1 (Input-constrained CBF).</strong> A continuously
+        differentiable <strong>\( h:\mathbb{R}^n \to \mathbb{R} \)</strong> is
+        an <em>input-constrained control barrier function</em> (IC-CBF) for
+        <strong>\( (\mathcal{C},\mathcal{U}) \)</strong> if there exists an
+        extended class-\(\mathcal{K}\) function
+        <strong>\( \alpha \)</strong> such that for all
+        <strong>\( x \in \mathcal{D} \supset \mathcal{C} \)</strong>,
+      </p>
+      <h4 class="mathJax">
+        \[ L_f h(x) + \delta(x) + \alpha\big(h(x)\big) \ge 0. \]
+      </h4>
+      <p>
+        Because the maximum of an affine function over the box
+        <strong>\( \mathcal{U} \)</strong> is attained at a vertex, we can
+        compute <strong>\( \delta(x) \)</strong> in closed form. Let
+        <strong>\( a(x) = L_g h(x) \in \mathbb{R}^m \)</strong> and denote its
+        components <strong>\( a_i(x) \)</strong>. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \delta(x) = \sum_{i=1}^m \max\big( a_i(x) u_{i,\min},\; a_i(x)
+        u_{i,\max} \big) = \sum_{i=1}^m \Big( a_i^+(x) u_{i,\max} + a_i^-(x)
+        u_{i,\min} \Big), \]
+      </h4>
+      <p>
+        where <strong>\( a_i^+(x) = \max(a_i(x),0) \)</strong> and
+        <strong>\( a_i^-(x) = \min(a_i(x),0) \)</strong>.
+      </p>
+      <p>
+        <strong>Proposition 1 (Existence of safe inputs).</strong> Suppose
+        <strong>\( h \)</strong> is an IC-CBF for
+        <strong>\( (\mathcal{C},\mathcal{U}) \)</strong>. Then for every
+        <strong>\( x \in \mathcal{C} \)</strong> there exists at least one
+        <strong>\( u \in \mathcal{U} \)</strong> such that
+      </p>
+      <h4 class="mathJax">
+        \[ L_f h(x) + L_g h(x) u + \alpha\big(h(x)\big) \ge 0. \]
+      </h4>
+      <p>
+        <strong>Proof (sketch).</strong> By definition of
+        <strong>\( \delta(x) \)</strong>, there exists a maximizer
+        <strong>\( u^\star(x) \in \mathcal{U} \)</strong> such that
+      </p>
+      <h4 class="mathJax">\[ \delta(x) = L_g h(x) u^\star(x). \]</h4>
+      <p>
+        Substituting into the IC-CBF inequality gives
+        <strong
+          >\( L_f h(x) + L_g h(x) u^\star(x) + \alpha(h(x)) \ge 0 \)</strong
+        >, so <strong>\( u^\star(x) \in \mathcal{U} \)</strong> is a safe input.
+        &#9632;
+      </p>
+      <p>
+        <strong
+          >Proposition 2 (Forward invariance under input constraints).</strong
+        >
+        Let <strong>\( h \)</strong> be an IC-CBF for
+        <strong>\( (\mathcal{C},\mathcal{U}) \)</strong>, and consider any
+        measurable feedback law
+        <strong>\( u:\mathcal{C} \to \mathcal{U} \)</strong> that satisfies
+      </p>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ L_f h(x) + L_g h(x) u(x) + \alpha\big(h(x)\big) \ge 0 \quad \text{for all } x \in \mathcal{C}. \]
+      </h4>
+      <p>
+        Then <strong>\( \mathcal{C} \)</strong> is forward invariant for the
+        closed-loop system <strong>\( \dot{x} = f(x) + g(x)u(x) \)</strong>.
+      </p>
+      <p>
+        <strong>Proof idea.</strong> The proof follows the standard argument for
+        zeroing CBFs: the inequality implies that
+        <strong>\( h(x(t)) \)</strong> satisfies a differential inequality of
+        the form <strong>\( \dot{h}(x(t)) \ge -\alpha(h(x(t))) \)</strong>,
+        which by the comparison lemma implies
+        <strong>\( h(x(t)) \ge 0 \)</strong> for all
+        <strong>\( t \ge 0 \)</strong> whenever
+        <strong>\( h(x(0)) \ge 0 \)</strong>. The presence of
+        <strong>\( \mathcal{U} \)</strong> is already accounted for in the
+        IC-CBF condition, so the usual invariance proof carries over. &#9632;
+      </p>
+      <p>
+        The key lesson is: as long as you can design
+        <strong>\( h \)</strong> such that the IC-CBF condition holds on the
+        safe set, there is at least one bounded safe input at every safe state.
+        Implementation then amounts to selecting one of these safe inputs that
+        also respects performance objectives.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: CLF-CBF-QP with Explicit Input Bounds -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. CLF-CBF-QP with Explicit Input Bounds</h2>
+    <div class="down-content">
+      <p>
+        In many robot applications, you combine safety (CBFs) with performance
+        or stabilization objectives encoded by a control Lyapunov function (CLF)
+        <strong>\( V(x) \)</strong>. The standard CLF-CBF-QP from Lesson 3 can
+        be augmented with the box constraints
+        <strong>\( u \in \mathcal{U} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} &\min_{u,\varepsilon} \quad \tfrac{1}{2}(u -
+        u_{\text{des}}(x))^\top W (u - u_{\text{des}}(x)) + \tfrac{1}{2} p
+        \varepsilon^2 \\ &\text{s.t.} \quad L_f V(x) + L_g V(x) u \le -c V(x) +
+        \varepsilon, \\ &\quad\quad\;\;\; L_f h_j(x) + L_g h_j(x) u +
+        \alpha_j\big(h_j(x)\big) \ge 0, \quad j = 1,\dots,q, \\
+        &\quad\quad\;\;\; u_{\min} \le u \le u_{\max}, \end{aligned} \]
+      </h4>
+      <p>
+        where <strong>\( W \succ 0 \)</strong>, <strong>\( p &gt; 0 \)</strong>,
+        and <strong>\( \varepsilon \)</strong> relaxes the CLF but
+        <em>not</em> the CBF constraints. This prioritizes safety over
+        performance: if conflicts appear, the optimization violates the CLF
+        inequality before violating safety.
+      </p>
+      <p>
+        <strong>Theorem 1 (Safety of input-bounded CLF-CBF-QP).</strong> Assume:
+      </p>
+      <ul>
+        <li>
+          each <strong>\( h_j \)</strong> is an IC-CBF for the pair
+          <strong>\( (\mathcal{C}_j,\mathcal{U}) \)</strong>, where
+          <strong>\( \mathcal{C}_j = \{x \mid h_j(x) \ge 0\} \)</strong>;
+        </li>
+        <li>
+          the intersection
+          <strong>\( \mathcal{C} = \bigcap_j \mathcal{C}_j \)</strong> is
+          nonempty;
+        </li>
+        <li>
+          for all <strong>\( x \in \mathcal{C} \)</strong> the QP is feasible
+          (there exists some <strong>\( u \in \mathcal{U} \)</strong> that
+          satisfies all CBF inequalities).
+        </li>
+      </ul>
+      <p>
+        Then the unique optimizer
+        <strong>\( u^\star(x) \in \mathcal{U} \)</strong> of the QP renders
+        <strong>\( \mathcal{C} \)</strong> forward invariant.
+      </p>
+      <p>
+        <strong>Proof (sketch).</strong> Feasibility ensures that at each
+        <strong>\( x \in \mathcal{C} \)</strong> there exists at least one
+        <strong>\( u \in \mathcal{U} \)</strong> satisfying all CBF
+        inequalities. The QP's feasible set is a convex polytope (intersection
+        of half-spaces and the box <strong>\( \mathcal{U} \)</strong>), and the
+        cost is strictly convex, so a unique optimizer
+        <strong>\( u^\star(x) \)</strong> exists and belongs to that polytope,
+        hence satisfies all CBF constraints. The CLF constraint may be softened
+        through <strong>\( \varepsilon \)</strong>, but this does not affect the
+        CBF inequalities. The usual IC-CBF invariance result therefore applies
+        to <strong>\( u^\star(x) \)</strong>. &#9632;
+      </p>
+      <p>
+        A practical design guideline is to choose the CBFs
+        <em>conservatively</em> so that their required safety actions never
+        demand more torque/force than your actuators can deliver. This amounts
+        to tuning <strong>\( \alpha_j \)</strong> and the shape of
+        <strong>\( h_j \)</strong>
+        so that the IC-CBF condition holds with adequate margin.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: 1D Integrator Example and Analytical Safety Filter -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      5. 1D Integrator Example with Saturation: Closed-Form Safe Projection
+    </h2>
+    <div class="down-content">
+      <p>
+        To see the ideas in their simplest form, consider the 1D integrator
+        <strong>\( \dot{x} = u \)</strong> with input constraint
+      </p>
+      <h4 class="mathJax">\[ u \in [u_{\min}, u_{\max}], \]</h4>
+      <p>
+        and a scalar state constraint <strong>\( x \ge 0 \)</strong>. The
+        barrier function is <strong>\( h(x) = x \)</strong>, so
+      </p>
+      <h4 class="mathJax">\[ L_f h(x) = 0, \quad L_g h(x) = 1. \]</h4>
+      <p>
+        With an extended class-\(\mathcal{K}\) function
+        <strong>\( \alpha(s) = \kappa s \)</strong>,
+        <strong>\( \kappa &gt; 0 \)</strong>, the CBF inequality reads
+      </p>
+      <h4 class="mathJax">
+        \[ u + \kappa x \ge 0 \quad \Longleftrightarrow \quad u \ge -\kappa x.
+        \]
+      </h4>
+      <p>
+        Therefore the set of inputs that are <em>both</em> safe and admissible
+        at state <strong>\( x \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{U}_{\text{safe}}(x) = \big\{ u \in [u_{\min}, u_{\max}] \mid
+        u \ge -\kappa x \big\} = \big[ u_{\text{low}}(x), u_{\max} \big], \]
+      </h4>
+      <p>where</p>
+      <h4 class="mathJax">
+        \[ u_{\text{low}}(x) := \max\big(u_{\min}, -\kappa x\big). \]
+      </h4>
+      <p>
+        Given a nominal (unconstrained) input
+        <strong>\( u_{\text{des}}(x) \)</strong>, the 1D CLF-CBF-QP degenerates
+        to a scalar projection problem:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} &\min_{u \in \mathbb{R}} \quad \tfrac{1}{2}\big(u -
+        u_{\text{des}}(x)\big)^2 \\ &\text{s.t.} \quad u \in \big[
+        u_{\text{low}}(x), u_{\max} \big]. \end{aligned} \]
+      </h4>
+      <p>
+        The unique minimizer is the Euclidean projection of
+        <strong>\( u_{\text{des}}(x) \)</strong>
+        onto the interval:
+      </p>
+      <h4 class="mathJax">
+        \[ u^\star(x) =
+        \operatorname{Proj}_{[u_{\text{low}}(x),u_{\max}]}\big(u_{\text{des}}(x)\big)
+        = \min\Big( u_{\max},\; \max\big(u_{\text{low}}(x),
+        u_{\text{des}}(x)\big) \Big). \]
+      </h4>
+      <p>
+        <strong
+          >Proposition 3 (Forward invariance for the projected
+          controller).</strong
+        >
+        For the system <strong>\( \dot{x} = u^\star(x) \)</strong> with the
+        projected input above, if <strong>\( x(0) \ge 0 \)</strong>, then
+        <strong>\( x(t) \ge 0 \)</strong> for all
+        <strong>\( t \ge 0 \)</strong>.
+      </p>
+      <p>
+        <strong>Proof.</strong> By construction, for all
+        <strong>\( x \ge 0 \)</strong> we have
+        <strong>\( u^\star(x) \ge u_{\text{low}}(x) \ge -\kappa x \)</strong>,
+        so
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{h}(x) = \dot{x} = u^\star(x) \ge -\kappa x = -\kappa h(x). \]
+      </h4>
+      <p>
+        By the comparison lemma, <strong>\( h(x(t)) \ge 0 \)</strong> for all
+        <strong>\( t \ge 0 \)</strong> whenever
+        <strong>\( h(x(0)) \ge 0 \)</strong>. Thus the safe set
+        <strong>\( \mathcal{C} = [0,\infty) \)</strong> is forward invariant.
+        &#9632;
+      </p>
+      <p>
+        This simple one-dimensional example already captures the essence of safe
+        control under input limits: at each step, intersect a nominal input with
+        a state-dependent safe interval, obtained from the CBF inequality and
+        actuator boundaries.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["State x >= 0"] --> RANGE["Compute u_low(x) = max(u_min, -kappa * x)"]
+  RANGE --> INTERVAL["Safe input interval [u_low(x), u_max]"]
+  INTERVAL --> PROJ2["u_star = proj(u_des, [u_low, u_max])"]
+  PROJ2 --> DYN["Apply u_star in x_dot = u"]
+  DYN --> S
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation of a Safety Filter with Input Limits -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Implementation (Safety Filter for a 1D Integrator)</h2>
+    <div class="down-content">
+      <p>
+        We now implement the projected controller
+        <strong>\( u^\star(x) \)</strong> for the 1D integrator example in
+        Python. The function <code>safe_input</code> acts as a safety filter on
+        top of an arbitrary nominal controller.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+import matplotlib.pyplot as plt
+
+def safe_input(x, u_des, u_min, u_max, kappa):
+    """
+    Safety filter for dot{x} = u with CBF h(x) = x and input box [u_min, u_max].
+
+    Parameters
+    ----------
+    x : float
+        Current state.
+    u_des : float
+        Nominal (possibly unsafe) input.
+    u_min, u_max : float
+        Actuator limits with u_min &lt;= u_max.
+    kappa : float
+        CBF gain (alpha(s) = kappa * s).
+    """
+    # Lower bound from CBF + actuator limit
+    u_low = max(u_min, -kappa * x)
+    # Upper bound from actuator limit
+    u_high = u_max
+    # Projection of u_des onto [u_low, u_high]
+    u_safe = np.minimum(u_high, np.maximum(u_low, u_des))
+    return float(u_safe)
+
+def simulate_safety_filter(x0, u_min, u_max, kappa, k_p, T, dt):
+    """
+    Closed-loop simulation with nominal controller u_des = -k_p * (x - x_ref),
+    where x_ref = 1. Safety filter keeps x(t) &gt;= 0.
+
+    Parameters
+    ----------
+    x0 : float
+        Initial state, should satisfy x0 &gt;= 0.
+    u_min, u_max : float
+        Input limits.
+    kappa : float
+        CBF gain.
+    k_p : float
+        Proportional gain of nominal controller.
+    T : float
+        Simulation horizon.
+    dt : float
+        Time step.
+    """
+    x = x0
+    t_values = [0.0]
+    x_values = [x0]
+    u_nom_values = []
+    u_safe_values = []
+
+    x_ref = 1.0
+    N = int(T / dt)
+
+    for k in range(N):
+        t = (k + 1) * dt
+        # Nominal proportional controller (ignores safety)
+        u_des = -k_p * (x - x_ref)
+        # Safety filter with input limits
+        u_safe = safe_input(x, u_des, u_min, u_max, kappa)
+
+        # Integrate 1D dynamics: x_{k+1} = x_k + dt * u_safe
+        x = x + dt * u_safe
+
+        t_values.append(t)
+        x_values.append(x)
+        u_nom_values.append(u_des)
+        u_safe_values.append(u_safe)
+
+    return np.array(t_values), np.array(x_values), np.array(u_nom_values), np.array(u_safe_values)
+
+if __name__ == "__main__":
+    # Parameters
+    x0 = 0.1         # start close to the constraint
+    u_min = -2.0
+    u_max =  2.0
+    kappa = 5.0
+    k_p = 5.0
+    T = 5.0
+    dt = 0.001
+
+    t, x, u_nom, u_safe = simulate_safety_filter(
+        x0=x0, u_min=u_min, u_max=u_max,
+        kappa=kappa, k_p=k_p, T=T, dt=dt
+    )
+
+    # Plot results
+    fig, axs = plt.subplots(2, 1, sharex=True)
+    axs[0].plot(t, x)
+    axs[0].axhline(0.0, linestyle="--")
+    axs[0].set_ylabel("x(t)")
+    axs[0].set_title("State with Safety Filter and Input Limits")
+
+    axs[1].plot(t[1:], u_nom, label="u_des")
+    axs[1].plot(t[1:], u_safe, label="u_safe", linestyle="--")
+    axs[1].axhline(u_min, linestyle=":", label="u_min")
+    axs[1].axhline(u_max, linestyle=":", label="u_max")
+    axs[1].set_xlabel("time")
+    axs[1].set_ylabel("input")
+    axs[1].legend()
+
+    plt.tight_layout()
+    plt.show()
+      </code></pre>
+      <p>
+        You can generalize this pattern to higher-dimensional robots by
+        replacing the scalar projection with a QP solver (e.g.,
+        <code>cvxpy</code>) that handles matrix-valued
+        <strong>\( L_g h \)</strong>, multiple CBFs, and CLF constraints, while
+        still encoding <strong>\( u_{\min} \le u \le u_{\max} \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation of a Saturating Safety Filter -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Implementation (Standalone Safety Filter)</h2>
+    <div class="down-content">
+      <p>
+        In C++, the same scalar projection can be implemented without external
+        QP libraries. This is useful when integrating safety filters into
+        low-level embedded controllers.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;algorithm&gt;  // std::max, std::min
+
+// Safety filter for dot{x} = u, with h(x) = x and input box [u_min, u_max].
+double safe_input(double x, double u_des, double u_min, double u_max, double kappa) {
+    double u_low = std::max(u_min, -kappa * x);
+    double u_high = u_max;
+    double u_safe = std::min(u_high, std::max(u_low, u_des));
+    return u_safe;
+}
+
+int main() {
+    double x = 0.1;      // initial state, assume x &gt;= 0
+    double u_min = -2.0;
+    double u_max =  2.0;
+    double kappa = 5.0;
+    double k_p = 5.0;
+    double dt = 0.001;
+    double T = 2.0;
+
+    int N = static_cast&lt;int&gt;(T / dt);
+
+    for (int k = 0; k &lt; N; ++k) {
+        double t = (k + 1) * dt;
+        double x_ref = 1.0;
+        double u_des = -k_p * (x - x_ref);
+        double u_safe = safe_input(x, u_des, u_min, u_max, kappa);
+        x = x + dt * u_safe;
+
+        if (k % 100 == 0) {
+            std::cout &lt;&lt; "t = " &lt;&lt; t
+                      &lt;&lt; ", x = " &lt;&lt; x
+                      &lt;&lt; ", u_des = " &lt;&lt; u_des
+                      &lt;&lt; ", u_safe = " &lt;&lt; u_safe &lt;&lt; std::endl;
+        }
+    }
+
+    return 0;
+}
+      </code></pre>
+      <p>
+        In more complex robot controllers, you would compute
+        <strong>\( u_{\text{des}} \)</strong> from joint-space or task-space
+        tracking laws, then call a vector-valued QP solver (for instance, C++
+        interfaces to <code>OSQP</code> or <code>qpOASES</code>) to enforce CBF
+        and CLF constraints jointly with torque/force limits.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation of the Safety Filter -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Implementation (Safety Filter Class)</h2>
+    <div class="down-content">
+      <p>
+        The same 1D safety filter can be encapsulated as a small Java class.
+        This is helpful when building simulation or control software in
+        Java-based robotics frameworks.
+      </p>
+      <pre><code class="language-java">
+public class SafeIntegratorController {
+
+    private final double uMin;
+    private final double uMax;
+    private final double kappa;
+    private final double kP;
+
+    public SafeIntegratorController(double uMin, double uMax, double kappa, double kP) {
+        this.uMin = uMin;
+        this.uMax = uMax;
+        this.kappa = kappa;
+        this.kP = kP;
+    }
+
+    // Safety filter for dot{x} = u with h(x) = x.
+    public double safeInput(double x, double uDes) {
+        double uLow = Math.max(uMin, -kappa * x);
+        double uHigh = uMax;
+        double uSafe = Math.min(uHigh, Math.max(uLow, uDes));
+        return uSafe;
+    }
+
+    public void simulate(double x0, double T, double dt) {
+        double x = x0;
+        int N = (int) (T / dt);
+        double xRef = 1.0;
+
+        for (int k = 0; k &lt; N; ++k) {
+            double t = (k + 1) * dt;
+            double uDes = -kP * (x - xRef);
+            double uSafe = safeInput(x, uDes);
+            x = x + dt * uSafe;
+
+            if (k % 100 == 0) {
+                System.out.println("t = " + t
+                        + ", x = " + x
+                        + ", u_des = " + uDes
+                        + ", u_safe = " + uSafe);
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        SafeIntegratorController ctrl =
+                new SafeIntegratorController(-2.0, 2.0, 5.0, 5.0);
+        ctrl.simulate(0.1, 2.0, 0.001);
+    }
+}
+      </code></pre>
+      <p>
+        As in the C++ case, extending this to multi-dimensional robots requires
+        formulating the CLF-CBF constraints as a quadratic program with box
+        bounds and using a Java-accessible QP solver. The scalar example
+        provides a clear template for how to wrap such a solver inside a safety
+        filter class.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        In MATLAB, the safety filter can be implemented as a simple function and
+        used directly in a script or inside a Simulink
+        <em>MATLAB Function</em> block. Here is a script-level version for the
+        1D integrator:
+      </p>
+      <pre><code class="language-matlab">
+function safe_control_demo
+    % Parameters
+    x0    = 0.1;
+    u_min = -2.0;
+    u_max =  2.0;
+    kappa = 5.0;
+    k_p   = 5.0;
+    T     = 5.0;
+    dt    = 1e-3;
+
+    N = floor(T / dt);
+    x = x0;
+    x_ref = 1.0;
+
+    t_vec = zeros(N+1,1);
+    x_vec = zeros(N+1,1);
+    u_nom_vec  = zeros(N,1);
+    u_safe_vec = zeros(N,1);
+
+    t_vec(1) = 0.0;
+    x_vec(1) = x0;
+
+    for k = 1:N
+        t = k * dt;
+        u_des = -k_p * (x - x_ref);
+        u_safe = safe_input(x, u_des, u_min, u_max, kappa);
+        x = x + dt * u_safe;
+
+        t_vec(k+1) = t;
+        x_vec(k+1) = x;
+        u_nom_vec(k)  = u_des;
+        u_safe_vec(k) = u_safe;
+    end
+
+    % Plot results
+    figure;
+    subplot(2,1,1);
+    plot(t_vec, x_vec); hold on;
+    yline(0, '--');
+    ylabel('x(t)');
+    title('State with safety filter and input limits');
+
+    subplot(2,1,2);
+    plot(t_vec(2:end), u_nom_vec, 'DisplayName','u\_des'); hold on;
+    plot(t_vec(2:end), u_safe_vec, '--', 'DisplayName','u\_safe');
+    yline(u_min, ':', 'DisplayName','u\_min');
+    yline(u_max, ':', 'DisplayName','u\_max');
+    xlabel('time');
+    ylabel('input');
+    legend('Location','best');
+end
+
+function u_safe = safe_input(x, u_des, u_min, u_max, kappa)
+    % Scalar safety filter for dot{x} = u with h(x) = x.
+    u_low = max(u_min, -kappa * x);
+    u_high = u_max;
+    u_safe = min(u_high, max(u_low, u_des));
+end
+      </code></pre>
+      <p>In Simulink, you can:</p>
+      <ol>
+        <li>
+          Model the integrator dynamics as an <em>Integrator</em> block (for
+          <code>x</code>).
+        </li>
+        <li>
+          Implement the nominal controller in another block (e.g.,
+          <em>Gain</em> and <em>Sum</em> for proportional control).
+        </li>
+        <li>
+          Replace the usual saturation block with a
+          <em>MATLAB Function</em> block that calls <code>safe_input</code>,
+          thereby enforcing both the CBF condition and actuator limits.
+        </li>
+      </ol>
+      <p>
+        For multi-DOF robots, you would construct vector-valued CBFs and call
+        MATLAB's
+        <code>quadprog</code> within the MATLAB Function block to solve the
+        CLF-CBF-QP at each step, with joint torque limits encoded as box
+        constraints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Wolfram Mathematica can be used both to symbolically verify CBF
+        inequalities under input limits and to numerically simulate the
+        resulting closed-loop dynamics. For the 1D integrator example:
+      </p>
+      <pre><code class="language-mathematica">
+(* Safety filter for dot{x} = u, with h(x) = x and input box [uMin, uMax] *)
+safeInput[x_, uDes_, uMin_, uMax_, kappa_] := Module[
+  {uLow, uHigh},
+  uLow = Max[uMin, -kappa * x];
+  uHigh = uMax;
+  Min[uHigh, Max[uLow, uDes]]
+];
+
+(* Closed-loop dynamics with nominal proportional controller *)
+uNom[x_, xRef_, kP_] := -kP * (x - xRef);
+
+closedLoopRHS[x_, xRef_, kP_, uMin_, uMax_, kappa_] :=
+  safeInput[x, uNom[x, xRef, kP], uMin, uMax, kappa];
+
+(* Parameters *)
+x0 = 0.1;
+xRef = 1.0;
+uMin = -2.0;
+uMax =  2.0;
+kappa = 5.0;
+kP = 5.0;
+
+sol = NDSolve[
+  {
+    x'[t] == closedLoopRHS[x[t], xRef, kP, uMin, uMax, kappa],
+    x[0] == x0
+  },
+  x, {t, 0, 5.0}
+];
+
+Plot[x[t] /. sol, {t, 0, 5.0},
+  AxesLabel -&gt; {"t", "x(t)"},
+  PlotLabel -&gt; "State trajectory with safety filter"
+]
+      </code></pre>
+      <p>
+        Mathematica is particularly useful for prototyping more complex IC-CBFs
+        where analytic computation of <strong>\( \delta(x) \)</strong> (the
+        maximum over <strong>\( \mathcal{U} \)</strong>) may require symbolic
+        manipulation or where you wish to verify inequalities using
+        <code>Reduce</code> or <code>Simplify</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Feasibility region for 1D IC-CBF).</strong> Consider
+        the 1D integrator <strong>\( \dot{x} = u \)</strong> with input
+        constraint <strong>\( u \in [u_{\min}, u_{\max}] \)</strong>, safe set
+        <strong>\( \mathcal{C} = [0, x_{\max}] \)</strong>, and barrier function
+        <strong>\( h(x) = x_{\max} - x \)</strong>. Use
+        <strong>\( \alpha(s) = \kappa s \)</strong> with
+        <strong>\( \kappa &gt; 0 \)</strong>. Determine for which
+        <strong>\( x \in \mathcal{C} \)</strong> there exists a safe input
+        <strong>\( u \in [u_{\min}, u_{\max}] \)</strong>.
+      </p>
+      <p>
+        <strong>Solution.</strong> For
+        <strong>\( h(x) = x_{\max} - x \)</strong>,
+        <strong>\( L_f h(x) = 0 \)</strong>,
+        <strong>\( L_g h(x) = -1 \)</strong>, hence the CBF inequality is
+      </p>
+      <h4 class="mathJax">
+        \[ -u + \kappa(x_{\max} - x) \ge 0 \quad \Longleftrightarrow \quad u \le
+        \kappa(x_{\max} - x). \]
+      </h4>
+      <p>
+        The intersection of the CBF constraint with the actuator box is
+        <strong
+          >\( u \in [u_{\min}, \min(u_{\max}, \kappa(x_{\max} - x))] \)</strong
+        >. This set is nonempty if and only if
+      </p>
+      <h4 class="mathJax">
+        \[ u_{\min} \le \min\big(u_{\max}, \kappa(x_{\max} - x)\big), \]
+      </h4>
+      <p>
+        which always holds if <strong>\( u_{\min} \le u_{\max} \)</strong> and
+        <strong>\( u_{\min} \le \kappa(x_{\max} - x) \)</strong>. Since
+        <strong>\( x \in [0,x_{\max}] \)</strong>, the worst case is
+        <strong>\( x = x_{\max} \)</strong> where
+        <strong>\( \kappa(x_{\max} - x) = 0 \)</strong>. Therefore, the
+        condition reduces to
+      </p>
+      <h4 class="mathJax">\[ u_{\min} \le 0. \]</h4>
+      <p>
+        If <strong>\( u_{\min} \le 0 \)</strong>, then for every
+        <strong>\( x \in [0,x_{\max}] \)</strong> the interval of admissible
+        safe inputs is nonempty. Thus <strong>\( h \)</strong> is an IC-CBF on
+        <strong>\( \mathcal{C} \)</strong>. If
+        <strong>\( u_{\min} &gt; 0 \)</strong>, then near the boundary
+        <strong>\( x \approx x_{\max} \)</strong>
+        the CBF inequality cannot be satisfied and safety cannot be enforced
+        purely by input selection.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Vector IC-CBF under box constraints).</strong> Let
+        <strong>\( x \in \mathbb{R}^n \)</strong>,
+        <strong>\( u \in \mathbb{R}^2 \)</strong>,
+        <strong
+          >\( \mathcal{U} = [u_{1,\min},u_{1,\max}] \times
+          [u_{2,\min},u_{2,\max}] \)</strong
+        >, and a barrier <strong>\( h \)</strong> with gradient along
+        <strong>\( g \)</strong> given by
+      </p>
+      <h4 class="mathJax">
+        \[ L_g h(x) = \begin{bmatrix} a_1(x) & a_2(x) \end{bmatrix}. \]
+      </h4>
+      <p>
+        Derive an explicit formula for
+        <strong>\( \delta(x) = \max_{u \in \mathcal{U}} L_g h(x) u \)</strong>
+        and the corresponding IC-CBF inequality.
+      </p>
+      <p><strong>Solution.</strong> We have</p>
+      <h4 class="mathJax">
+        \[ \delta(x) = \max_{u \in \mathcal{U}} a_1(x) u_1 + a_2(x) u_2. \]
+      </h4>
+      <p>
+        For each component, the maximum over the interval occurs at one of the
+        endpoints, hence
+      </p>
+      <h4 class="mathJax">
+        \[ \delta(x) = \max\big(a_1(x) u_{1,\min}, a_1(x) u_{1,\max}\big) +
+        \max\big(a_2(x) u_{2,\min}, a_2(x) u_{2,\max}\big). \]
+      </h4>
+      <p>This can be written using positive and negative parts as</p>
+      <h4 class="mathJax">
+        \[ \delta(x) = a_1^+(x) u_{1,\max} + a_1^-(x) u_{1,\min} + a_2^+(x)
+        u_{2,\max} + a_2^-(x) u_{2,\min}, \]
+      </h4>
+      <p>
+        where <strong>\( a_i^+(x) = \max(a_i(x),0) \)</strong> and
+        <strong>\( a_i^-(x) = \min(a_i(x),0) \)</strong>. The IC-CBF inequality
+        becomes
+      </p>
+      <h4 class="mathJax">
+        \[ L_f h(x) + a_1^+(x) u_{1,\max} + a_1^-(x) u_{1,\min} + a_2^+(x)
+        u_{2,\max} + a_2^-(x) u_{2,\min} + \alpha\big(h(x)\big) \ge 0. \]
+      </h4>
+
+      <p>
+        <strong>Problem 3 (CLF-CBF-QP feasibility with joint limits).</strong>
+        Consider a 2-DOF robot with joint torques
+        <strong>\( u = (\tau_1,\tau_2)^\top \)</strong> constrained in the box
+        <strong
+          >\( \mathcal{U} = [\tau_{1,\min},\tau_{1,\max}] \times
+          [\tau_{2,\min},\tau_{2,\max}] \)</strong
+        >. A CBF <strong>\( h(q,\dot{q}) \)</strong> encodes a minimum distance
+        to a joint limit, and a CLF <strong>\( V \)</strong> stabilizes a
+        desired configuration. Explain qualitatively how enlarging the CBF gain
+        (making <strong>\( \alpha \)</strong> very steep) affects the QP
+        feasibility and the resulting closed-loop behavior under tight torque
+        bounds.
+      </p>
+      <p>
+        <strong>Solution.</strong> A larger CBF gain (steeper
+        <strong>\( \alpha \)</strong>) demands a faster increase of
+        <strong>\( h \)</strong> when close to the boundary, i.e., it requires
+        more aggressive corrective torques to maintain safety. With tight torque
+        bounds, there may exist states near the boundary where no
+        <strong>\( u \in \mathcal{U} \)</strong> can satisfy the strengthened
+        inequality <strong>\( L_f h + L_g h u + \alpha(h) \ge 0 \)</strong>. The
+        CLF-CBF-QP then becomes infeasible, or the optimizer must overly
+        sacrifice CLF performance. Practically, overly large CBF gains can lead
+        to:
+      </p>
+      <ul>
+        <li>Loss of QP feasibility in parts of the safe set; or</li>
+        <li>
+          Very conservative behavior, where the robot stays far from the
+          constraint to avoid regions where torque limits would be violated.
+        </li>
+      </ul>
+      <p>
+        Thus, CBF gain design must explicitly account for actuator limits:
+        <strong>\( \alpha \)</strong>
+        should be chosen so that the IC-CBF condition is satisfied with
+        realistic torques across the intended safe operating region.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Projection vs naive saturation).</strong> In the 1D
+        example with <strong>\( \dot{x} = u \)</strong> and safe set
+        <strong>\( x \ge 0 \)</strong>, compare the following two strategies:
+      </p>
+      <ol>
+        <li>
+          Compute <strong>\( u^\star(x) \)</strong> by projection onto the
+          CBF-constrained interval
+          <strong>\( [u_{\text{low}}(x), u_{\max}] \)</strong> (safety filter).
+        </li>
+        <li>
+          Saturate the nominal input as
+          <strong
+            >\( \tilde{u}(x) =
+            \operatorname{Proj}_{[u_{\min},u_{\max}]}(u_{\text{des}}(x))
+            \)</strong
+          >
+          (actuator saturation only).
+        </li>
+      </ol>
+      <p>Are both strategies guaranteed to preserve safety? Why or why not?</p>
+      <p>
+        <strong>Solution.</strong>
+        The safety filter in strategy (1) explicitly enforces the CBF inequality
+        <strong>\( u \ge -\kappa x \)</strong>, so Proposition 3 guarantees that
+        <strong>\( x(t) \ge 0 \)</strong> for all time. In contrast, the naive
+        saturation strategy (2) only enforces
+        <strong>\( u \in [u_{\min},u_{\max}] \)</strong> without regard to the
+        barrier inequality. For example, when
+        <strong>\( x \approx 0 \)</strong>, the controller may demand a large
+        negative <strong>\( u_{\text{des}} \)</strong>, which gets saturated to
+        <strong>\( u_{\min} \lt 0 \)</strong>. If
+        <strong>\( u_{\min} \lt -\kappa x \)</strong>, the CBF inequality is
+        violated and the state may cross into <strong>\( x \lt 0 \)</strong>,
+        breaking safety. Therefore, naive saturation is <em>not</em> sufficient:
+        safety must be enforced by projecting onto the intersection of the CBF
+        constraint and the actuator box.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson, we extended control barrier function techniques to
+        robots with bounded actuators. By optimizing over the admissible input
+        set <strong>\( \mathcal{U} \)</strong>, we obtained the notion of
+        input-constrained CBFs and derived conditions under which safe inputs
+        exist for all states in the safe set. We integrated box constraints
+        explicitly into CLF-CBF-QPs, ensuring that the optimal control law
+        respects both safety and actuator limits.
+      </p>
+      <p>
+        A detailed 1D integrator example illustrated how the QP reduces to a
+        simple projection of the nominal input onto a state-dependent safe
+        interval derived from the CBF inequality and the actuator bounds.
+        Implementations in Python, C++, Java, MATLAB/Simulink, and Mathematica
+        showed how safety filters can be realized in practice without
+        sacrificing real-time performance. These constructions are the
+        foundation for the next lesson, where you will enforce joint and
+        workspace safety constraints in a full robotic system.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Ames, A.D., Xu, X., Grizzle, J.W., &amp; Tabuada, P. (2017). Control
+        barrier function based quadratic programs for safety critical systems.
+        <em>IEEE Transactions on Automatic Control</em>, 62(8), 3861–3876.
+      </li>
+      <li>
+        Xu, X., Dolan, J.M., &amp; Tabuada, P. (2015). Robust control barrier
+        functions for dynamic systems.
+        <em>Automatica</em>, 61, 1–10.
+      </li>
+      <li>
+        Kolathaya, S., &amp; Ames, A.D. (2019). Input-to-state safety with
+        control barrier functions.
+        <em>IEEE Control Systems Letters</em>, 3(1), 108–113.
+      </li>
+      <li>
+        Wieland, P., &amp; Allg&ouml;wer, F. (2007). Constructive safety using
+        control barrier functions.
+        <em>IFAC Proceedings Volumes</em>, 40(12), 462–467.
+      </li>
+      <li>
+        Aaronson, S., Ames, A.D., &amp; Tabuada, P. (2020). Control barrier
+        functions for systems with input constraints.
+        <em>IEEE Transactions on Automatic Control</em>, 65(12), 5345–5360.
+      </li>
+      <li>
+        Prajna, S., &amp; Jadbabaie, A. (2004). Safety verification of hybrid
+        systems using barrier certificates.
+        <em>Hybrid Systems: Computation and Control</em>, LNCS 2993, 477–492.
+      </li>
+      <li>
+        Sontag, E.D. (1989). A universal construction of Artstein's theorem on
+        nonlinear stabilization.
+        <em>Systems &amp; Control Letters</em>, 13(2), 117–123.
+      </li>
+      <li>
+        Ames, A.D., Coogan, S., Egerstedt, M., Notomista, G., Sreenath, K.,
+        &amp; Tabuada, P. (2019). Control barrier functions: Theory and
+        applications.
+        <em>European Journal of Control</em>, 45, 1–20.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Buttons -->
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson3.html">
+          Lesson 3: CBF-QP Controllers in Joint/Task Space
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson5.html">
+          Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="active-lesson" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

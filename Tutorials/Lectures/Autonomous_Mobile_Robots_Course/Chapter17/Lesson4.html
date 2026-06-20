@@ -1,0 +1,2740 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 17: Exploration and Active Mapping - Lesson 4: Exploration Under Limited Battery/Time | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 17: Exploration and Active Mapping</h1>
+    <h3><strong>Lesson 4: Exploration Under Limited Battery/Time</strong></h3>
+    <p>
+      This lesson formalizes <em>budget-aware exploration</em> where an AMR must
+      reduce map uncertainty while respecting hard limits on remaining battery
+      energy and mission time, and still guaranteeing a safe return (or safe
+      stop). We build a constrained objective using information gain, derive
+      practical selection rules via Lagrangian relaxation, and connect
+      exploration action selection to submodular maximization under
+      knapsack-like budgets. The emphasis is on implementable receding-horizon
+      algorithms that fit within the standard sensing–mapping–planning loop from
+      earlier lessons.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 17 so far, we treated exploration as choosing actions
+        (frontiers / viewpoints) to maximize
+        <strong>\( \Delta \)</strong>-entropy reduction or other information
+        objectives. Real AMRs also face <strong>budgets</strong>:
+      </p>
+      <ul>
+        <li>
+          <strong>Energy budget</strong> (battery): traction power,
+          compute/sensing power, plus safety reserve.
+        </li>
+        <li>
+          <strong>Time budget</strong>: mission deadline, time-to-return, or
+          “must dock by time \(T\)”.
+        </li>
+      </ul>
+      <p>
+        We will model exploration as choosing a sequence of decision points
+        <strong>\( \pi = (a_1,a_2,\dots,a_N) \)</strong> (e.g.,
+        next-best-views), where each action yields expected information gain but
+        consumes energy and time. The key constraint is that exploration must
+        remain <em>feasible</em>: the robot must be able to reach the next goal
+        and still return to a terminal set (home/dock/safe zone) with a reserve.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start: belief map + budgets"] --> O["Observe and update map"]
+  O --> F["Compute candidate targets (frontiers / views)"]
+  F --> E["Estimate utility: IG - lambda*cost"]
+  E --> C["Check feasibility: can reach target and return with reserve?"]
+  C -->|yes| G["Choose best feasible target"]
+  C -->|no| R["Switch to return-to-home policy"]
+  G --> M["Move + local avoidance (previous chapters)"]
+  M --> O
+  R --> H["Navigate to home/dock"]
+  H --> X["Stop/Recharge/End"]
+        </pre>
+      </div>
+
+      <p>
+        The loop above is a <strong>receding-horizon</strong> policy: we plan
+        one target at a time using the current belief and remaining budgets.
+        This fits the AMR pipeline: mapping uncertainty and reachable space
+        change as the robot senses and discovers obstacles.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Battery/Time Budget Models -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Battery and Time Models for Exploration</h2>
+    <div class="down-content">
+      <p>
+        Let remaining battery energy be <strong>\( E(t) \)</strong> (Joules) and
+        remaining mission time be <strong>\( T(t) \)</strong> (seconds). A
+        minimal continuous model is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \dot{E}(t) = -P(t), \qquad \dot{T}(t) = -1, \qquad E(t)\ge 0,\;
+        T(t)\ge 0 \]
+      </h4>
+
+      <p>
+        The total power splits into traction and base loads:
+        <strong
+          >\( P(t)=P_{\text{drive} }(v(t),\kappa(t),\text{terrain}) +
+          P_{\text{base} } \)</strong
+        >, where <strong>\( v(t) \)</strong> is speed and
+        <strong>\( \kappa(t) \)</strong> curvature (related to turning losses
+        and slip).
+      </p>
+
+      <p>
+        For waypoint-to-waypoint planning, we usually discretize into motion
+        segments
+        <strong>\( i=1,\dots,N \)</strong>. If segment
+        <strong>\( i \)</strong> has length <strong>\( \ell_i \)</strong> and
+        average speed <strong>\( v_i \)</strong>, then time
+        <strong>\( \Delta t_i = \ell_i/v_i \)</strong> and energy is
+        approximately:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Delta E_i \approx \left(P_{\text{drive} }(v_i) + P_{\text{base}
+        }\right)\Delta t_i = \left(P_{\text{drive} }(v_i) + P_{\text{base}
+        }\right)\frac{\ell_i}{v_i} \]
+      </h4>
+
+      <p>
+        In many indoor AMR stacks, a practical abstraction is
+        <em>cost-per-meter</em> (or cost-per-grid-step):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Delta E_i \approx c_E \,\ell_i + c_0\,\Delta t_i, \qquad \Delta T_i
+        = \Delta t_i \]
+      </h4>
+
+      <p>
+        where <strong>\( c_E \)</strong> captures traction cost per distance and
+        <strong>\( c_0 \)</strong> captures base loads. This lesson focuses on
+        decision-making given such costs, not on electrochemistry.
+      </p>
+
+      <p>
+        <strong>Safety reserve.</strong> We enforce a reserve energy
+        <strong>\( E_{\text{res} } \)</strong> so the robot never plans down to
+        zero: <strong>\( E(t)\ge E_{\text{res} } \)</strong>. Reserve accounts
+        for localization failures, detours, and braking/stopping.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Constrained Exploration Objective -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Constrained Objective: Information Gain Under Budgets</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \mathcal{M} \)</strong> be the map random variable
+        (occupancy grid or features). The belief at time
+        <strong>\( t \)</strong> has entropy
+        <strong>\( H(\mathcal{M}\mid \mathcal{D}_t) \)</strong> where
+        <strong>\( \mathcal{D}_t \)</strong> denotes collected sensor data. For
+        a candidate action/goal <strong>\( a \)</strong> (e.g., a viewpoint),
+        define its expected information gain:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \operatorname{IG}(a \mid \mathcal{D}_t) = \mathbb{E}\!\left[
+        H(\mathcal{M}\mid \mathcal{D}_t) - H(\mathcal{M}\mid \mathcal{D}_t \cup
+        Z(a)) \right] \]
+      </h4>
+
+      <p>
+        where <strong>\( Z(a) \)</strong> is the random future observation
+        obtained after executing action <strong>\( a \)</strong>. If we choose a
+        sequence (policy) <strong>\( \pi \)</strong>, then the “total gain” is
+        <strong
+          >\( \sum_k \operatorname{IG}(a_k\mid \mathcal{D}_{t_k}) \)</strong
+        >, but note that gains are computed under changing beliefs.
+      </p>
+
+      <p>A standard constrained formulation is:</p>
+
+      <h4 class="mathJax">
+        \[ \max_{\pi}\;\; \mathbb{E}\!\left[\sum_{k=1}^{N} \operatorname{IG}(a_k
+        \mid \mathcal{D}_{t_k})\right] \quad \text{s.t.}\quad \sum_{k=1}^{N}
+        C_E(a_k) \le B_E,\;\; \sum_{k=1}^{N} C_T(a_k) \le B_T \]
+      </h4>
+
+      <p>
+        where <strong>\( C_E(a) \)</strong> is expected energy cost (including
+        travel and sensing) and <strong>\( C_T(a) \)</strong> is time cost. In
+        practice, we also impose a <strong>terminal feasibility</strong>
+        condition (Section 5): each chosen goal must still allow return-to-home
+        with reserve.
+      </p>
+
+      <p>
+        <strong>Lagrangian relaxation (practical selection rule).</strong>
+        Introduce multipliers <strong>\( \lambda_E \ge 0 \)</strong> and
+        <strong>\( \lambda_T \ge 0 \)</strong>
+        and optimize the relaxed objective:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \max_{\pi}\;\; \mathbb{E}\!\left[\sum_{k=1}^{N}
+        \Big(\operatorname{IG}(a_k\mid \mathcal{D}_{t_k}) - \lambda_E C_E(a_k) -
+        \lambda_T C_T(a_k)\Big)\right] \]
+      </h4>
+
+      <p>
+        This converts “hard budgets” into a weighted trade-off, which is exactly
+        what many real-time explorers do: choose the action with largest
+        <strong>\( \operatorname{IG} - \lambda \times \text{cost} \)</strong>
+        among feasible candidates, and update budgets after execution. The
+        multipliers can be fixed (engineering choice) or adapted online (Section
+        6).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Submodularity and Greedy Under a Knapsack Budget -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Why Greedy Often Works: Submodular Gains Under a Budget</h2>
+    <div class="down-content">
+      <p>
+        When viewpoints overlap in what they can observe, information gain
+        exhibits
+        <strong>diminishing returns</strong>: the more you have already
+        observed, the less a new nearby viewpoint adds. This is captured by
+        <strong>submodularity</strong>.
+      </p>
+
+      <p>
+        Consider a simplified setting where each candidate viewpoint
+        <strong>\( a \)</strong> reveals a set of map cells (or features)
+        <strong>\( \mathcal{V}(a) \)</strong>. Define a “coverage gain” set
+        function:
+      </p>
+
+      <h4 class="mathJax">
+        \[ f(S) = \left|\bigcup_{a\in S}\mathcal{V}(a)\right| \]
+      </h4>
+
+      <p>
+        <strong>Claim (submodularity of coverage).</strong>
+        For any <strong>\( A \subseteq B \)</strong> and any action
+        <strong>\( a \notin B \)</strong>, the marginal gain satisfies:
+        <strong>\( f(A\cup\{a\}) - f(A) \ge f(B\cup\{a\}) - f(B) \)</strong>.
+        Intuitively, if you already cover more (set <strong>\( B \)</strong>),
+        adding <strong>\( a \)</strong> yields fewer new cells.
+      </p>
+
+      <p>
+        With costs <strong>\( c(a) &gt; 0 \)</strong> and budget
+        <strong>\( \sum_{a\in S} c(a)\le B \)</strong> (a
+        <strong>knapsack</strong> constraint), the exact optimum is generally
+        NP-hard. However, a classic result shows that greedy selection can be
+        near-optimal for monotone submodular objectives.
+      </p>
+
+      <p>
+        <strong>Theorem (classical approximation, sketch).</strong>
+        If <strong>\( f \)</strong> is monotone submodular and
+        <strong>\( f(\emptyset)=0 \)</strong>, then a greedy algorithm that
+        repeatedly picks the item with maximum “marginal gain per cost” achieves
+        a constant-factor approximation (commonly stated near
+        <strong>\( 1-1/e \)</strong>
+        with appropriate variants and bookkeeping).
+      </p>
+
+      <p>
+        <strong
+          >Sketch of the key inequality (diminishing returns argument).</strong
+        >
+        Let <strong>\( S_k \)</strong> be greedy set after cost
+        <strong>\( C_k \)</strong>. Under submodularity, the best remaining
+        marginal gain per unit cost is at least the average remaining gain of an
+        optimal set normalized by remaining budget, implying:
+      </p>
+
+      <h4 class="mathJax">
+        \[ f(S_{k+1}) - f(S_k) \ge \frac{c(a_{k+1})}{B}\Big(f(S^\star) -
+        f(S_k)\Big) \]
+      </h4>
+
+      <p>
+        Rearranging and iterating yields an exponential decay of the gap
+        <strong>\( f(S^\star)-f(S_k) \)</strong>, leading to the familiar
+        <strong>\( 1-e^{-C_k/B} \)</strong> style bound, and therefore a
+        constant-factor guarantee when <strong>\( C_k \)</strong> approaches
+        <strong>\( B \)</strong>. In exploration, this theory justifies a greedy
+        “value-per-cost” rule for selecting viewpoints/frontiers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Terminal Feasibility: The Return-to-Home Constraint -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Terminal Feasibility and the “Must-Return” Constraint</h2>
+    <div class="down-content">
+      <p>
+        Unlike pure coverage objectives, real AMRs must ensure they can reach a
+        terminal set (dock/home/safe zone) from wherever they decide to go. Let
+        <strong>\( x \)</strong> be current pose, <strong>\( g \)</strong> a
+        candidate target (frontier/view), and <strong>\( h \)</strong> be
+        home/dock. Let <strong>\( d(x,y) \)</strong> be shortest-path distance
+        on the current traversability map. With an energy-per-meter model
+        <strong>\( c_E \)</strong> and base term <strong>\( c_0 \)</strong>,
+        define the travel energy estimate:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \widehat{C}_E(x \rightarrow y) \approx c_E\, d(x,y) +
+        c_0\,\widehat{t}(x,y) \]
+      </h4>
+
+      <p>
+        The return-feasibility constraint for choosing target
+        <strong>\( g \)</strong> is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ E_{\text{rem} } - \widehat{C}_E(x \rightarrow g) - \widehat{C}_E(g
+        \rightarrow h) \ge E_{\text{res} } \]
+      </h4>
+
+      <p>Similarly for time:</p>
+
+      <h4 class="mathJax">
+        \[ T_{\text{rem} } - \widehat{C}_T(x \rightarrow g) - \widehat{C}_T(g
+        \rightarrow h) \ge 0 \]
+      </h4>
+
+      <p>
+        <strong>Important engineering note.</strong> Because the map is
+        uncertain, <strong>\( d(\cdot,\cdot) \)</strong> is itself uncertain.
+        Robust planners use inflated costs (risk-aware) or conservative bounds
+        (e.g., add a detour factor <strong>\( \alpha &gt; 1 \)</strong>):
+        <strong>\( \widehat{C}_E \leftarrow \alpha\,\widehat{C}_E \)</strong>.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+stateDiagram-v2
+  [*] --> Explore
+  Explore --> Explore: "feasible target exists"
+  Explore --> Return: "no feasible target"
+  Explore --> Return: "budget near threshold"
+  Return --> Dock: "arrive home/dock"
+  Dock --> [*]
+        </pre>
+      </div>
+
+      <p>
+        The state structure above is minimal but critical: exploration is always
+        subordinate to safety and mission constraints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Online Choice of Multipliers (lambda) and Receding-Horizon Control -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Choosing the Cost Weights Online</h2>
+    <div class="down-content">
+      <p>
+        In Section 3 we introduced Lagrangian weights
+        <strong>\( \lambda_E,\lambda_T \)</strong>. A fixed choice works, but we
+        can also <em>adapt</em> them based on remaining budgets. A simple
+        proportional rule is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \lambda_E(t) = \lambda_{E,0}\left(\frac{E_{\max} }{E_{\text{rem}
+        }(t)}\right), \qquad \lambda_T(t) = \lambda_{T,0}\left(\frac{T_{\max}
+        }{T_{\text{rem} }(t)}\right) \]
+      </h4>
+
+      <p>
+        As budgets shrink, the multipliers grow, discouraging long detours for
+        small gains. More principled approaches use dual ascent (treating
+        <strong>\( \lambda \)</strong> as dual variables) by nudging them upward
+        whenever measured consumption violates planned constraints.
+      </p>
+
+      <p>
+        <strong>Receding-horizon target selection.</strong> Let candidate set be
+        <strong>\( \mathcal{G}_t \)</strong> (frontiers / viewpoints). For each
+        <strong>\( g\in\mathcal{G}_t \)</strong> we compute:
+      </p>
+
+      <h4 class="mathJax">
+        \[ U(g) = \operatorname{IG}(g\mid \mathcal{D}_t) -
+        \lambda_E(t)\widehat{C}_E(x\rightarrow g) -
+        \lambda_T(t)\widehat{C}_T(x\rightarrow g) \]
+      </h4>
+
+      <p>
+        and choose <strong>\( g^\star = \arg\max U(g) \)</strong> among those
+        satisfying the return-feasibility inequalities from Section 5. Then
+        execute navigation to <strong>\( g^\star \)</strong> using the
+        already-taught local planners (DWA/TEB/etc.), update the map, and
+        repeat.
+      </p>
+
+      <p>
+        This is the core “budget-aware exploration” pattern implemented in the
+        code labs below.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation (Budget-Aware Frontier Exploration)</h2>
+    <div class="down-content">
+      <p>
+        This implementation is self-contained (no ROS). In a ROS2 system, you
+        would replace:
+      </p>
+      <ul>
+        <li>
+          Map belief updates with OccupancyGrid / OctoMap updates (Chapter 9).
+        </li>
+        <li>
+          Frontier extraction with your exploration package or custom frontier
+          node.
+        </li>
+        <li>Travel cost estimates with Nav2 global planner path length.</li>
+        <li>Execution with action clients to Nav2 (NavigateToPose).</li>
+      </ul>
+
+      <p><strong>Code: Chapter17_Lesson4.py</strong></p>
+      <pre><code class="language-python">
+# Chapter17_Lesson4.py
+# Exploration Under Limited Battery/Time (Budget-Aware Frontier Exploration)
+# Author: course material generator
+#
+# This script demonstrates a simple, self-contained budget-aware exploration loop:
+# - A probabilistic occupancy grid with unknown cells
+# - Frontier detection
+# - Utility = expected information gain - lambda * travel_cost
+# - Safety constraint: must have enough budget to reach goal and return home + reserve
+#
+# No ROS required; "integration points" are noted in comments.
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
+import heapq
+import math
+import random
+
+random.seed(7)
+
+Cell = Tuple[int, int]
+
+def clamp(x: float, lo: float, hi: float) -&gt; float:
+    return max(lo, min(hi, x))
+
+def entropy_bern(p: float) -&gt; float:
+    """Binary entropy H(p) in nats."""
+    p = clamp(p, 1e-9, 1 - 1e-9)
+    return -(p * math.log(p) + (1 - p) * math.log(1 - p))
+
+@dataclass
+class Budget:
+    # energy in Joules (or arbitrary units)
+    E: float
+    # time in seconds (or arbitrary units)
+    T: float
+
+@dataclass
+class RobotParams:
+    # cost per grid step (move energy) and per step time
+    E_step: float = 1.0
+    T_step: float = 1.0
+    # idle/base costs per step
+    E_base: float = 0.10
+    # reserve to guarantee safe stop/return
+    E_reserve: float = 10.0
+
+@dataclass
+class SensorParams:
+    # sensing radius (Chebyshev radius in grid)
+    r: int = 3
+    # observation quality: new occupancy probability when observed obstacle
+    p_occ_obs: float = 0.95
+    p_free_obs: float = 0.05
+
+class OccupancyGrid:
+    """
+    Probability grid p_occ in [0,1].
+    Unknown cells are initialized to 0.5.
+    """
+    def __init__(self, w: int, h: int):
+        self.w, self.h = w, h
+        self.p = [[0.5 for _ in range(w)] for _ in range(h)]
+
+    def inb(self, c: Cell) -&gt; bool:
+        x, y = c
+        return 0 &lt;= x &lt; self.w and 0 &lt;= y &lt; self.h
+
+    def get(self, c: Cell) -&gt; float:
+        x, y = c
+        return self.p[y][x]
+
+    def set(self, c: Cell, p_occ: float) -&gt; None:
+        x, y = c
+        self.p[y][x] = clamp(p_occ, 0.0, 1.0)
+
+    def is_free(self, c: Cell, thr: float = 0.65) -&gt; bool:
+        return self.get(c) &lt; thr
+
+    def is_occupied(self, c: Cell, thr: float = 0.65) -&gt; bool:
+        return self.get(c) &gt; thr
+
+    def neighbors4(self, c: Cell) -&gt; List[Cell]:
+        x, y = c
+        cand = [(x+1,y),(x-1,y),(x,y+1),(x,y-1)]
+        return [q for q in cand if self.inb(q)]
+
+def astar(grid: OccupancyGrid, s: Cell, g: Cell, occ_thr: float = 0.65) -&gt; Optional[List[Cell]]:
+    """A* on 4-neighborhood; treats p_occ &gt; occ_thr as blocked."""
+    if not grid.inb(s) or not grid.inb(g):
+        return None
+    if not grid.is_free(s, occ_thr) or not grid.is_free(g, occ_thr):
+        return None
+
+    def h(c: Cell) -&gt; float:
+        return abs(c[0]-g[0]) + abs(c[1]-g[1])
+
+    openpq: List[Tuple[float, Cell]] = []
+    heapq.heappush(openpq, (h(s), s))
+    gscore: Dict[Cell, float] = {s: 0.0}
+    parent: Dict[Cell, Cell] = {}
+
+    while openpq:
+        _, cur = heapq.heappop(openpq)
+        if cur == g:
+            # reconstruct
+            path = [cur]
+            while cur in parent:
+                cur = parent[cur]
+                path.append(cur)
+            path.reverse()
+            return path
+
+        for nb in grid.neighbors4(cur):
+            if not grid.is_free(nb, occ_thr):
+                continue
+            tentative = gscore[cur] + 1.0
+            if nb not in gscore or tentative &lt; gscore[nb]:
+                gscore[nb] = tentative
+                parent[nb] = cur
+                heapq.heappush(openpq, (tentative + h(nb), nb))
+    return None
+
+def detect_frontiers(grid: OccupancyGrid, free_thr: float = 0.35) -&gt; List[Cell]:
+    """
+    A frontier cell: free (p_occ &lt; free_thr) and has a 4-neighbor unknown-ish (close to 0.5).
+    """
+    frontiers = []
+    for y in range(grid.h):
+        for x in range(grid.w):
+            c = (x, y)
+            p = grid.get(c)
+            if p &gt;= free_thr:
+                continue
+            # unknown neighbor?
+            for nb in grid.neighbors4(c):
+                pnb = grid.get(nb)
+                if abs(pnb - 0.5) &lt; 0.15:
+                    frontiers.append(c)
+                    break
+    return frontiers
+
+def expected_info_gain(grid: OccupancyGrid, pose: Cell, sensor: SensorParams) -&gt; float:
+    """
+    Approximate IG as entropy reduction over cells in sensor range, assuming observation makes
+    p_occ closer to {p_occ_obs or p_free_obs}. In a real system, this would integrate
+    measurement model over rays (LiDAR) or pixels (vision).
+    """
+    x0, y0 = pose
+    ig = 0.0
+    for dy in range(-sensor.r, sensor.r+1):
+        for dx in range(-sensor.r, sensor.r+1):
+            c = (x0+dx, y0+dy)
+            if not grid.inb(c):
+                continue
+            p0 = grid.get(c)
+            H0 = entropy_bern(p0)
+            # expected posterior entropy (simple symmetric mixture proxy)
+            # posterior becomes more "certain" than prior
+            p_post1 = clamp(sensor.p_occ_obs, 0.0, 1.0)
+            p_post0 = clamp(sensor.p_free_obs, 0.0, 1.0)
+            H_post = 0.5 * entropy_bern(p_post1) + 0.5 * entropy_bern(p_post0)
+            # only count if cell is not already certain
+            w_unc = clamp(1.0 - abs(p0 - 0.5) * 2.0, 0.0, 1.0)
+            ig += w_unc * max(0.0, H0 - H_post)
+    return ig
+
+def apply_observation(grid: OccupancyGrid, truth: OccupancyGrid, pose: Cell, sensor: SensorParams) -&gt; None:
+    """Simulate observation by revealing truth in sensor neighborhood with noisy posterior."""
+    x0, y0 = pose
+    for dy in range(-sensor.r, sensor.r+1):
+        for dx in range(-sensor.r, sensor.r+1):
+            c = (x0+dx, y0+dy)
+            if not grid.inb(c):
+                continue
+            # truth is binary obstacle vs free by thresholding its probability
+            is_occ = truth.is_occupied(c, thr=0.5)
+            grid.set(c, sensor.p_occ_obs if is_occ else sensor.p_free_obs)
+
+def pick_goal_budgeted(
+    grid: OccupancyGrid,
+    frontiers: List[Cell],
+    cur: Cell,
+    home: Cell,
+    budget: Budget,
+    rp: RobotParams,
+    sensor: SensorParams,
+    lam: float = 0.25,
+    occ_thr: float = 0.65,
+    max_candidates: int = 80
+) -&gt; Optional[Tuple[Cell, List[Cell], float]]:
+    """
+    Choose frontier maximizing U = IG(goal) - lam * travel_cost
+    subject to energy/time feasibility INCLUDING return-to-home.
+    """
+    if not frontiers:
+        return None
+
+    # subsample for speed
+    if len(frontiers) &gt; max_candidates:
+        frontiers = random.sample(frontiers, max_candidates)
+
+    best = None
+    bestU = -1e18
+    best_path = None
+
+    for g in frontiers:
+        path = astar(grid, cur, g, occ_thr=occ_thr)
+        if path is None:
+            continue
+        # cost to reach g
+        steps = max(0, len(path) - 1)
+        E_go = steps * (rp.E_step + rp.E_base)
+        T_go = steps * rp.T_step
+
+        # return cost (shortest path from g to home)
+        path_back = astar(grid, g, home, occ_thr=occ_thr)
+        if path_back is None:
+            # if we cannot guarantee return on current map, treat as infeasible
+            continue
+        steps_back = max(0, len(path_back) - 1)
+        E_back = steps_back * (rp.E_step + rp.E_base)
+        T_back = steps_back * rp.T_step
+
+        # feasibility with reserve
+        if budget.E - (E_go + E_back) &lt; rp.E_reserve:
+            continue
+        if budget.T - (T_go + T_back) &lt; 0:
+            continue
+
+        ig = expected_info_gain(grid, g, sensor)
+        U = ig - lam * (steps)  # travel cost proxy
+        if U &gt; bestU:
+            bestU = U
+            best = g
+            best_path = path
+
+    if best is None:
+        return None
+    return best, best_path, bestU
+
+def run_demo():
+    # grid and truth
+    W, H = 35, 25
+    belief = OccupancyGrid(W, H)
+    truth = OccupancyGrid(W, H)
+
+    # create synthetic obstacles in truth (maze-ish)
+    for y in range(H):
+        for x in range(W):
+            truth.set((x,y), 0.05)  # mostly free
+
+    # borders
+    for x in range(W):
+        truth.set((x,0), 0.95); truth.set((x,H-1), 0.95)
+    for y in range(H):
+        truth.set((0,y), 0.95); truth.set((W-1,y), 0.95)
+
+    # random rectangles
+    rng = random.Random(3)
+    for _ in range(8):
+        x0 = rng.randint(3, W-10)
+        y0 = rng.randint(3, H-8)
+        ww = rng.randint(3, 7)
+        hh = rng.randint(2, 5)
+        for y in range(y0, min(H-1, y0+hh)):
+            for x in range(x0, min(W-1, x0+ww)):
+                truth.set((x,y), 0.95)
+
+    # start/home
+    home = (2, 2)
+    cur = home
+
+    rp = RobotParams(E_step=1.2, T_step=1.0, E_base=0.10, E_reserve=15.0)
+    sensor = SensorParams(r=3)
+
+    # budgets
+    budget = Budget(E=160.0, T=140.0)
+
+    # initial observation
+    apply_observation(belief, truth, cur, sensor)
+
+    explored_steps = 0
+    goals_reached = 0
+
+    while True:
+        frontiers = detect_frontiers(belief)
+        if not frontiers:
+            print("No frontiers left. Exploration complete.")
+            break
+
+        choice = pick_goal_budgeted(
+            belief, frontiers, cur, home, budget, rp, sensor,
+            lam=0.35, occ_thr=0.65
+        )
+        if choice is None:
+            print("No feasible frontier under remaining budget. Returning home.")
+            break
+
+        goal, path, U = choice
+        # execute path step-by-step, update budgets and sensing
+        for step in path[1:]:
+            # consume
+            budget.E -= (rp.E_step + rp.E_base)
+            budget.T -= rp.T_step
+            explored_steps += 1
+            cur = step
+            apply_observation(belief, truth, cur, sensor)
+
+            if budget.E &lt; rp.E_reserve or budget.T &lt;= 0:
+                print("Budget exhausted mid-path. Returning home (if possible).")
+                break
+        goals_reached += 1
+
+        # stop if too low to continue safely
+        if budget.E &lt; rp.E_reserve or budget.T &lt;= 0:
+            break
+
+        if goals_reached &gt;= 40:
+            print("Stop: reached demo goal limit.")
+            break
+
+    # return home (best effort)
+    back = astar(belief, cur, home, occ_thr=0.65)
+    if back is not None:
+        for step in back[1:]:
+            budget.E -= (rp.E_step + rp.E_base)
+            budget.T -= rp.T_step
+            cur = step
+
+    print(f"Final pose: {cur}, steps: {explored_steps}, goals: {goals_reached}")
+    print(f"Remaining budget: E={budget.E:.2f}, T={budget.T:.2f}")
+
+if __name__ == "__main__":
+    run_demo()
+      </code></pre>
+
+      <p><strong>Exercise Code: Chapter17_Lesson4_Ex1.py</strong></p>
+      <pre><code class="language-python">
+# Chapter17_Lesson4_Ex1.py
+# Exercise: Greedy knapsack selection for monotone submodular set function
+# We illustrate the (1-1/e) style idea using a toy coverage objective.
+
+from __future__ import annotations
+from typing import List, Set, Tuple
+import math
+
+def greedy_submodular_knapsack(
+    items: List[Tuple[str, Set[int], float]],
+    B: float
+) -&gt; List[str]:
+    """
+    items: list of (name, covered_elements, cost)
+    objective: f(S) = |union covered|
+    choose S with sum(cost) &lt;= B maximizing f(S)
+    greedy by marginal gain per cost.
+    """
+    chosen = []
+    covered: Set[int] = set()
+    remaining = items[:]
+    budget = B
+
+    while True:
+        best = None
+        best_ratio = -1.0
+        for name, elems, cost in remaining:
+            if cost &gt; budget:
+                continue
+            marg = len((covered | elems)) - len(covered)
+            ratio = marg / cost if cost &gt; 0 else float("inf")
+            if ratio &gt; best_ratio and marg &gt; 0:
+                best_ratio = ratio
+                best = (name, elems, cost)
+
+        if best is None:
+            break
+
+        name, elems, cost = best
+        chosen.append(name)
+        covered |= elems
+        budget -= cost
+        remaining = [it for it in remaining if it[0] != name]
+
+    return chosen
+
+if __name__ == "__main__":
+    # toy environment elements 0..19 to "cover"
+    items = [
+        ("A", {0,1,2,3,4,5}, 3.0),
+        ("B", {4,5,6,7,8}, 2.0),
+        ("C", {9,10,11,12}, 2.5),
+        ("D", {12,13,14,15,16}, 3.0),
+        ("E", {16,17,18,19}, 1.8),
+        ("F", {2,3,8,9,17}, 2.2),
+    ]
+    B = 7.0
+    S = greedy_submodular_knapsack(items, B)
+    print("Budget:", B)
+    print("Chosen:", S)
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation (Same Logic, No ROS Dependency)</h2>
+    <div class="down-content">
+      <p>
+        In ROS2 C++, the same selection loop would live in a node that
+        subscribes to the map and publishes goals. Relevant libraries:
+        <code>rclcpp</code>, Nav2 costmap interfaces, and TF2 for transforms.
+        The code below remains standalone for learning clarity.
+      </p>
+
+      <p><strong>Code: Chapter17_Lesson4.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter17_Lesson4.cpp
+// Exploration Under Limited Battery/Time (Budget-Aware Frontier Exploration)
+// Self-contained demo without ROS.
+// Build: g++ -O2 -std=c++17 Chapter17_Lesson4.cpp -o demo
+#include &lt;bits/stdc++.h&gt;
+using namespace std;
+
+struct Budget { double E, T; };
+struct RobotParams { double E_step=1.2, T_step=1.0, E_base=0.10, E_reserve=15.0; };
+struct SensorParams { int r=3; };
+
+static inline double clampd(double x,double lo,double hi){ return max(lo,min(hi,x)); }
+
+static double entropyBern(double p){
+    p = clampd(p, 1e-9, 1.0-1e-9);
+    return -(p*log(p) + (1.0-p)*log(1.0-p));
+}
+
+struct Grid {
+    int W,H;
+    vector&lt;double&gt; p; // row-major p_occ
+    Grid(int w,int h):W(w),H(h),p(w*h,0.5){}
+    bool inb(int x,int y) const { return 0&lt;=x &amp;&amp; x&lt;W &amp;&amp; 0&lt;=y &amp;&amp; y&lt;H; }
+    double get(int x,int y) const { return p[y*W+x]; }
+    void setv(int x,int y,double v){ p[y*W+x]=clampd(v,0.0,1.0); }
+    bool isFree(int x,int y,double thr=0.65) const { return get(x,y) &lt; thr; }
+    bool isOcc(int x,int y,double thr=0.65) const { return get(x,y) &gt; thr; }
+};
+
+using Cell = pair&lt;int,int&gt;;
+
+static vector&lt;Cell&gt; neigh4(const Grid&amp; g, Cell c){
+    int x=c.first, y=c.second;
+    vector&lt;Cell&gt; cand={ {x+1,y},{x-1,y},{x,y+1},{x,y-1} };
+    vector&lt;Cell&gt; out;
+    for(auto &amp;q:cand) if(g.inb(q.first,q.second)) out.push_back(q);
+    return out;
+}
+
+static vector&lt;Cell&gt; astar(const Grid&amp; g, Cell s, Cell goal, double occ_thr=0.65){
+    if(!g.inb(s.first,s.second) || !g.inb(goal.first,goal.second)) return {};
+    if(!g.isFree(s.first,s.second,occ_thr) || !g.isFree(goal.first,goal.second,occ_thr)) return {};
+    auto h = [&amp;](Cell c){ return abs(c.first-goal.first)+abs(c.second-goal.second); };
+
+    unordered_map&lt;long long,double&gt; gscore;
+    unordered_map&lt;long long, long long&gt; parent;
+    auto key=[&amp;](Cell c)-&gt;long long{ return (long long)c.second*g.W + c.first; };
+
+    struct Node{ double f; Cell c; };
+    struct Cmp{ bool operator()(const Node&amp; a,const Node&amp; b) const { return a.f&gt;b.f; } };
+    priority_queue&lt;Node, vector&lt;Node&gt;, Cmp&gt; pq;
+    pq.push({(double)h(s), s});
+    gscore[key(s)] = 0.0;
+
+    while(!pq.empty()){
+        auto cur = pq.top().c; pq.pop();
+        if(cur==goal){
+            vector&lt;Cell&gt; path; path.push_back(cur);
+            long long k=key(cur);
+            while(parent.count(k)){
+                k = parent[k];
+                path.push_back({(int)(k%g.W), (int)(k/g.W)});
+            }
+            reverse(path.begin(), path.end());
+            return path;
+        }
+        long long kc=key(cur);
+        double gc=gscore[kc];
+        for(auto nb: neigh4(g,cur)){
+            if(!g.isFree(nb.first, nb.second, occ_thr)) continue;
+            long long kn=key(nb);
+            double tent = gc + 1.0;
+            if(!gscore.count(kn) || tent &lt; gscore[kn]){
+                gscore[kn]=tent;
+                parent[kn]=kc;
+                pq.push({tent + (double)h(nb), nb});
+            }
+        }
+    }
+    return {};
+}
+
+static vector&lt;Cell&gt; detectFrontiers(const Grid&amp; g, double free_thr=0.35){
+    vector&lt;Cell&gt; fr;
+    for(int y=0;y&lt;g.H;y++){
+        for(int x=0;x&lt;g.W;x++){
+            double p=g.get(x,y);
+            if(p &gt;= free_thr) continue;
+            for(auto nb: neigh4(g,{x,y})){
+                double pn=g.get(nb.first, nb.second);
+                if(fabs(pn-0.5) &lt; 0.15){ fr.push_back({x,y}); break; }
+            }
+        }
+    }
+    return fr;
+}
+
+static double expectedIG(const Grid&amp; belief, Cell pose, const SensorParams&amp; sp){
+    double ig=0.0;
+    for(int dy=-sp.r; dy&lt;=sp.r; dy++){
+        for(int dx=-sp.r; dx&lt;=sp.r; dx++){
+            int x=pose.first+dx, y=pose.second+dy;
+            if(!belief.inb(x,y)) continue;
+            double p0 = belief.get(x,y);
+            double H0 = entropyBern(p0);
+            // simple proxy posterior entropy
+            double Hpost = 0.5*entropyBern(0.95) + 0.5*entropyBern(0.05);
+            double w = clampd(1.0 - fabs(p0-0.5)*2.0, 0.0, 1.0);
+            ig += w * max(0.0, H0 - Hpost);
+        }
+    }
+    return ig;
+}
+
+static void applyObs(Grid&amp; belief, const Grid&amp; truth, Cell pose, const SensorParams&amp; sp){
+    for(int dy=-sp.r; dy&lt;=sp.r; dy++){
+        for(int dx=-sp.r; dx&lt;=sp.r; dx++){
+            int x=pose.first+dx, y=pose.second+dy;
+            if(!belief.inb(x,y)) continue;
+            bool isOcc = truth.isOcc(x,y,0.5);
+            belief.setv(x,y, isOcc ? 0.95 : 0.05);
+        }
+    }
+}
+
+static bool pickGoalBudgeted(
+    const Grid&amp; belief,
+    const vector&lt;Cell&gt;&amp; frontiers,
+    Cell cur, Cell home,
+    const Budget&amp; budget,
+    const RobotParams&amp; rp,
+    const SensorParams&amp; sp,
+    double lam,
+    Cell&amp; bestGoal,
+    vector&lt;Cell&gt;&amp; bestPath
+){
+    double bestU = -1e18;
+    bool found=false;
+    // subsample if huge
+    vector&lt;Cell&gt; cand=frontiers;
+    if((int)cand.size()&gt;80){
+        std::mt19937 rng(7);
+        shuffle(cand.begin(), cand.end(), rng);
+        cand.resize(80);
+    }
+
+    for(auto g: cand){
+        auto path = astar(belief, cur, g, 0.65);
+        if(path.empty()) continue;
+        int steps = max(0, (int)path.size()-1);
+        double Ego = steps*(rp.E_step + rp.E_base);
+        double Tgo = steps*rp.T_step;
+
+        auto back = astar(belief, g, home, 0.65);
+        if(back.empty()) continue;
+        int bsteps = max(0, (int)back.size()-1);
+        double Eback = bsteps*(rp.E_step + rp.E_base);
+        double Tback = bsteps*rp.T_step;
+
+        if(budget.E - (Ego+Eback) &lt; rp.E_reserve) continue;
+        if(budget.T - (Tgo+Tback) &lt; 0) continue;
+
+        double ig = expectedIG(belief, g, sp);
+        double U = ig - lam*steps;
+        if(U &gt; bestU){
+            bestU=U; bestGoal=g; bestPath=path; found=true;
+        }
+    }
+    return found;
+}
+
+int main(){
+    int W=35, H=25;
+    Grid belief(W,H), truth(W,H);
+
+    // truth: mostly free
+    for(int y=0;y&lt;H;y++) for(int x=0;x&lt;W;x++) truth.setv(x,y,0.05);
+
+    // borders
+    for(int x=0;x&lt;W;x++){ truth.setv(x,0,0.95); truth.setv(x,H-1,0.95); }
+    for(int y=0;y&lt;H;y++){ truth.setv(0,y,0.95); truth.setv(W-1,y,0.95); }
+
+    // random rectangles
+    std::mt19937 rng(3);
+    auto rint=[&amp;](int a,int b){ std::uniform_int_distribution&lt;int&gt; d(a,b); return d(rng); };
+    for(int k=0;k&lt;8;k++){
+        int x0=rint(3,W-10), y0=rint(3,H-8);
+        int ww=rint(3,7), hh=rint(2,5);
+        for(int y=y0;y&lt;min(H-1,y0+hh);y++)
+            for(int x=x0;x&lt;min(W-1,x0+ww);x++)
+                truth.setv(x,y,0.95);
+    }
+
+    Cell home={2,2}, cur=home;
+
+    RobotParams rp;
+    SensorParams sp;
+    Budget bud{160.0, 140.0};
+
+    applyObs(belief, truth, cur, sp);
+
+    int stepsDone=0, goals=0;
+
+    while(true){
+        auto fr = detectFrontiers(belief);
+        if(fr.empty()){
+            cout &lt;&lt; "No frontiers left.\n"; break;
+        }
+        Cell goal; vector&lt;Cell&gt; path;
+        bool ok = pickGoalBudgeted(belief, fr, cur, home, bud, rp, sp, 0.35, goal, path);
+        if(!ok){
+            cout &lt;&lt; "No feasible frontier under budget. Returning.\n";
+            break;
+        }
+        for(size_t i=1;i&lt;path.size();i++){
+            bud.E -= (rp.E_step + rp.E_base);
+            bud.T -= rp.T_step;
+            stepsDone++;
+            cur = path[i];
+            applyObs(belief, truth, cur, sp);
+            if(bud.E &lt; rp.E_reserve || bud.T &lt;= 0) break;
+        }
+        goals++;
+        if(bud.E &lt; rp.E_reserve || bud.T &lt;= 0) break;
+        if(goals &gt;= 40) { cout &lt;&lt; "Stop: demo goal limit.\n"; break; }
+    }
+
+    auto back = astar(belief, cur, home, 0.65);
+    if(!back.empty()){
+        for(size_t i=1;i&lt;back.size();i++){
+            bud.E -= (rp.E_step + rp.E_base);
+            bud.T -= rp.T_step;
+            cur = back[i];
+        }
+    }
+    cout &lt;&lt; "Final pose: ("&lt;&lt;cur.first&lt;&lt;","&lt;&lt;cur.second&lt;&lt;") steps="&lt;&lt;stepsDone&lt;&lt;" goals="&lt;&lt;goals&lt;&lt;"\n";
+    cout &lt;&lt; "Remaining budget: E="&lt;&lt;bud.E&lt;&lt;" T="&lt;&lt;bud.T&lt;&lt;"\n";
+    return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (Standalone)</h2>
+    <div class="down-content">
+      <p>
+        Java is less common on embedded AMRs today, but the algorithmic
+        structure is identical. If integrating with robotics middleware, typical
+        options include bridging to ROS via network APIs or using Java-based
+        robotics frameworks. The code below demonstrates the full budget-aware
+        loop without middleware.
+      </p>
+
+      <p><strong>Code: Chapter17_Lesson4.java</strong></p>
+      <pre><code class="language-java">
+// Chapter17_Lesson4.java
+// Exploration Under Limited Battery/Time (Budget-Aware Frontier Exploration)
+// Self-contained demo without ROS. Designed for clarity, not maximum performance.
+// Compile: javac Chapter17_Lesson4.java
+// Run:     java Chapter17_Lesson4
+import java.util.*;
+
+public class Chapter17_Lesson4 {
+
+    static class Budget { double E, T; Budget(double E,double T){this.E=E;this.T=T;} }
+    static class RobotParams { double EStep=1.2, TStep=1.0, EBase=0.10, EReserve=15.0; }
+    static class SensorParams { int r=3; }
+
+    static double clamp(double x,double lo,double hi){ return Math.max(lo, Math.min(hi, x)); }
+    static double entropyBern(double p){
+        p = clamp(p, 1e-9, 1.0-1e-9);
+        return -(p*Math.log(p) + (1.0-p)*Math.log(1.0-p));
+    }
+
+    static class Grid {
+        int W,H;
+        double[] p; // row-major
+        Grid(int W,int H){ this.W=W; this.H=H; p=new double[W*H]; Arrays.fill(p, 0.5); }
+        boolean inb(int x,int y){ return 0&lt;=x &amp;&amp; x&lt;W &amp;&amp; 0&lt;=y &amp;&amp; y&lt;H; }
+        int idx(int x,int y){ return y*W+x; }
+        double get(int x,int y){ return p[idx(x,y)]; }
+        void set(int x,int y,double v){ p[idx(x,y)] = clamp(v, 0.0, 1.0); }
+        boolean isFree(int x,int y,double thr){ return get(x,y) &lt; thr; }
+        boolean isOcc(int x,int y,double thr){ return get(x,y) &gt; thr; }
+    }
+
+    static class Cell {
+        int x,y;
+        Cell(int x,int y){ this.x=x; this.y=y; }
+        @Override public boolean equals(Object o){
+            if(!(o instanceof Cell)) return false;
+            Cell c=(Cell)o; return x==c.x &amp;&amp; y==c.y;
+        }
+        @Override public int hashCode(){ return Objects.hash(x,y); }
+    }
+
+    static List&lt;Cell&gt; neigh4(Grid g, Cell c){
+        int x=c.x,y=c.y;
+        int[][] cand={ {x+1,y},{x-1,y},{x,y+1},{x,y-1} };
+        ArrayList&lt;Cell&gt; out=new ArrayList&lt;&gt;();
+        for(int[] q:cand) if(g.inb(q[0],q[1])) out.add(new Cell(q[0],q[1]));
+        return out;
+    }
+
+    static List&lt;Cell&gt; astar(Grid g, Cell s, Cell goal, double occThr){
+        if(!g.inb(s.x,s.y) || !g.inb(goal.x,goal.y)) return Collections.emptyList();
+        if(!g.isFree(s.x,s.y,occThr) || !g.isFree(goal.x,goal.y,occThr)) return Collections.emptyList();
+
+        class Node { double f; Cell c; Node(double f,Cell c){this.f=f;this.c=c;} }
+        PriorityQueue&lt;Node&gt; pq=new PriorityQueue&lt;&gt;(Comparator.comparingDouble(a-&gt;a.f));
+        Map&lt;Cell, Double&gt; gscore=new HashMap&lt;&gt;();
+        Map&lt;Cell, Cell&gt; parent=new HashMap&lt;&gt;();
+
+        java.util.function.ToDoubleFunction&lt;Cell&gt; h = (Cell c) -&gt; Math.abs(c.x-goal.x)+Math.abs(c.y-goal.y);
+
+        pq.add(new Node(h.applyAsDouble(s), s));
+        gscore.put(s, 0.0);
+
+        while(!pq.isEmpty()){
+            Cell cur=pq.poll().c;
+            if(cur.equals(goal)){
+                ArrayList&lt;Cell&gt; path=new ArrayList&lt;&gt;();
+                path.add(cur);
+                while(parent.containsKey(cur)){
+                    cur = parent.get(cur);
+                    path.add(cur);
+                }
+                Collections.reverse(path);
+                return path;
+            }
+            double gc = gscore.get(cur);
+            for(Cell nb: neigh4(g, cur)){
+                if(!g.isFree(nb.x, nb.y, occThr)) continue;
+                double tent = gc + 1.0;
+                if(!gscore.containsKey(nb) || tent &lt; gscore.get(nb)){
+                    gscore.put(nb, tent);
+                    parent.put(nb, cur);
+                    pq.add(new Node(tent + h.applyAsDouble(nb), nb));
+                }
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    static List&lt;Cell&gt; detectFrontiers(Grid g, double freeThr){
+        ArrayList&lt;Cell&gt; fr=new ArrayList&lt;&gt;();
+        for(int y=0;y&lt;g.H;y++){
+            for(int x=0;x&lt;g.W;x++){
+                if(g.get(x,y) &gt;= freeThr) continue;
+                Cell c=new Cell(x,y);
+                for(Cell nb: neigh4(g,c)){
+                    double pn = g.get(nb.x, nb.y);
+                    if(Math.abs(pn-0.5) &lt; 0.15){ fr.add(c); break; }
+                }
+            }
+        }
+        return fr;
+    }
+
+    static double expectedIG(Grid belief, Cell pose, SensorParams sp){
+        double ig=0.0;
+        for(int dy=-sp.r; dy&lt;=sp.r; dy++){
+            for(int dx=-sp.r; dx&lt;=sp.r; dx++){
+                int x=pose.x+dx, y=pose.y+dy;
+                if(!belief.inb(x,y)) continue;
+                double p0=belief.get(x,y);
+                double H0=entropyBern(p0);
+                double Hpost=0.5*entropyBern(0.95) + 0.5*entropyBern(0.05);
+                double w=clamp(1.0 - Math.abs(p0-0.5)*2.0, 0.0, 1.0);
+                ig += w * Math.max(0.0, H0 - Hpost);
+            }
+        }
+        return ig;
+    }
+
+    static void applyObs(Grid belief, Grid truth, Cell pose, SensorParams sp){
+        for(int dy=-sp.r; dy&lt;=sp.r; dy++){
+            for(int dx=-sp.r; dx&lt;=sp.r; dx++){
+                int x=pose.x+dx, y=pose.y+dy;
+                if(!belief.inb(x,y)) continue;
+                boolean occ = truth.isOcc(x,y,0.5);
+                belief.set(x,y, occ ? 0.95 : 0.05);
+            }
+        }
+    }
+
+    static class Choice { Cell goal; List&lt;Cell&gt; path; double U; Choice(Cell g,List&lt;Cell&gt; p,double U){this.goal=g;this.path=p;this.U=U;} }
+
+    static Choice pickGoalBudgeted(
+        Grid belief, List&lt;Cell&gt; frontiers, Cell cur, Cell home,
+        Budget bud, RobotParams rp, SensorParams sp, double lam, double occThr
+    ){
+        if(frontiers.isEmpty()) return null;
+
+        // subsample
+        if(frontiers.size() &gt; 80){
+            Collections.shuffle(frontiers, new Random(7));
+            frontiers = frontiers.subList(0, 80);
+        }
+
+        double bestU=-1e18;
+        Choice best=null;
+
+        for(Cell g: frontiers){
+            List&lt;Cell&gt; path = astar(belief, cur, g, occThr);
+            if(path.isEmpty()) continue;
+            int steps = Math.max(0, path.size()-1);
+            double Ego = steps*(rp.EStep + rp.EBase);
+            double Tgo = steps*rp.TStep;
+
+            List&lt;Cell&gt; back = astar(belief, g, home, occThr);
+            if(back.isEmpty()) continue;
+            int bsteps = Math.max(0, back.size()-1);
+            double Eback = bsteps*(rp.EStep + rp.EBase);
+            double Tback = bsteps*rp.TStep;
+
+            if(bud.E - (Ego+Eback) &lt; rp.EReserve) continue;
+            if(bud.T - (Tgo+Tback) &lt; 0) continue;
+
+            double ig = expectedIG(belief, g, sp);
+            double U = ig - lam*steps;
+            if(U &gt; bestU){
+                bestU=U;
+                best = new Choice(g, path, U);
+            }
+        }
+        return best;
+    }
+
+    public static void main(String[] args){
+        int W=35, H=25;
+        Grid belief=new Grid(W,H);
+        Grid truth=new Grid(W,H);
+
+        // truth: mostly free
+        for(int y=0;y&lt;H;y++) for(int x=0;x&lt;W;x++) truth.set(x,y,0.05);
+
+        // borders
+        for(int x=0;x&lt;W;x++){ truth.set(x,0,0.95); truth.set(x,H-1,0.95); }
+        for(int y=0;y&lt;H;y++){ truth.set(0,y,0.95); truth.set(W-1,y,0.95); }
+
+        // random rectangles
+        Random rng=new Random(3);
+        for(int k=0;k&lt;8;k++){
+            int x0=3 + rng.nextInt(W-10-3+1);
+            int y0=3 + rng.nextInt(H-8-3+1);
+            int ww=3 + rng.nextInt(7-3+1);
+            int hh=2 + rng.nextInt(5-2+1);
+            for(int y=y0;y&lt;Math.min(H-1, y0+hh); y++)
+                for(int x=x0;x&lt;Math.min(W-1, x0+ww); x++)
+                    truth.set(x,y,0.95);
+        }
+
+        Cell home=new Cell(2,2);
+        Cell cur=home;
+
+        RobotParams rp=new RobotParams();
+        SensorParams sp=new SensorParams();
+        Budget bud=new Budget(160.0, 140.0);
+
+        applyObs(belief, truth, cur, sp);
+
+        int stepsDone=0, goals=0;
+
+        while(true){
+            List&lt;Cell&gt; fr = detectFrontiers(belief, 0.35);
+            if(fr.isEmpty()){
+                System.out.println("No frontiers left.");
+                break;
+            }
+            Choice ch = pickGoalBudgeted(belief, fr, cur, home, bud, rp, sp, 0.35, 0.65);
+            if(ch == null){
+                System.out.println("No feasible frontier under budget. Returning.");
+                break;
+            }
+            for(int i=1;i&lt;ch.path.size();i++){
+                bud.E -= (rp.EStep + rp.EBase);
+                bud.T -= rp.TStep;
+                stepsDone++;
+                cur = ch.path.get(i);
+                applyObs(belief, truth, cur, sp);
+                if(bud.E &lt; rp.EReserve || bud.T &lt;= 0) break;
+            }
+            goals++;
+            if(bud.E &lt; rp.EReserve || bud.T &lt;= 0) break;
+            if(goals &gt;= 40){ System.out.println("Stop: demo goal limit."); break; }
+        }
+
+        List&lt;Cell&gt; back = astar(belief, cur, home, 0.65);
+        if(!back.isEmpty()){
+            for(int i=1;i&lt;back.size();i++){
+                bud.E -= (rp.EStep + rp.EBase);
+                bud.T -= rp.TStep;
+                cur = back.get(i);
+            }
+        }
+
+        System.out.printf("Final pose: (%d,%d) steps=%d goals=%d%n", cur.x, cur.y, stepsDone, goals);
+        System.out.printf("Remaining budget: E=%.2f T=%.2f%n", bud.E, bud.T);
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is excellent for quickly validating exploration logic and budget
+        controllers. For Simulink: implement the selection policy in a MATLAB
+        Function block and manage Explore/Return logic using Stateflow. If you
+        have Robotics System Toolbox, you can also connect to ROS/ROS2 and
+        replace the internal map with live occupancy grids.
+      </p>
+
+      <p><strong>Code: Chapter17_Lesson4.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter17_Lesson4.m
+% Exploration Under Limited Battery/Time (Budget-Aware Frontier Exploration)
+% Self-contained MATLAB demo (no toolboxes required).
+%
+% Notes for Simulink:
+% - You can implement the "budget update" and "goal selection" blocks in Simulink
+%   using MATLAB Function blocks, then connect a discrete-time integrator for
+%   time and energy and a state machine (Stateflow) for Explore/Return states.
+
+clear; clc; rng(7);
+
+W = 35; H = 25;
+belief = 0.5 * ones(H, W);        % p_occ belief
+truth  = 0.05 * ones(H, W);       % synthetic truth (mostly free)
+
+% Borders as obstacles
+truth(1,:) = 0.95; truth(end,:) = 0.95;
+truth(:,1) = 0.95; truth(:,end) = 0.95;
+
+% Random rectangles
+rng(3);
+for k=1:8
+    x0 = randi([4, W-10]); y0 = randi([4, H-8]);
+    ww = randi([3, 7]);    hh = randi([2, 5]);
+    x1 = min(W-1, x0+ww);  y1 = min(H-1, y0+hh);
+    truth(y0:y1, x0:x1) = 0.95;
+end
+
+home = [3, 3];   % [x,y] with 1-based indexing
+cur  = home;
+
+% Robot/budget params
+E_step = 1.2; E_base = 0.10; T_step = 1.0;
+E_reserve = 15.0;
+E = 160.0; T = 140.0;
+
+% Sensor params
+r = 3;
+p_occ_obs = 0.95; p_free_obs = 0.05;
+
+% Initial observation
+belief = apply_observation(belief, truth, cur, r, p_occ_obs, p_free_obs);
+
+goals = 0; stepsDone = 0;
+
+while true
+    frontiers = detect_frontiers(belief, 0.35);
+    if isempty(frontiers)
+        disp("No frontiers left."); break;
+    end
+
+    [goal, path] = pick_goal_budgeted(belief, frontiers, cur, home, ...
+        E, T, E_step, E_base, T_step, E_reserve, r, 0.35);
+
+    if isempty(goal)
+        disp("No feasible frontier under budget. Returning."); break;
+    end
+
+    % Execute path (skip first cell)
+    for i = 2:size(path,1)
+        E = E - (E_step + E_base);
+        T = T - T_step;
+        stepsDone = stepsDone + 1;
+        cur = path(i,:);
+        belief = apply_observation(belief, truth, cur, r, p_occ_obs, p_free_obs);
+        if (E &lt; E_reserve) || (T &lt;= 0)
+            disp("Budget exhausted mid-path."); break;
+        end
+    end
+
+    goals = goals + 1;
+    if (E &lt; E_reserve) || (T &lt;= 0), break; end
+    if goals &gt;= 40, disp("Stop: demo goal limit."); break; end
+end
+
+fprintf("Final pose: (%d,%d) steps=%d goals=%d\n", cur(1), cur(2), stepsDone, goals);
+fprintf("Remaining budget: E=%.2f T=%.2f\n", E, T);
+
+% --------------------------- Helper functions ---------------------------
+
+function frontiers = detect_frontiers(belief, free_thr)
+    [H,W] = size(belief);
+    frontiers = [];
+    for y=1:H
+        for x=1:W
+            if belief(y,x) &gt;= free_thr, continue; end
+            nbs = neighbors4([x,y], W, H);
+            for k=1:size(nbs,1)
+                xn=nbs(k,1); yn=nbs(k,2);
+                if abs(belief(yn,xn) - 0.5) &lt; 0.15
+                    frontiers = [frontiers; x,y]; %#ok&lt;AGROW&gt;
+                    break;
+                end
+            end
+        end
+    end
+end
+
+function nbs = neighbors4(c, W, H)
+    x=c(1); y=c(2);
+    cand = [x+1,y; x-1,y; x,y+1; x,y-1];
+    keep = cand(:,1)&gt;=1 &amp; cand(:,1)&lt;=W &amp; cand(:,2)&gt;=1 &amp; cand(:,2)&lt;=H;
+    nbs = cand(keep,:);
+end
+
+function belief = apply_observation(belief, truth, pose, r, p_occ_obs, p_free_obs)
+    [H,W] = size(belief);
+    x0=pose(1); y0=pose(2);
+    for dy=-r:r
+        for dx=-r:r
+            x=x0+dx; y=y0+dy;
+            if x&lt;1 || x&gt;W || y&lt;1 || y&gt;H, continue; end
+            isOcc = truth(y,x) &gt; 0.5;
+            belief(y,x) = (isOcc)*p_occ_obs + (~isOcc)*p_free_obs;
+        end
+    end
+end
+
+function ig = expected_info_gain(belief, pose, r)
+    % nats, approximate entropy reduction proxy
+    x0=pose(1); y0=pose(2);
+    [H,W] = size(belief);
+    ig = 0.0;
+    Hpost = 0.5*bern_entropy(0.95) + 0.5*bern_entropy(0.05);
+    for dy=-r:r
+        for dx=-r:r
+            x=x0+dx; y=y0+dy;
+            if x&lt;1 || x&gt;W || y&lt;1 || y&gt;H, continue; end
+            p0 = belief(y,x);
+            H0 = bern_entropy(p0);
+            w = max(0.0, min(1.0, 1.0 - abs(p0-0.5)*2.0));
+            ig = ig + w * max(0.0, H0 - Hpost);
+        end
+    end
+end
+
+function H = bern_entropy(p)
+    p = max(1e-9, min(1-1e-9, p));
+    H = -(p*log(p) + (1-p)*log(1-p));
+end
+
+function [goal, bestPath] = pick_goal_budgeted(belief, frontiers, cur, home, ...
+        E, T, E_step, E_base, T_step, E_reserve, r, lam)
+
+    goal = []; bestPath = [];
+    bestU = -1e18;
+
+    % subsample
+    if size(frontiers,1) &gt; 80
+        idx = randperm(size(frontiers,1), 80);
+        frontiers = frontiers(idx,:);
+    end
+
+    for k=1:size(frontiers,1)
+        g = frontiers(k,:);
+        path = astar_grid(belief, cur, g, 0.65);
+        if isempty(path), continue; end
+
+        steps = size(path,1) - 1;
+        Ego = steps*(E_step + E_base);
+        Tgo = steps*T_step;
+
+        back = astar_grid(belief, g, home, 0.65);
+        if isempty(back), continue; end
+        bsteps = size(back,1) - 1;
+        Eback = bsteps*(E_step + E_base);
+        Tback = bsteps*T_step;
+
+        if (E - (Ego+Eback) &lt; E_reserve), continue; end
+        if (T - (Tgo+Tback) &lt; 0), continue; end
+
+        ig = expected_info_gain(belief, g, r);
+        U = ig - lam*steps;
+
+        if U &gt; bestU
+            bestU = U;
+            goal = g;
+            bestPath = path;
+        end
+    end
+end
+
+function path = astar_grid(belief, s, g, occThr)
+    % 4-neighbor A*; blocks if belief(y,x) &gt; occThr
+    [H,W] = size(belief);
+    if any(s&lt;1) || s(1)&gt;W || s(2)&gt;H || any(g&lt;1) || g(1)&gt;W || g(2)&gt;H
+        path = []; return;
+    end
+    if belief(s(2),s(1)) &gt; occThr || belief(g(2),g(1)) &gt; occThr
+        path = []; return;
+    end
+
+    % maps (use linear indices)
+    idx = @(x,y) (y-1)*W + x;
+    pos = @(k) [mod(k-1,W)+1, floor((k-1)/W)+1];
+
+    open = java.util.PriorityQueue();
+    gscore = containers.Map('KeyType','int32','ValueType','double');
+    parent = containers.Map('KeyType','int32','ValueType','int32');
+
+    hs = abs(s(1)-g(1)) + abs(s(2)-g(2));
+    open.add({hs, idx(s(1),s(2))});
+    gscore(idx(s(1),s(2))) = 0.0;
+
+    visited = containers.Map('KeyType','int32','ValueType','logical');
+
+    while ~open.isEmpty()
+        node = open.remove();
+        curk = node{2};
+        if isKey(visited, curk), continue; end
+        visited(curk) = true;
+
+        c = pos(curk);
+        if all(c==g)
+            % reconstruct
+            path = c;
+            while isKey(parent, curk)
+                curk = parent(curk);
+                path = [pos(curk); path]; %#ok&lt;AGROW&gt;
+            end
+            return;
+        end
+
+        nbs = neighbors4(c, W, H);
+        for i=1:size(nbs,1)
+            nb = nbs(i,:);
+            if belief(nb(2),nb(1)) &gt; occThr, continue; end
+            nbk = idx(nb(1),nb(2));
+            tent = gscore(curk) + 1.0;
+            if ~isKey(gscore, nbk) || tent &lt; gscore(nbk)
+                gscore(nbk) = tent;
+                parent(nbk) = curk;
+                f = tent + abs(nb(1)-g(1)) + abs(nb(2)-g(2));
+                open.add({f, nbk});
+            end
+        end
+    end
+    path = [];
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      11. Wolfram Mathematica (Lagrangian and Greedy Knapsack Demonstrations)
+    </h2>
+    <div class="down-content">
+      <p>
+        Mathematica is useful for symbolic reasoning about the Lagrangian
+        relaxation and for experimenting with submodular selection rules. The
+        following notebook-style Wolfram Language code (saved as
+        <strong>.nb</strong>) includes (i) a toy Lagrangian maximization and
+        (ii) a greedy knapsack selection for coverage.
+      </p>
+
+      <p><strong>Code: Chapter17_Lesson4.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter17_Lesson4.nb
+   Exploration Under Limited Battery/Time (Budget-Aware Exploration)
+   Wolfram Language code (can be pasted into a Mathematica notebook).
+*)
+
+ClearAll["Global`*"];
+
+(* 1) Utility / constrained optimization view *)
+(* Maximize expected info gain G(x) subject to energy/time cost constraints. *)
+(* Use a Lagrangian relaxation: maximize  G(x) - lambda_E C_E(x) - lambda_T C_T(x). *)
+
+G[x_] := Exp[-0.25 (x - 6)^2] + 0.5 Exp[-0.2 (x - 14)^2];   (* toy "information" peaks *)
+CE[x_] := 1.2 x + 0.10 x;                                  (* linearized energy cost *)
+CT[x_] := x;                                               (* time cost *)
+
+lambdaE = 0.05;
+lambdaT = 0.02;
+
+U[x_] := G[x] - lambdaE CE[x] - lambdaT CT[x];
+
+sol = NMaximize[{U[x], 0 &lt;= x &lt;= 20}, x]
+Plot[{G[x], U[x]}, {x, 0, 20}, PlotLegends -&gt; {"G(x)", "U(x)"}]
+
+(* 2) Submodular "coverage" objective under knapsack: f(S)=|Union coverage| *)
+(* Greedy by marginal gain per cost. *)
+
+elements = Range[0, 19];
+items = {
+   &lt;|"name" -&gt; "A", "cov" -&gt; {0, 1, 2, 3, 4, 5}, "cost" -&gt; 3.0|&gt;,
+   &lt;|"name" -&gt; "B", "cov" -&gt; {4, 5, 6, 7, 8}, "cost" -&gt; 2.0|&gt;,
+   &lt;|"name" -&gt; "C", "cov" -&gt; {9, 10, 11, 12}, "cost" -&gt; 2.5|&gt;,
+   &lt;|"name" -&gt; "D", "cov" -&gt; {12, 13, 14, 15, 16}, "cost" -&gt; 3.0|&gt;,
+   &lt;|"name" -&gt; "E", "cov" -&gt; {16, 17, 18, 19}, "cost" -&gt; 1.8|&gt;,
+   &lt;|"name" -&gt; "F", "cov" -&gt; {2, 3, 8, 9, 17}, "cost" -&gt; 2.2|&gt;
+};
+
+f[S_] := Length[Union @@ (Lookup[S, "cov"])];
+
+GreedyKnapsack[items_, B_] := Module[{S = {}, covered = {}, rem = items, budget = B, best, bestRatio},
+  While[True,
+    best = None; bestRatio = -Infinity;
+    Do[
+      If[item["cost"] &lt;= budget,
+        With[{marg = Length[Union[covered, item["cov"]]] - Length[covered]},
+          If[marg &gt; 0,
+            With[{ratio = marg/item["cost"]},
+              If[ratio &gt; bestRatio, bestRatio = ratio; best = item]
+            ]
+          ]
+        ]
+      ],
+      {item, rem}
+    ];
+    If[best === None, Break[]];
+    AppendTo[S, best];
+    covered = Union[covered, best["cov"]];
+    budget -= best["cost"];
+    rem = DeleteCases[rem, best];
+  ];
+  &lt;|"chosen" -&gt; Lookup[S, "name"], "coveredCount" -&gt; Length[covered], "budgetLeft" -&gt; budget|&gt;
+];
+
+GreedyKnapsack[items, 7.0]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Return-feasibility under energy budget):</strong>
+        A robot has remaining energy
+        <strong>\( E_{\text{rem} }=120 \)</strong> (arb. units) and reserve
+        <strong>\( E_{\text{res} }=20 \)</strong>. The estimated
+        energy-per-meter is <strong>\( c_E=2 \)</strong> and base term is
+        ignored. Current-to-goal distance is
+        <strong>\( d(x,g)=15 \)</strong> meters and goal-to-home is
+        <strong>\( d(g,h)=18 \)</strong> meters. Is
+        <strong>\( g \)</strong> feasible?
+      </p>
+      <p><strong>Solution:</strong> Estimated required travel energy is:</p>
+      <h4 class="mathJax">
+        \[ \widehat{C}_E(x\rightarrow g) + \widehat{C}_E(g\rightarrow h) =
+        c_E\big(d(x,g)+d(g,h)\big) = 2(15+18)=66 \]
+      </h4>
+      <p>
+        The feasibility condition is
+        <strong>\( E_{\text{rem} } - 66 \ge E_{\text{res} } \)</strong>, i.e.,
+        <strong>\( 120-66=54 \ge 20 \)</strong>. Feasible.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Lagrangian selection between two frontiers):</strong>
+        Two candidate targets have information gains
+        <strong>\( \operatorname{IG}_1=9 \)</strong>,
+        <strong>\( \operatorname{IG}_2=7 \)</strong>. Their travel costs (in
+        steps) are <strong>\( c_1=20 \)</strong>, <strong>\( c_2=10 \)</strong>.
+        Using a utility <strong>\( U=\operatorname{IG} - \lambda c \)</strong>,
+        find the range of <strong>\( \lambda \)</strong> where target 2 is
+        preferred.
+      </p>
+      <p><strong>Solution:</strong> Prefer 2 when:</p>
+      <h4 class="mathJax">
+        \[ 7 - \lambda(10) \ge 9 - \lambda(20) \;\;\Longleftrightarrow\;\; -2
+        \ge -10\lambda \;\;\Longleftrightarrow\;\; \lambda \ge 0.2 \]
+      </h4>
+      <p>
+        For <strong>\( \lambda \ge 0.2 \)</strong>, cost is weighted strongly
+        enough that the cheaper target wins.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Submodularity of coverage):</strong>
+        Let
+        <strong>\( f(S)=\left|\bigcup_{a\in S}\mathcal{V}(a)\right| \)</strong>.
+        Prove the diminishing returns property: for
+        <strong>\( A \subseteq B \)</strong> and
+        <strong>\( a\notin B \)</strong>,
+        <strong>\( f(A\cup\{a\})-f(A)\ge f(B\cup\{a\})-f(B) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Write the marginal gains as new elements
+        introduced by <strong>\( a \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ f(A\cup\{a\})-f(A) = \left|\mathcal{V}(a)\setminus \bigcup_{u\in
+        A}\mathcal{V}(u)\right| \]
+      </h4>
+      <h4 class="mathJax">
+        \[ f(B\cup\{a\})-f(B) = \left|\mathcal{V}(a)\setminus \bigcup_{u\in
+        B}\mathcal{V}(u)\right| \]
+      </h4>
+      <p>
+        Since <strong>\( A \subseteq B \)</strong>, we have
+        <strong
+          >\( \bigcup_{u\in A}\mathcal{V}(u) \subseteq \bigcup_{u\in
+          B}\mathcal{V}(u) \)</strong
+        >, therefore the set subtracted in the first expression is smaller, and
+        the remaining set is larger: the cardinality cannot decrease when
+        subtracting a smaller set. Hence the inequality holds.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Greedy gap decay inequality):</strong>
+        Assume a monotone submodular <strong>\( f \)</strong> and a knapsack
+        budget <strong>\( B \)</strong>. Show that if greedy picks
+        <strong>\( a_{k+1} \)</strong> with cost <strong>\( c_{k+1} \)</strong>,
+        then a typical gap inequality can be written as:
+        <strong
+          >\( f(S_{k+1}) - f(S_k) \ge \frac{c_{k+1} }{B}(f(S^\star)-f(S_k))
+          \)</strong
+        >
+        under the “average remaining density” argument.
+      </p>
+      <p>
+        <strong>Solution:</strong> Consider an optimal set
+        <strong>\( S^\star \)</strong> with total cost at most
+        <strong>\( B \)</strong>. By submodularity and monotonicity, the total
+        gain of adding all items in <strong>\( S^\star \)</strong> to
+        <strong>\( S_k \)</strong> is:
+      </p>
+      <h4 class="mathJax">
+        \[ f(S_k \cup S^\star) - f(S_k) \le \sum_{a\in
+        S^\star}\big(f(S_k\cup\{a\}) - f(S_k)\big) \]
+      </h4>
+      <p>
+        The left-hand side is at least
+        <strong>\( f(S^\star)-f(S_k) \)</strong> by monotonicity. Hence:
+      </p>
+      <h4 class="mathJax">
+        \[ f(S^\star)-f(S_k) \le \sum_{a\in S^\star}\Delta_k(a) \]
+      </h4>
+      <p>
+        where <strong>\( \Delta_k(a)=f(S_k\cup\{a\})-f(S_k) \)</strong>. Divide
+        and multiply by costs and use that
+        <strong>\( \sum_{a\in S^\star}c(a)\le B \)</strong>. There must exist
+        some item in <strong>\( S^\star \)</strong> whose density satisfies:
+      </p>
+      <h4 class="mathJax">
+        \[ \max_{a}\frac{\Delta_k(a)}{c(a)} \ge \frac{f(S^\star)-f(S_k)}{B} \]
+      </h4>
+      <p>
+        Greedy chooses an item with density at least this maximum; thus for the
+        chosen item <strong>\( a_{k+1} \)</strong>:
+        <strong
+          >\( \Delta_k(a_{k+1}) \ge \frac{c_{k+1} }{B}(f(S^\star)-f(S_k))
+          \)</strong
+        >, proving the stated inequality.
+      </p>
+
+      <p>
+        <strong
+          >Problem 5 (Triangle-inequality “go/no-go” test on grids):</strong
+        >
+        Suppose your planner uses a metric distance
+        <strong>\( d \)</strong> (shortest path) satisfying triangle inequality.
+        Show that if <strong>\( d(x,g) + d(g,h) \le D_{\max} \)</strong>, then
+        any intermediate point <strong>\( y \)</strong> on a shortest path from
+        <strong>\( x \)</strong> to <strong>\( g \)</strong>
+        also satisfies
+        <strong>\( d(y,h) \le D_{\max} - d(x,y) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Let <strong>\( y \)</strong> lie on a
+        shortest path from <strong>\( x \)</strong> to <strong>\( g \)</strong>,
+        so <strong>\( d(x,g)=d(x,y)+d(y,g) \)</strong>. Then:
+      </p>
+      <h4 class="mathJax">
+        \[ d(y,h) \le d(y,g)+d(g,h) = \big(d(x,g)-d(x,y)\big)+d(g,h) \]
+      </h4>
+      <p>
+        Using the assumption <strong>\( d(x,g)+d(g,h)\le D_{\max} \)</strong>,
+        we get:
+      </p>
+      <h4 class="mathJax">\[ d(y,h) \le D_{\max} - d(x,y) \]</h4>
+      <p>
+        This inequality justifies a conservative “keep return margin” rule while
+        executing a path.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        We modeled exploration under <strong>energy</strong> and
+        <strong>time</strong> budgets, introduced a constrained information-gain
+        objective, and derived practical selection rules via Lagrangian
+        relaxation. We then connected exploration viewpoint selection to
+        <strong>submodular maximization under knapsack</strong>, explaining why
+        greedy “gain-per-cost” heuristics are effective. Finally, we enforced
+        <strong>terminal feasibility</strong> (must-return constraint) and
+        implemented a receding-horizon budget-aware frontier explorer in Python,
+        C++, Java, MATLAB, and Mathematica.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Yamauchi, B. (1997). A frontier-based approach for autonomous
+        exploration.
+        <em
+          >Proceedings of IEEE International Symposium on Computational
+          Intelligence in Robotics and Automation (CIRA)</em
+        >.
+      </li>
+      <li>
+        Burgard, W., Moors, M., Stachniss, C., &amp; Schneider, F.E. (2005).
+        Coordinated multi-robot exploration.
+        <em>IEEE Transactions on Robotics</em>, 21(3), 376–386.
+      </li>
+      <li>
+        Stachniss, C., Grisetti, G., &amp; Burgard, W. (2005). Information
+        gain-based exploration using Rao–Blackwellized particle filters.
+        <em>Robotics: Science and Systems (RSS)</em>.
+      </li>
+      <li>
+        Singh, A., Krause, A., Guestrin, C., Kaiser, W.J., &amp; Batalin, M.A.
+        (2009). Efficient informative sensing using multiple robots.
+        <em>Journal of Artificial Intelligence Research</em>, 34, 707–755.
+      </li>
+      <li>
+        Nemhauser, G.L., Wolsey, L.A., &amp; Fisher, M.L. (1978). An analysis of
+        approximations for maximizing submodular set functions.
+        <em>Mathematical Programming</em>, 14, 265–294.
+      </li>
+      <li>
+        Krause, A., &amp; Guestrin, C. (2007). Near-optimal observation
+        selection using submodular functions.
+        <em>Proceedings of the AAAI Conference on Artificial Intelligence</em>.
+      </li>
+      <li>
+        Bry, A., &amp; Roy, N. (2011). Rapidly-exploring random belief trees for
+        motion planning under uncertainty.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >.
+      </li>
+      <li>
+        Hollinger, G.A., &amp; Sukhatme, G.S. (2014). Sampling-based robotic
+        information gathering algorithms.
+        <em>The International Journal of Robotics Research</em>, 33(9),
+        1271–1287.
+      </li>
+      <li>
+        Charrow, B., Liu, S., Kumar, V., &amp; Michael, N. (2015).
+        Information-theoretic mapping using Cauchy-Schwarz quadratic mutual
+        information.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >.
+      </li>
+      <li>
+        Atanasov, N., Zhu, M., Daniilidis, K., &amp; Pappas, G.J. (2014).
+        Information acquisition with sensing robots: Algorithms and error
+        bounds.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter17/Lesson3.html">
+          Lesson 3: Next-Best-View Strategies
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter17/Lesson5.html">
+          Lesson 5: Lab: Autonomous Exploration in Unknown Map
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="active-lesson" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

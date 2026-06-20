@@ -1,0 +1,2280 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 16: Obstacle Avoidance in Dynamic Environments - Lesson 1: Sensing Dynamic Obstacles | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 16: Obstacle Avoidance in Dynamic Environments</h1>
+    <h3><strong>Lesson 1: Sensing Dynamic Obstacles</strong></h3>
+    <p>
+      This lesson formalizes how an AMR turns raw sensor streams into
+      <em>dynamic-obstacle states</em>
+      (position, velocity, and uncertainty) suitable for downstream avoidance
+      algorithms. We focus on the perception-and-tracking layer: (i) sensor
+      measurement models for moving objects, (ii) extracting detections from
+      LiDAR/radar/vision, (iii) multi-target tracking with probabilistic gating
+      and data association, and (iv) practical fusion issues (ego-motion
+      compensation, time alignment, occlusion, and clutter).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In earlier chapters you learned map representations (occupancy grids),
+        probabilistic state estimation, and scan processing. Here we apply those
+        tools to <em>moving</em> objects. A dynamic obstacle is modeled as a
+        random state <strong>\( \mathbf{x}_k \)</strong> (e.g., position and
+        velocity) observed through noisy sensor measurements
+        <strong>\( \mathbf{z}_k \)</strong>.
+      </p>
+
+      <p>
+        A minimal output of the sensing layer at time
+        <strong>\( k \)</strong> is a set of tracks
+        <strong
+          >\( \{(\hat{\mathbf{x} }_k^j,\, \mathbf{P}_k^j)\}_{j=1}^{N_k}
+          \)</strong
+        >, where <strong>\( \hat{\mathbf{x} }_k^j \)</strong> is the estimated
+        state of obstacle <strong>\( j \)</strong> and
+        <strong>\( \mathbf{P}_k^j \)</strong> is its covariance (uncertainty
+        ellipse in 2D). These tracks feed the avoidance policy in Lesson 2
+        (velocity-based constraints) and Lesson 4 (prediction-aware planning).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sensors: LiDAR / radar / camera / depth"] --> P["Preprocess: sync, filter, deskew"]
+  P --> E["Ego-motion compensation: transform to common frame"]
+  E --> D["Detection: cluster/segment -> object measurements z_k"]
+  D --> T["Tracking: predict, gate, associate, update"]
+  T --> O["Output tracks: (xhat_k^j, P_k^j), j=1..N_k"]
+  O --> C["Local planner consumes tracks (next lessons)"]
+        </pre>
+      </div>
+
+      <p>
+        Two key difficulties distinguish dynamic-obstacle sensing from static
+        mapping: (1) <strong>data association</strong> (which measurement
+        belongs to which obstacle), and (2)
+        <strong>occlusion/clutter</strong> (objects temporarily disappear and
+        false detections appear). Both are handled naturally in a probabilistic
+        tracking formulation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Sensor Modalities and Measurement Models -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Sensor Modalities and Measurement Models</h2>
+    <div class="down-content">
+      <p>
+        We focus on sensors commonly used by AMRs: LiDAR (dense geometry), radar
+        (robust velocity/long range), and camera/depth (semantics). Regardless
+        of modality, we start from a measurement model
+        <strong>\( \mathbf{z}_k = h(\mathbf{x}_k) + \mathbf{v}_k \)</strong>
+        with noise
+        <strong
+          >\( \mathbf{v}_k \sim \mathcal{N}(\mathbf{0},\mathbf{R}_k) \)</strong
+        >.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{z}_k = h(\mathbf{x}_k) + \mathbf{v}_k,\quad
+        E[\mathbf{v}_k]=\mathbf{0},\quad
+        E[\mathbf{v}_k\mathbf{v}_k^\top]=\mathbf{R}_k. \]
+      </h4>
+
+      <p>
+        For a 2D ground robot (planar motion), a common obstacle state is
+        constant-velocity (CV):
+        <strong>\( \mathbf{x}_k = [p_x,\, p_y,\, v_x,\, v_y]^\top \)</strong>.
+        If a detector returns a 2D position measurement (e.g., a LiDAR cluster
+        centroid), then the measurement is linear:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{z}_k = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0
+        \end{bmatrix} \mathbf{x}_k + \mathbf{v}_k \equiv \mathbf{H}\mathbf{x}_k
+        + \mathbf{v}_k. \]
+      </h4>
+
+      <p>
+        All sensors report in their own coordinate frame. Using rigid transforms
+        from the robot’s frame tree (already covered in kinematics/dynamics), we
+        convert each point or detection into a common frame. In planar motion,
+        with robot pose <strong>\( (x_r,y_r,\theta_r) \)</strong> and a point
+        <strong>\( \mathbf{p}^b=[p_x^b, p_y^b]^\top \)</strong> in the robot
+        base frame, the world-frame point is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{p}^w = \begin{bmatrix} \cos\theta_r & -\sin\theta_r \\
+        \sin\theta_r & \cos\theta_r \end{bmatrix} \mathbf{p}^b + \begin{bmatrix}
+        x_r \\ y_r \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        <strong>Time alignment.</strong> A practical AMR issue is that sensors
+        are not instantaneous: a LiDAR scan is acquired over a time window, and
+        cameras/radar have latency. A standard fix is: (i) timestamp everything,
+        (ii) interpolate the robot pose using your localization estimate, and
+        (iii) “deskew” measurements to a single reference time before
+        detection/tracking.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: From Raw Returns to Detections -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. From Raw Returns to Detections</h2>
+    <div class="down-content">
+      <p>
+        A tracker consumes <em>detections</em>, not raw pixels/points. The
+        sensing stack must therefore produce a finite set
+        <strong>\( \mathcal{Z}_k = \{\mathbf{z}_k^i\}_{i=1}^{M_k} \)</strong>.
+        For LiDAR, a standard pipeline is:
+      </p>
+      <ul>
+        <li>
+          <strong>Geometric filtering:</strong> remove ground (in 3D) or range
+          outliers; optionally downsample.
+        </li>
+        <li>
+          <strong>Clustering/segmentation:</strong> group nearby points into
+          candidate objects (e.g., DBSCAN).
+        </li>
+        <li>
+          <strong>Feature extraction:</strong> centroid, bounding box, and/or
+          shape parameters.
+        </li>
+      </ul>
+
+      <p>
+        A centroid detector summarizes a cluster
+        <strong>\( \mathcal{C}_i \subset \mathbb{R}^2 \)</strong> as
+        <strong
+          >\( \mathbf{z}_k^i = \frac{1}{|\mathcal{C}_i|} \sum_{\mathbf{p} \in
+          \mathcal{C}_i} \mathbf{p} \)</strong
+        >. The centroid noise covariance
+        <strong>\( \mathbf{R}_k \)</strong> depends on sensor noise, point
+        density, and cluster geometry.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{z}_k^i \triangleq
+        \frac{1}{|\mathcal{C}_i|}\sum_{\mathbf{p}\in\mathcal{C}_i}\mathbf{p},\qquad
+        \mathbf{R}_k^i \approx
+        \frac{1}{|\mathcal{C}_i|}\mathbf{\Sigma}_{\text{point} }\;\;
+        (\text{rough scaling}). \]
+      </h4>
+
+      <p>
+        <strong>Dynamic-vs-static separation.</strong> If you already have a
+        static map, you can reject detections that align with static structure.
+        Even without a global map, you can exploit
+        <em>temporal inconsistency</em>: after ego-motion compensation, static
+        returns are consistent across frames, while moving objects exhibit
+        residual motion. This motivates “motion segmentation” by comparing
+        consecutive frames.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Multi-Target Tracking, Gating, and Association -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Multi-Target Tracking, Gating, and Association</h2>
+    <div class="down-content">
+      <p>
+        We model each obstacle with a linear-Gaussian state space model (CV in
+        2D):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{F}\mathbf{x}_k + \mathbf{w}_k,\quad
+        \mathbf{w}_k \sim \mathcal{N}(\mathbf{0},\mathbf{Q}), \qquad
+        \mathbf{z}_k = \mathbf{H}\mathbf{x}_k + \mathbf{v}_k,\quad \mathbf{v}_k
+        \sim \mathcal{N}(\mathbf{0},\mathbf{R}). \]
+      </h4>
+
+      <p>
+        With sampling time <strong>\( \Delta t \)</strong>, the CV transition
+        is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{F} = \begin{bmatrix} 1&0&\Delta t&0\\ 0&1&0&\Delta t\\
+        0&0&1&0\\ 0&0&0&1 \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        If we assume <em>white acceleration</em> with standard deviation
+        <strong>\( \sigma_a \)</strong> per axis, the process noise covariance
+        is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{Q} = \sigma_a^2 \begin{bmatrix} \tfrac{\Delta t^4}{4} & 0 &
+        \tfrac{\Delta t^3}{2} & 0 \\ 0 & \tfrac{\Delta t^4}{4} & 0 &
+        \tfrac{\Delta t^3}{2} \\ \tfrac{\Delta t^3}{2} & 0 & \Delta t^2 & 0 \\ 0
+        & \tfrac{\Delta t^3}{2} & 0 & \Delta t^2 \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        <strong>Single-track Kalman filter.</strong> For predicted
+        mean/covariance
+        <strong>\( (\hat{\mathbf{x} }_{k|k-1},\,\mathbf{P}_{k|k-1}) \)</strong>,
+        the innovation is
+        <strong
+          >\( \mathbf{y}_k = \mathbf{z}_k - \mathbf{H}\hat{\mathbf{x} }_{k|k-1}
+          \)</strong
+        >
+        with covariance
+        <strong
+          >\( \mathbf{S}_k = \mathbf{H}\mathbf{P}_{k|k-1}\mathbf{H}^\top +
+          \mathbf{R} \)</strong
+        >.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{K}_k =
+        \mathbf{P}_{k|k-1}\mathbf{H}^\top\mathbf{S}_k^{-1},\quad \hat{\mathbf{x}
+        }_{k|k} = \hat{\mathbf{x} }_{k|k-1} + \mathbf{K}_k\mathbf{y}_k,\\
+        \mathbf{P}_{k|k} =
+        (\mathbf{I}-\mathbf{K}_k\mathbf{H})\mathbf{P}_{k|k-1}(\mathbf{I}-\mathbf{K}_k\mathbf{H})^\top
+        + \mathbf{K}_k\mathbf{R}\mathbf{K}_k^\top. \]
+      </h4>
+
+      <p>
+        <strong>Gating (statistical consistency test).</strong> Define the
+        squared Mahalanobis distance
+        <strong
+          >\( d_k^2 = \mathbf{y}_k^\top\mathbf{S}_k^{-1}\mathbf{y}_k \)</strong
+        >. If the innovation is truly Gaussian with covariance
+        <strong>\( \mathbf{S}_k \)</strong>, then
+        <strong>\( d_k^2 \sim \chi^2_m \)</strong> where
+        <strong>\( m \)</strong> is the measurement dimension (here
+        <strong>\( m=2 \)</strong>). Choose a gate
+        <strong>\( \gamma \)</strong> such that
+        <strong>\( \Pr(d_k^2 \le \gamma)=p_g \)</strong>. Measurements with
+        <strong>\( d_k^2 &gt; \gamma \)</strong> are rejected as unlikely.
+      </p>
+
+      <h4 class="mathJax">
+        \[ d_k^2 \triangleq
+        \mathbf{y}_k^\top\mathbf{S}_k^{-1}\mathbf{y}_k,\qquad d_k^2 \sim
+        \chi^2_m,\qquad \gamma = F_{\chi^2_m}^{-1}(p_g). \]
+      </h4>
+
+      <p>
+        <strong>Data association (nearest-neighbor, teaching baseline).</strong>
+        Given a set of tracks and detections, compute gated distances and pick
+        the smallest distances under a one-to-one constraint (greedy NN is a
+        simple approximation; global assignment uses the Hungarian algorithm).
+        Unmatched detections spawn new tracks; unmatched tracks age and are
+        deleted after too many misses.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Predicted tracks: (xhat,P)"] --> G["Compute innovation y and distance d2 for each (track,det)"]
+  G --> H1["Reject pairs with d2 > gamma (gate)"]
+  H1 --> M["Associate remaining pairs (NN / global assignment)"]
+  M --> U["Update matched tracks (KF)"]
+  M --> UM1["Unmatched tracks: \nmiss++"]
+  M --> UM2["Unmatched detections: \nspawn new track"]
+  U --> PR["Prune tracks with miss > M_max"]
+  UM1 --> PR
+  UM2 --> PR
+        </pre>
+      </div>
+
+      <p>
+        <strong>What you should take away:</strong> dynamic-obstacle sensing is
+        not only “detecting” objects. It is maintaining a
+        <em>probabilistic memory</em> over time with explicit uncertainty, which
+        is essential for safe avoidance under occlusions and clutter.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Practical Fusion Issues -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Practical Fusion Issues: Ego-Motion, Multi-Sensor, and Occlusion</h2>
+    <div class="down-content">
+      <p>
+        <strong>Ego-motion compensation.</strong> If the robot moves, raw point
+        clouds “move” even for static objects. You already have a pose estimate
+        <strong>\( \hat{\mathbf{x} }^{\text{robot} }_k \)</strong> from
+        localization. Always transform sensor data into a common frame
+        (typically the local map frame) before differencing or tracking.
+      </p>
+
+      <p>
+        <strong>Multi-sensor fusion (sequential updates).</strong> If two
+        sensors provide conditionally independent measurements of the same track
+        at the same time step, you can update sequentially without double
+        counting. Let <strong>\( (\mathbf{H}_1,\mathbf{R}_1) \)</strong> and
+        <strong>\( (\mathbf{H}_2,\mathbf{R}_2) \)</strong>
+        be two measurement models with independent noises. Starting from a prior
+        <strong>\( (\hat{\mathbf{x} },\mathbf{P}) \)</strong>, apply update 1
+        then update 2. This is equivalent to a batch update with stacked
+        measurement (proved in the Problems section).
+      </p>
+
+      <h4 class="mathJax">
+        \[ \text{If } \mathbf{v}_1 \perp \mathbf{v}_2,\; \text{then }\;
+        p(\mathbf{x}\mid\mathbf{z}_1,\mathbf{z}_2) \propto
+        p(\mathbf{z}_1\mid\mathbf{x})\,p(\mathbf{z}_2\mid\mathbf{x})\,p(\mathbf{x}).
+        \]
+      </h4>
+
+      <p>
+        <strong>Occlusion and track management.</strong> In crowds, obstacles
+        disappear behind others. Track life-cycle logic (confirmed/tentative,
+        max-miss count, and re-identification) prevents instability. In this
+        lesson we implement a minimal rule: delete tracks after
+        <strong>\( M_{\max} \)</strong> consecutive misses.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following reference implementations are designed to be
+        <em>didactic</em>. They do not require ROS, but each includes pointers
+        to typical robotics libraries: ROS2
+        (<code>rclpy</code>/<code>rclcpp</code>), PCL (LiDAR clustering), OpenCV
+        (vision), and Eigen (linear algebra).
+      </p>
+
+      <h3>6.1 Python (prototype + visualization)</h3>
+      <p><strong>File:</strong> Chapter16_Lesson1.py</p>
+      <pre><code class="language-python">
+&quot;&quot;&quot;
+Chapter16_Lesson1.py
+Sensing Dynamic Obstacles — Detection + Multi-Target Tracking (Teaching Baseline)
+
+This script demonstrates:
+1) Synthetic moving obstacles (2D constant-velocity model)
+2) Noisy detections with clutter
+3) Multi-target tracking with: KF (per track) + chi-square gating + greedy NN association
+
+Dependencies: numpy, matplotlib
+Optional: scipy (for chi-square inverse CDF) — if not available, uses a small lookup.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def chi2_inv_cdf(p: float, dof: int) -&gt; float:
+    &quot;&quot;&quot;
+    Approximate inverse CDF of chi-square for teaching/demo.
+    If SciPy is available, use scipy.stats.chi2.ppf.
+    &quot;&quot;&quot;
+    try:
+        from scipy.stats import chi2  # type: ignore
+        return float(chi2.ppf(p, dof))
+    except Exception:
+        # Coarse fallback table for dof=2,4 at common probabilities (pg)
+        table = {
+            (2, 0.90): 4.605,
+            (2, 0.95): 5.991,
+            (2, 0.97): 7.378,
+            (2, 0.99): 9.210,
+            (4, 0.90): 7.779,
+            (4, 0.95): 9.488,
+            (4, 0.97): 11.143,
+            (4, 0.99): 13.277,
+        }
+        key = (dof, round(p, 2))
+        if key in table:
+            return table[key]
+        # Very rough Wilson–Hilferty approximation
+        # X ~ chi2_k =&gt; (X/k)^(1/3) approx N(1-2/(9k), 2/(9k))
+        k = float(dof)
+        z = math.sqrt(2) * erfinv(2 * p - 1)  # approx normal quantile
+        return k * (1 - 2/(9*k) + z * math.sqrt(2/(9*k)))**3
+
+
+def erfinv(x: float) -&gt; float:
+    &quot;&quot;&quot;Approximate inverse error function (for fallback chi-square).&quot;&quot;&quot;
+    # Winitzki approximation
+    a = 0.147
+    s = 1.0 if x &gt;= 0 else -1.0
+    ln = math.log(1.0 - x * x)
+    t = 2.0/(math.pi*a) + ln/2.0
+    return s * math.sqrt(math.sqrt(t*t - ln/a) - t)
+
+
+def make_F_Q(dt: float, sigma_a: float) -&gt; tuple[np.ndarray, np.ndarray]:
+    F = np.array([
+        [1, 0, dt, 0],
+        [0, 1, 0, dt],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+    ], dtype=float)
+
+    q = sigma_a**2
+    Q = q * np.array([
+        [dt**4/4, 0,        dt**3/2, 0],
+        [0,       dt**4/4,  0,       dt**3/2],
+        [dt**3/2, 0,        dt**2,   0],
+        [0,       dt**3/2,  0,       dt**2],
+    ], dtype=float)
+    return F, Q
+
+
+def kf_predict(x: np.ndarray, P: np.ndarray, F: np.ndarray, Q: np.ndarray) -&gt; tuple[np.ndarray, np.ndarray]:
+    x2 = F @ x
+    P2 = F @ P @ F.T + Q
+    return x2, P2
+
+
+def kf_update(x: np.ndarray, P: np.ndarray, z: np.ndarray, H: np.ndarray, R: np.ndarray) -&gt; tuple[np.ndarray, np.ndarray, float]:
+    y = z - H @ x
+    S = H @ P @ H.T + R
+    K = P @ H.T @ np.linalg.inv(S)
+
+    x2 = x + K @ y
+    I = np.eye(P.shape[0])
+    # Joseph form for numerical stability
+    P2 = (I - K @ H) @ P @ (I - K @ H).T + K @ R @ K.T
+
+    d2 = float(y.T @ np.linalg.inv(S) @ y)  # Mahalanobis distance squared
+    return x2, P2, d2
+
+
+class Track:
+    def __init__(self, x: np.ndarray, P: np.ndarray, track_id: int):
+        self.x = x.copy()
+        self.P = P.copy()
+        self.id = track_id
+        self.age = 1
+        self.hits = 1
+        self.misses = 0
+
+    def predict(self, F: np.ndarray, Q: np.ndarray):
+        self.x, self.P = kf_predict(self.x, self.P, F, Q)
+        self.age += 1
+
+    def update(self, z: np.ndarray, H: np.ndarray, R: np.ndarray):
+        self.x, self.P, _ = kf_update(self.x, self.P, z, H, R)
+        self.hits += 1
+        self.misses = 0
+
+
+def greedy_nn_association(tracks: list[Track], Z: np.ndarray, H: np.ndarray, R: np.ndarray, gate_gamma: float) -&gt; tuple[list[tuple[int,int]], list[int], list[int]]:
+    &quot;&quot;&quot;
+    Return matched pairs (track_index, meas_index), unmatched_tracks, unmatched_meas.
+    Greedy NN on gated Mahalanobis distance (teaching baseline).
+    &quot;&quot;&quot;
+    if len(tracks) == 0:
+        return [], [], list(range(len(Z)))
+    if len(Z) == 0:
+        return [], list(range(len(tracks))), []
+
+    pairs = []
+    for ti, trk in enumerate(tracks):
+        # Innovation covariance S for each track (same H, R)
+        S = H @ trk.P @ H.T + R
+        S_inv = np.linalg.inv(S)
+        zhat = H @ trk.x
+        for mi, z in enumerate(Z):
+            y = z - zhat
+            d2 = float(y.T @ S_inv @ y)
+            if d2 &lt;= gate_gamma:
+                pairs.append((d2, ti, mi))
+
+    pairs.sort(key=lambda t: t[0])
+
+    matched_tracks = set()
+    matched_meas = set()
+    matches: list[tuple[int,int]] = []
+    for d2, ti, mi in pairs:
+        if ti in matched_tracks or mi in matched_meas:
+            continue
+        matched_tracks.add(ti)
+        matched_meas.add(mi)
+        matches.append((ti, mi))
+
+    unmatched_tracks = [i for i in range(len(tracks)) if i not in matched_tracks]
+    unmatched_meas = [i for i in range(len(Z)) if i not in matched_meas]
+    return matches, unmatched_tracks, unmatched_meas
+
+
+def simulate_truth(num_targets: int, T: int, dt: float, area: float, seed: int = 0) -&gt; np.ndarray:
+    &quot;&quot;&quot;
+    Truth states: shape (T, num_targets, 4) for [px,py,vx,vy]
+    &quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    X = np.zeros((T, num_targets, 4), dtype=float)
+    # Random initial positions and velocities
+    X[0, :, 0:2] = rng.uniform(-area, area, size=(num_targets, 2))
+    X[0, :, 2:4] = rng.uniform(-1.2, 1.2, size=(num_targets, 2))
+    for k in range(1, T):
+        X[k, :, 0:2] = X[k-1, :, 0:2] + dt * X[k-1, :, 2:4]
+        X[k, :, 2:4] = X[k-1, :, 2:4]
+        # bounce on boundaries
+        for j in range(num_targets):
+            for ax in [0, 1]:
+                if abs(X[k, j, ax]) &gt; area:
+                    X[k, j, ax] = np.clip(X[k, j, ax], -area, area)
+                    X[k, j, ax+2] *= -1.0
+    return X
+
+
+def generate_measurements(truth: np.ndarray, sigma_z: float, p_detect: float, clutter_rate: int, area: float, seed: int = 1) -&gt; list[np.ndarray]:
+    &quot;&quot;&quot;
+    For each time k, return array Z_k of detections [px,py] with noise, missed detections, and uniform clutter.
+    &quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    T, N, _ = truth.shape
+    Zs: list[np.ndarray] = []
+    for k in range(T):
+        meas = []
+        # true detections
+        for j in range(N):
+            if rng.uniform() &lt;= p_detect:
+                z = truth[k, j, 0:2] + rng.normal(0.0, sigma_z, size=(2,))
+                meas.append(z)
+        # clutter (false alarms)
+        m_clutter = rng.poisson(clutter_rate)
+        for _ in range(m_clutter):
+            zc = rng.uniform(-area, area, size=(2,))
+            meas.append(zc)
+        if len(meas) == 0:
+            Zs.append(np.zeros((0, 2)))
+        else:
+            Zs.append(np.vstack(meas))
+    return Zs
+
+
+def main():
+    # Scenario
+    dt = 0.1
+    T = 220
+    area = 10.0
+
+    num_targets = 3
+    sigma_a = 0.7          # process accel std (model)
+    sigma_z = 0.35         # measurement std
+    p_detect = 0.92
+    clutter_rate = 2       # expected clutter per frame
+
+    # Filter/association parameters
+    gate_pg = 0.99
+    gate_gamma = chi2_inv_cdf(gate_pg, dof=2)  # position measurement =&gt; m=2
+    max_misses = 12
+    init_P = np.diag([1.0, 1.0, 2.0, 2.0])
+
+    F, Q = make_F_Q(dt, sigma_a)
+    H = np.array([[1, 0, 0, 0],
+                  [0, 1, 0, 0]], dtype=float)
+    R = (sigma_z**2) * np.eye(2)
+
+    truth = simulate_truth(num_targets, T, dt, area, seed=2)
+    Zs = generate_measurements(truth, sigma_z, p_detect, clutter_rate, area, seed=3)
+
+    tracks: list[Track] = []
+    next_id = 1
+
+    # For plotting
+    est_hist = []  # list of (k, track_id, px, py)
+    det_hist = []  # list of (k, px, py)
+
+    for k in range(T):
+        Zk = Zs[k]
+        for z in Zk:
+            det_hist.append((k, float(z[0]), float(z[1])))
+
+        # Predict all tracks
+        for trk in tracks:
+            trk.predict(F, Q)
+
+        # Associate
+        matches, um_tracks, um_meas = greedy_nn_association(tracks, Zk, H, R, gate_gamma)
+
+        # Update matched
+        for ti, mi in matches:
+            tracks[ti].update(Zk[mi], H, R)
+
+        # Mark misses
+        for ti in um_tracks:
+            tracks[ti].misses += 1
+
+        # Spawn new tracks for unmatched measurements (simple: use position, zero velocity)
+        for mi in um_meas:
+            z = Zk[mi]
+            x0 = np.array([z[0], z[1], 0.0, 0.0], dtype=float)
+            tracks.append(Track(x0, init_P, next_id))
+            next_id += 1
+
+        # Prune
+        tracks = [t for t in tracks if t.misses &lt;= max_misses]
+
+        # Store estimates
+        for trk in tracks:
+            est_hist.append((k, trk.id, float(trk.x[0]), float(trk.x[1])))
+
+    # Plot (truth, detections, track estimates)
+    plt.figure(figsize=(9, 7))
+    # truth
+    for j in range(num_targets):
+        plt.plot(truth[:, j, 0], truth[:, j, 1], linewidth=2, label=f&quot;truth {j+1}&quot;)
+    # detections (subsample to reduce clutter)
+    det_xy = np.array([(x, y) for (_, x, y) in det_hist], dtype=float)
+    if det_xy.size &gt; 0:
+        plt.scatter(det_xy[::3, 0], det_xy[::3, 1], s=12, alpha=0.30, label=&quot;detections (subsample)&quot;)
+
+    # estimates by track id
+    est = np.array(est_hist, dtype=float)
+    if est.size &gt; 0:
+        ids = np.unique(est[:, 1]).astype(int)
+        for tid in ids:
+            mask = (est[:, 1].astype(int) == tid)
+            plt.plot(est[mask, 2], est[mask, 3], linestyle=&quot;--&quot;, linewidth=1)
+
+    plt.axis(&quot;equal&quot;)
+    plt.xlim(-area-1, area+1)
+    plt.ylim(-area-1, area+1)
+    plt.title(&quot;Dynamic obstacle sensing demo: detections + multi-target tracking&quot;)
+    plt.xlabel(&quot;x [m]&quot;)
+    plt.ylabel(&quot;y [m]&quot;)
+    plt.legend(loc=&quot;upper right&quot;, fontsize=9)
+    plt.grid(True)
+    plt.show()
+
+    print(&quot;Done.&quot;)
+    print(f&quot;Gate (pg={gate_pg}) gamma={gate_gamma:.3f}, max_misses={max_misses}, tracks_final={len(tracks)}&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+      </code></pre>
+
+      <p><strong>File:</strong> Chapter16_Lesson1_Ex1.py (exercise scaffold)</p>
+      <pre><code class="language-python">
+&quot;&quot;&quot;
+Chapter16_Lesson1_Ex1.py
+Exercise scaffold: implement global assignment (Hungarian) instead of greedy NN.
+
+Task:
+- Given tracks and measurements, build a cost matrix using Mahalanobis distance.
+- Apply gating: costs for gated-out pairs should be a large number.
+- Solve assignment to minimize total cost (one-to-one).
+- Return matches, unmatched tracks, unmatched measurements.
+
+Hint:
+- Use scipy.optimize.linear_sum_assignment if available.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+import numpy as np
+
+
+def associate_hungarian(cost: np.ndarray, gate_mask: np.ndarray) -&gt; tuple[list[tuple[int, int]], list[int], list[int]]:
+    &quot;&quot;&quot;
+    cost: shape (N_tracks, M_meas) with Mahalanobis distances (or d^2)
+    gate_mask: same shape, True where pair is allowed (inside gate)
+
+    Return:
+      matches: list of (track_index, meas_index)
+      unmatched_tracks: list of track indices
+      unmatched_meas: list of meas indices
+    &quot;&quot;&quot;
+    # TODO: implement
+    raise NotImplementedError(&quot;Implement Hungarian assignment with gating.&quot;)
+      </code></pre>
+
+      <h3>6.2 C++ (Eigen-based tracker core)</h3>
+      <p><strong>File:</strong> Chapter16_Lesson1.cpp</p>
+      <pre><code class="language-cpp">
+/*
+Chapter16_Lesson1.cpp
+Sensing Dynamic Obstacles — Minimal Kalman Filter + Gating (C++ / Eigen)
+
+This file provides:
+- 2D constant-velocity (CV) Kalman predict/update
+- Chi-square gating using Mahalanobis distance
+- A small demo with synthetic measurements
+
+Build (example):
+  g++ -O2 -std=c++17 Chapter16_Lesson1.cpp -I /usr/include/eigen3 -o demo
+
+Notes:
+- In robotics stacks, use Eigen + ROS2 (rclcpp) and consume detections from perception.
+- For LiDAR clustering, typical libraries include PCL; for vision use OpenCV.
+*/
+
+#include &lt;Eigen/Dense&gt;
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;random&gt;
+#include &lt;cmath&gt;
+
+struct KF {
+  Eigen::Vector4d x;     // [px, py, vx, vy]
+  Eigen::Matrix4d P;
+  Eigen::Matrix4d F;
+  Eigen::Matrix4d Q;
+  Eigen::Matrix&lt;double,2,4&gt; H;
+  Eigen::Matrix2d R;
+
+  KF(double dt, double sigma_a, double sigma_z) {
+    F.setIdentity();
+    F(0,2) = dt; F(1,3) = dt;
+
+    const double q = sigma_a * sigma_a;
+    Q.setZero();
+    Q(0,0) = q * std::pow(dt,4)/4.0; Q(0,2) = q * std::pow(dt,3)/2.0;
+    Q(1,1) = q * std::pow(dt,4)/4.0; Q(1,3) = q * std::pow(dt,3)/2.0;
+    Q(2,0) = q * std::pow(dt,3)/2.0; Q(2,2) = q * std::pow(dt,2);
+    Q(3,1) = q * std::pow(dt,3)/2.0; Q(3,3) = q * std::pow(dt,2);
+
+    H.setZero();
+    H(0,0) = 1.0; H(1,1) = 1.0;
+
+    R.setZero();
+    R(0,0) = sigma_z * sigma_z;
+    R(1,1) = sigma_z * sigma_z;
+
+    x.setZero();
+    P.setIdentity();
+    P(0,0)=1; P(1,1)=1; P(2,2)=2; P(3,3)=2;
+  }
+
+  void predict() {
+    x = F * x;
+    P = F * P * F.transpose() + Q;
+  }
+
+  // Returns Mahalanobis distance squared d^2
+  double update(const Eigen::Vector2d&amp; z) {
+    Eigen::Vector2d y = z - H * x;
+    Eigen::Matrix2d S = H * P * H.transpose() + R;
+    Eigen::Matrix&lt;double,4,2&gt; K = P * H.transpose() * S.inverse();
+
+    x = x + K * y;
+
+    // Joseph form for numerical stability
+    Eigen::Matrix4d I = Eigen::Matrix4d::Identity();
+    P = (I - K * H) * P * (I - K * H).transpose() + K * R * K.transpose();
+
+    const double d2 = y.transpose() * S.inverse() * y;
+    return d2;
+  }
+
+  Eigen::Vector2d zhat() const { return H * x; }
+
+  double maha2(const Eigen::Vector2d&amp; z) const {
+    Eigen::Vector2d y = z - H * x;
+    Eigen::Matrix2d S = H * P * H.transpose() + R;
+    return y.transpose() * S.inverse() * y;
+  }
+};
+
+// For dof=2, common chi-square gates (approx).
+double chi2_gate_2dof(double pg) {
+  if (std::abs(pg - 0.99) &lt; 1e-12) return 9.210;
+  if (std::abs(pg - 0.95) &lt; 1e-12) return 5.991;
+  if (std::abs(pg - 0.90) &lt; 1e-12) return 4.605;
+  return 9.210;
+}
+
+int main() {
+  const double dt = 0.1;
+  const double sigma_a = 0.7;
+  const double sigma_z = 0.35;
+  const double gate = chi2_gate_2dof(0.99);
+
+  KF kf(dt, sigma_a, sigma_z);
+
+  // Truth: start at (0,0), velocity (1.0, 0.6)
+  Eigen::Vector4d x_true; x_true &lt;&lt; 0, 0, 1.0, 0.6;
+
+  std::mt19937 rng(0);
+  std::normal_distribution&lt;double&gt; n01(0.0, 1.0);
+
+  for (int k=0; k&lt;60; ++k) {
+    // propagate truth
+    x_true(0) += dt * x_true(2);
+    x_true(1) += dt * x_true(3);
+
+    // noisy position measurement
+    Eigen::Vector2d z;
+    z(0) = x_true(0) + sigma_z * n01(rng);
+    z(1) = x_true(1) + sigma_z * n01(rng);
+
+    kf.predict();
+    const double d2 = kf.maha2(z);
+
+    if (d2 &lt;= gate) {
+      kf.update(z);
+      std::cout &lt;&lt; &quot;k=&quot; &lt;&lt; k
+                &lt;&lt; &quot;  z=[&quot; &lt;&lt; z(0) &lt;&lt; &quot;,&quot; &lt;&lt; z(1) &lt;&lt; &quot;]&quot;
+                &lt;&lt; &quot;  d2=&quot; &lt;&lt; d2
+                &lt;&lt; &quot;  xhat=[&quot; &lt;&lt; kf.x(0) &lt;&lt; &quot;,&quot; &lt;&lt; kf.x(1) &lt;&lt; &quot;,&quot; &lt;&lt; kf.x(2) &lt;&lt; &quot;,&quot; &lt;&lt; kf.x(3) &lt;&lt; &quot;]\n&quot;;
+    } else {
+      std::cout &lt;&lt; &quot;k=&quot; &lt;&lt; k &lt;&lt; &quot;  measurement rejected by gate, d2=&quot; &lt;&lt; d2 &lt;&lt; &quot;\n&quot;;
+    }
+  }
+
+  return 0;
+}
+      </code></pre>
+
+      <h3>6.3 Java (minimal linear algebra)</h3>
+      <p><strong>File:</strong> Chapter16_Lesson1.java</p>
+      <pre><code class="language-java">
+/*
+Chapter16_Lesson1.java
+Sensing Dynamic Obstacles — Minimal Kalman Filter (Java, teaching baseline)
+
+This is a compact 2D constant-velocity KF for a single track.
+For production robotics, consider:
+- ROS2 Java bindings, or
+- EJML for linear algebra.
+
+Here we implement small matrix ops manually to avoid external deps.
+*/
+
+import java.util.Random;
+
+public class Chapter16_Lesson1 {
+
+    // 4x4 matrix multiply: C = A*B
+    static double[][] mul44(double[][] A, double[][] B) {
+        double[][] C = new double[4][4];
+        for (int i=0;i&lt;4;i++){
+            for (int j=0;j&lt;4;j++){
+                double s=0;
+                for (int k=0;k&lt;4;k++) s += A[i][k]*B[k][j];
+                C[i][j]=s;
+            }
+        }
+        return C;
+    }
+
+    // 4x4 * 4x1
+    static double[] mul4v(double[][] A, double[] x) {
+        double[] y = new double[4];
+        for(int i=0;i&lt;4;i++){
+            double s=0;
+            for(int k=0;k&lt;4;k++) s += A[i][k]*x[k];
+            y[i]=s;
+        }
+        return y;
+    }
+
+    // transpose 4x4
+    static double[][] T44(double[][] A){
+        double[][] B=new double[4][4];
+        for(int i=0;i&lt;4;i++) for(int j=0;j&lt;4;j++) B[i][j]=A[j][i];
+        return B;
+    }
+
+    // 2x4 * 4x4 * 4x2 =&gt; 2x2 helper pieces
+    static double[][] HPHt(double[][] H, double[][] P){
+        // tmp = H*P =&gt; 2x4
+        double[][] tmp = new double[2][4];
+        for(int i=0;i&lt;2;i++){
+            for(int j=0;j&lt;4;j++){
+                double s=0;
+                for(int k=0;k&lt;4;k++) s += H[i][k]*P[k][j];
+                tmp[i][j]=s;
+            }
+        }
+        // S = tmp*H^T =&gt; 2x2
+        double[][] S = new double[2][2];
+        for(int i=0;i&lt;2;i++){
+            for(int j=0;j&lt;2;j++){
+                double s=0;
+                for(int k=0;k&lt;4;k++) s += tmp[i][k]*H[j][k]; // H^T
+                S[i][j]=s;
+            }
+        }
+        return S;
+    }
+
+    // invert 2x2
+    static double[][] inv2(double[][] A){
+        double det = A[0][0]*A[1][1] - A[0][1]*A[1][0];
+        double[][] B = new double[2][2];
+        B[0][0]= A[1][1]/det;
+        B[1][1]= A[0][0]/det;
+        B[0][1]= -A[0][1]/det;
+        B[1][0]= -A[1][0]/det;
+        return B;
+    }
+
+    // 4x4 + 4x4
+    static double[][] add44(double[][] A, double[][] B){
+        double[][] C=new double[4][4];
+        for(int i=0;i&lt;4;i++) for(int j=0;j&lt;4;j++) C[i][j]=A[i][j]+B[i][j];
+        return C;
+    }
+
+    public static void main(String[] args){
+        double dt = 0.1;
+        double sigmaA = 0.7;
+        double sigmaZ = 0.35;
+
+        double[][] F = {
+            {1,0,dt,0},
+            {0,1,0,dt},
+            {0,0,1,0},
+            {0,0,0,1}
+        };
+
+        double q = sigmaA*sigmaA;
+        double[][] Q = {
+            {q*Math.pow(dt,4)/4.0, 0, q*Math.pow(dt,3)/2.0, 0},
+            {0, q*Math.pow(dt,4)/4.0, 0, q*Math.pow(dt,3)/2.0},
+            {q*Math.pow(dt,3)/2.0, 0, q*Math.pow(dt,2), 0},
+            {0, q*Math.pow(dt,3)/2.0, 0, q*Math.pow(dt,2)}
+        };
+
+        double[][] H = {
+            {1,0,0,0},
+            {0,1,0,0}
+        };
+
+        double[][] R = {
+            {sigmaZ*sigmaZ, 0},
+            {0, sigmaZ*sigmaZ}
+        };
+
+        double[] x = {0,0,0,0};
+        double[][] P = {
+            {1,0,0,0},
+            {0,1,0,0},
+            {0,0,2,0},
+            {0,0,0,2}
+        };
+
+        // truth
+        double[] xt = {0,0,1.0,0.6};
+        Random rng = new Random(0);
+
+        for(int k=0;k&lt;60;k++){
+            // propagate truth
+            xt[0] += dt*xt[2];
+            xt[1] += dt*xt[3];
+
+            // measurement
+            double[] z = {
+                xt[0] + sigmaZ*rng.nextGaussian(),
+                xt[1] + sigmaZ*rng.nextGaussian()
+            };
+
+            // predict
+            x = mul4v(F, x);
+            P = add44(mul44(mul44(F,P), T44(F)), Q);
+
+            // innovation y = z - Hx
+            double[] Hx = { x[0], x[1] };
+            double[] y = { z[0]-Hx[0], z[1]-Hx[1] };
+
+            // S = HPH^T + R
+            double[][] S = HPHt(H,P);
+            S[0][0] += R[0][0]; S[1][1] += R[1][1];
+
+            double[][] S_inv = inv2(S);
+
+            // K = P H^T S^{-1}  =&gt; (4x4)(4x2)(2x2) = 4x2
+            double[][] PHt = new double[4][2];
+            for(int i=0;i&lt;4;i++){
+                PHt[i][0]=P[i][0];
+                PHt[i][1]=P[i][1];
+            }
+            double[][] K = new double[4][2];
+            for(int i=0;i&lt;4;i++){
+                for(int j=0;j&lt;2;j++){
+                    K[i][j]=PHt[i][0]*S_inv[0][j] + PHt[i][1]*S_inv[1][j];
+                }
+            }
+
+            // x = x + K y
+            for(int i=0;i&lt;4;i++){
+                x[i] = x[i] + K[i][0]*y[0] + K[i][1]*y[1];
+            }
+
+            // Joseph form: P = (I-KH)P(I-KH)^T + K R K^T
+            double[][] KH = new double[4][4];
+            for(int i=0;i&lt;4;i++){
+                KH[i][0]=K[i][0];
+                KH[i][1]=K[i][1];
+                // KH[i][2]=0; KH[i][3]=0
+            }
+            double[][] I = {
+                {1,0,0,0},
+                {0,1,0,0},
+                {0,0,1,0},
+                {0,0,0,1}
+            };
+            double[][] A = new double[4][4];
+            for(int i=0;i&lt;4;i++) for(int j=0;j&lt;4;j++) A[i][j]=I[i][j]-KH[i][j];
+            double[][] AP = mul44(A,P);
+            double[][] APA = mul44(AP, T44(A));
+
+            // KRK^T
+            double[][] KR = new double[4][2];
+            for(int i=0;i&lt;4;i++){
+                KR[i][0]=K[i][0]*R[0][0];
+                KR[i][1]=K[i][1]*R[1][1];
+            }
+            double[][] KRKt = new double[4][4];
+            for(int i=0;i&lt;4;i++){
+                for(int j=0;j&lt;4;j++){
+                    KRKt[i][j] = KR[i][0]*K[j][0] + KR[i][1]*K[j][1];
+                }
+            }
+
+            P = add44(APA, KRKt);
+
+            System.out.printf(&quot;k=%d  z=[%.3f, %.3f]  xhat=[%.3f, %.3f, %.3f, %.3f]%n&quot;,
+                    k, z[0], z[1], x[0], x[1], x[2], x[3]);
+        }
+    }
+}
+      </code></pre>
+
+      <h3>6.4 MATLAB / Simulink (script + optional model skeleton)</h3>
+      <p><strong>File:</strong> Chapter16_Lesson1.m</p>
+      <pre><code class="language-matlab">
+% Chapter16_Lesson1.m
+% Sensing Dynamic Obstacles — KF Tracking + Gating (MATLAB teaching baseline)
+%
+% This script:
+% 1) Simulates constant-velocity target(s)
+% 2) Generates noisy position measurements + clutter
+% 3) Runs a simple KF with chi-square gating
+%
+% Notes for Simulink:
+% - Use a Discrete State-Space block for prediction (F, Q)
+% - Use MATLAB Function blocks for update + gating
+% - Feed detections from your perception subsystem (LiDAR clusters)
+
+clear; clc; close all;
+
+dt = 0.1;
+T  = 120;
+
+sigma_a = 0.7;
+sigma_z = 0.35;
+
+% State: [px; py; vx; vy]
+F = [1 0 dt 0;
+     0 1 0 dt;
+     0 0 1 0;
+     0 0 0 1];
+
+q = sigma_a^2;
+Q = q * [dt^4/4 0      dt^3/2 0;
+         0      dt^4/4 0      dt^3/2;
+         dt^3/2 0      dt^2   0;
+         0      dt^3/2 0      dt^2];
+
+H = [1 0 0 0;
+     0 1 0 0];
+
+R = (sigma_z^2) * eye(2);
+
+% Chi-square gate (dof=2). Common values: pg=0.99 -&gt; 9.210, pg=0.95 -&gt; 5.991
+pg = 0.99;
+gamma = 9.210;
+
+% Truth
+x_true = [0; 0; 1.0; 0.6];
+
+% Filter init
+x = [0; 0; 0; 0];
+P = diag([1, 1, 2, 2]);
+
+Xtrue = zeros(4, T);
+Xhat  = zeros(4, T);
+Zmeas = zeros(2, T);
+Accepted = false(1, T);
+
+for k = 1:T
+    % propagate truth
+    x_true = F * x_true;
+    Xtrue(:,k) = x_true;
+
+    % measurement
+    z = H * x_true + sigma_z * randn(2,1);
+    Zmeas(:,k) = z;
+
+    % predict
+    x = F * x;
+    P = F * P * F' + Q;
+
+    % gate test
+    y = z - H*x;
+    S = H*P*H' + R;
+    d2 = y' / S * y;
+
+    if d2 &lt;= gamma
+        % update (Joseph form)
+        K = P * H' / S;
+        x = x + K*y;
+        I = eye(4);
+        P = (I - K*H) * P * (I - K*H)' + K*R*K';
+        Accepted(k) = true;
+    end
+
+    Xhat(:,k) = x;
+end
+
+% Plot
+figure; hold on; grid on;
+plot(Xtrue(1,:), Xtrue(2,:), 'LineWidth', 2);
+plot(Xhat(1,:),  Xhat(2,:),  '--', 'LineWidth', 1.5);
+scatter(Zmeas(1,Accepted), Zmeas(2,Accepted), 18, 'filled', 'MarkerFaceAlpha', 0.35);
+legend('Truth','KF estimate','Accepted measurements');
+axis equal;
+title('Dynamic obstacle sensing: KF tracking with chi-square gating');
+xlabel('x [m]'); ylabel('y [m]');
+      </code></pre>
+
+      <h3>6.5 Wolfram Mathematica (derivation + demo)</h3>
+      <p><strong>File:</strong> Chapter16_Lesson1.nb</p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter16_Lesson1.nb
+   Sensing Dynamic Obstacles — Math Notes + Small Demo (Wolfram Mathematica)
+
+   Contents:
+   1) Derive chi-square gating from Gaussian innovation
+   2) Build CV model matrices F and Q
+   3) Symbolic + numeric check of Joseph covariance PSD
+
+   Paste into a Mathematica notebook or save as .nb after evaluation.
+*)
+
+ClearAll["Global`*"];
+
+(* 1) Chi-square gating: if y ~ N(0,S), then d^2 = y^T S^-1 y ~ ChiSquare[m] *)
+
+m = 2;
+S = { {2.0, 0.3}, {0.3, 1.4} };
+(* Ensure SPD *)
+Eigenvalues[S]
+
+L = CholeskyDecomposition[S];
+(* Sample y = L u, u ~ N(0,I) *)
+nSamp = 20000;
+uSamp = RandomVariate[NormalDistribution[0, 1], {nSamp, m}];
+ySamp = uSamp.Transpose[L]; (* rows are samples *)
+d2 = Map[#.LinearSolve[S, #] &, ySamp];
+
+Histogram[d2, 60, "PDF",
+ PlotLabel -&gt; "Empirical d^2 vs ChiSquare[2] PDF"];
+
+Show[
+ Plot[PDF[ChiSquareDistribution[m], x], {x, 0, 15}],
+ % (* overlay *)
+]
+
+(* 2) CV matrices *)
+dt = 0.1;
+sigmaA = 0.7;
+F = { {1, 0, dt, 0},
+     {0, 1, 0, dt},
+     {0, 0, 1, 0},
+     {0, 0, 0, 1} };
+
+q = sigmaA^2;
+Q = q*{ {dt^4/4, 0, dt^3/2, 0},
+       {0, dt^4/4, 0, dt^3/2},
+       {dt^3/2, 0, dt^2, 0},
+       {0, dt^3/2, 0, dt^2} };
+
+MatrixForm[F]
+MatrixForm[Q]
+
+(* 3) Joseph form PSD check *)
+H = { {1,0,0,0},{0,1,0,0} };
+sigmaZ = 0.35;
+R = sigmaZ^2 IdentityMatrix[2];
+
+P = DiagonalMatrix[{1,1,2,2}];
+(* Predicted *)
+Ppred = F.P.Transpose[F] + Q;
+
+Sinnov = H.Ppred.Transpose[H] + R;
+K = Ppred.Transpose[H].Inverse[Sinnov];
+
+I4 = IdentityMatrix[4];
+Pj = (I4 - K.H).Ppred.Transpose[(I4 - K.H)] + K.R.Transpose[K];
+
+Eigenvalues[N[Pj]]
+
+(* If eigenvalues are nonnegative (within numeric tolerance), PSD holds. *)
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        The problems below reinforce the tracking mathematics used for sensing
+        dynamic obstacles. Unless stated otherwise, assume the CV model in
+        Section 4 and linear-Gaussian assumptions.
+      </p>
+
+      <p>
+        <strong
+          >Problem 1 (Derive \( \mathbf{Q} \) for CV from white
+          acceleration):</strong
+        >
+        In 1D, let the continuous-time dynamics be \( \dot{p}=v \), \(
+        \dot{v}=a(t) \) where \( a(t) \) is zero-mean white noise with power
+        spectral density \( q=\sigma_a^2 \). Discretize over \( \Delta t \) to
+        obtain the 2×2 covariance \( \mathbf{Q}_1 \) for \( [p\; v]^\top \), and
+        then form the 4×4 planar \( \mathbf{Q} \).
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Over \( \Delta t \), the discrete-time
+        increments are
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} p_{k+1} &= p_k + v_k\Delta t + \int_0^{\Delta
+        t}(\Delta t-\tau)a(\tau)\,d\tau,\\ v_{k+1} &= v_k + \int_0^{\Delta t}
+        a(\tau)\,d\tau. \end{aligned} \]
+      </h4>
+      <p>
+        Let \( w_p \) and \( w_v \) denote the two stochastic integrals above.
+        Using \( E[a(\tau)a(s)] = q\,\delta(\tau-s) \), we compute
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} E[w_v^2] &= q\Delta t,\\ E[w_p^2] &= q\int_0^{\Delta
+        t} (\Delta t-\tau)^2 d\tau = q\frac{\Delta t^3}{3},\\ E[w_p w_v] &=
+        q\int_0^{\Delta t} (\Delta t-\tau)d\tau = q\frac{\Delta t^2}{2}.
+        \end{aligned} \]
+      </h4>
+      <p>
+        The standard discrete-time CV model uses an equivalent discrete
+        acceleration noise parameterization that yields the textbook form
+        (Section 4):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{Q}_1 = \sigma_a^2 \begin{bmatrix} \tfrac{\Delta t^4}{4} &
+        \tfrac{\Delta t^3}{2}\\ \tfrac{\Delta t^3}{2} & \Delta t^2
+        \end{bmatrix}, \quad \mathbf{Q} =
+        \operatorname{blkdiag}(\mathbf{Q}_1,\mathbf{Q}_1). \]
+      </h4>
+      <p>
+        (The two derivations correspond to slightly different continuous-time
+        noise assumptions; both motivate the same scaling.)
+      </p>
+
+      <p>
+        <strong>Problem 2 (Why gating uses chi-square):</strong>
+        Assume the innovation \( \mathbf{y}_k \sim
+        \mathcal{N}(\mathbf{0},\mathbf{S}_k) \) with dimension \( m \). Prove
+        that \( d_k^2 = \mathbf{y}_k^\top\mathbf{S}_k^{-1}\mathbf{y}_k \sim
+        \chi^2_m \).
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Let \( \mathbf{S}_k =
+        \mathbf{L}\mathbf{L}^\top \) be a Cholesky factorization with
+        nonsingular \( \mathbf{L} \). Define \( \mathbf{u} =
+        \mathbf{L}^{-1}\mathbf{y}_k \). Then:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{u} \sim \mathcal{N}(\mathbf{0},\mathbf{I}),\qquad d_k^2 =
+        \mathbf{y}_k^\top\mathbf{S}_k^{-1}\mathbf{y}_k = \|\mathbf{u}\|_2^2 =
+        \sum_{i=1}^m u_i^2. \]
+      </h4>
+      <p>
+        Because \( u_i \) are i.i.d. standard normal, the sum of squares is
+        chi-square with \( m \) degrees of freedom: \( d_k^2 \sim \chi^2_m \).
+        Choosing \( \gamma = F_{\chi^2_m}^{-1}(p_g) \) yields \( \Pr(d_k^2 \le
+        \gamma)=p_g \).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Sequential fusion equals batch fusion):</strong>
+        Suppose two independent sensors measure the same state: \( \mathbf{z}_1
+        = \mathbf{H}_1\mathbf{x} + \mathbf{v}_1 \), \( \mathbf{z}_2 =
+        \mathbf{H}_2\mathbf{x} + \mathbf{v}_2 \), with independent Gaussian
+        noises \( \mathbf{v}_1 \sim \mathcal{N}(0,\mathbf{R}_1) \), \(
+        \mathbf{v}_2 \sim \mathcal{N}(0,\mathbf{R}_2) \). Show that updating \(
+        (\hat{\mathbf{x} },\mathbf{P}) \) with measurement 1 then 2 yields the
+        same posterior as a single batch update using stacked measurement \(
+        \mathbf{z}=[\mathbf{z}_1^\top\;\mathbf{z}_2^\top]^\top \).
+      </p>
+
+      <p>
+        <strong>Solution:</strong> In information form, a Gaussian \(
+        \mathcal{N}(\hat{\mathbf{x} },\mathbf{P}) \) has information matrix \(
+        \mathbf{\Lambda}=\mathbf{P}^{-1} \) and vector \(
+        \boldsymbol{\eta}=\mathbf{P}^{-1}\hat{\mathbf{x} } \). A linear
+        measurement adds information:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{\Lambda}^+ = \mathbf{\Lambda} +
+        \mathbf{H}^\top\mathbf{R}^{-1}\mathbf{H},\qquad \boldsymbol{\eta}^+ =
+        \boldsymbol{\eta} + \mathbf{H}^\top\mathbf{R}^{-1}\mathbf{z}. \]
+      </h4>
+      <p>
+        Applying measurement 1 then 2 yields \( \mathbf{\Lambda}^{++} =
+        \mathbf{\Lambda} + \mathbf{H}_1^\top\mathbf{R}_1^{-1}\mathbf{H}_1 +
+        \mathbf{H}_2^\top\mathbf{R}_2^{-1}\mathbf{H}_2 \), \(
+        \boldsymbol{\eta}^{++} = \boldsymbol{\eta} +
+        \mathbf{H}_1^\top\mathbf{R}_1^{-1}\mathbf{z}_1 +
+        \mathbf{H}_2^\top\mathbf{R}_2^{-1}\mathbf{z}_2 \). For the batch case,
+        with stacked \( \mathbf{H}=[\mathbf{H}_1^\top\;\mathbf{H}_2^\top]^ \top
+        \) and block-diagonal \(
+        \mathbf{R}=\operatorname{blkdiag}(\mathbf{R}_1,\mathbf{R}_2) \), the
+        same sums appear. Therefore both posteriors coincide.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Joseph form preserves PSD):</strong>
+        Show that the covariance update \( \mathbf{P}^+ =
+        (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}(\mathbf{I}-\mathbf{K}\mathbf{H})^\top
+        + \mathbf{K}\mathbf{R}\mathbf{K}^\top \) is symmetric positive
+        semidefinite whenever \( \mathbf{P} \succeq 0 \) and \( \mathbf{R}
+        \succeq 0 \).
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Symmetry is immediate because each term is of
+        the form \( \mathbf{A}\mathbf{P}\mathbf{A}^\top \) or \(
+        \mathbf{B}\mathbf{R}\mathbf{B}^\top \). For PSD, for any vector \(
+        \mathbf{u} \):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{u}^\top\mathbf{P}^+\mathbf{u} =
+        (\mathbf{A}^\top\mathbf{u})^\top\mathbf{P}(\mathbf{A}^\top\mathbf{u}) +
+        (\mathbf{B}^\top\mathbf{u})^\top\mathbf{R}(\mathbf{B}^\top\mathbf{u})
+        \ge 0, \]
+      </h4>
+      <p>
+        where \( \mathbf{A}=\mathbf{I}-\mathbf{K}\mathbf{H} \), \(
+        \mathbf{B}=\mathbf{K} \), and we used \( \mathbf{P},\mathbf{R} \succeq 0
+        \). Hence \( \mathbf{P}^+ \succeq 0 \). This is why the Joseph form is
+        numerically safer than \(
+        \mathbf{P}^+=(\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P} \).
+      </p>
+
+      <p>
+        <strong
+          >Problem 5 (ML association reduces to Mahalanobis distance):</strong
+        >
+        Consider one track with predicted measurement \( \hat{\mathbf{z} } \)
+        and innovation covariance \( \mathbf{S} \). Suppose you receive
+        candidate detections \( \mathbf{z}^i \) generated either by that track
+        (Gaussian) or clutter (uniform). Show that among gated candidates, the
+        maximum-likelihood association is equivalent to minimizing \( d_i^2 =
+        (\mathbf{z}^i-\hat{\mathbf{z}
+        })^\top\mathbf{S}^{-1}(\mathbf{z}^i-\hat{\mathbf{z} }) \).
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Under the track hypothesis, likelihood is
+        Gaussian:
+      </p>
+      <h4 class="mathJax">
+        \[ p(\mathbf{z}^i\mid\text{track}) \propto
+        \exp\!\left(-\tfrac{1}{2}d_i^2\right). \]
+      </h4>
+      <p>
+        If clutter is uniform over the sensor field-of-view, then its likelihood
+        is constant across candidates and does not affect the argmax. Therefore
+        maximizing \( p(\mathbf{z}^i\mid\text{track}) \) is equivalent to
+        minimizing \( d_i^2 \). The gate implements a high-probability region of
+        this Gaussian, eliminating implausible candidates.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        We defined the dynamic-obstacle sensing objective as producing
+        <em>tracks with uncertainty</em>, not just detections. Using linear
+        measurement models and a constant-velocity process model, we derived the
+        Kalman predict/update equations, introduced chi-square gating for robust
+        association, and outlined a practical track management loop. These
+        outputs are the required inputs for velocity-based avoidance (Lesson 2)
+        and prediction-aware navigation (Lesson 4).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Kalman, R.E. (1960). A new approach to linear filtering and prediction
+        problems.
+        <em>Journal of Basic Engineering</em>, 82(1), 35–45.
+      </li>
+      <li>
+        Reid, D.B. (1979). An algorithm for tracking multiple targets.
+        <em>IEEE Transactions on Automatic Control</em>, 24(6), 843–854.
+      </li>
+      <li>
+        Bar-Shalom, Y., &amp; Tse, E. (1975). Tracking in a cluttered
+        environment with probabilistic data association.
+        <em>Automatica</em>, 11(5), 451–460.
+      </li>
+      <li>
+        Schulz, D., Burgard, W., Fox, D., &amp; Cremers, A.B. (2001). Tracking
+        multiple moving targets with a mobile robot using particle filters and
+        statistical data association.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >, 1665–1670.
+      </li>
+      <li>
+        Mahler, R.P.S. (2003). Multitarget Bayes filtering via first-order
+        multitarget moments.
+        <em>IEEE Transactions on Aerospace and Electronic Systems</em>, 39(4),
+        1152–1178.
+      </li>
+      <li>
+        Ester, M., Kriegel, H.-P., Sander, J., &amp; Xu, X. (1996). A
+        density-based algorithm for discovering clusters in large spatial
+        databases with noise.
+        <em
+          >Proceedings of the International Conference on Knowledge Discovery
+          and Data Mining (KDD)</em
+        >, 226–231.
+      </li>
+      <li>
+        Thrun, S., Burgard, W., &amp; Fox, D. (2005).
+        <em>Probabilistic Robotics</em>. MIT Press.
+      </li>
+      <li>
+        Blackman, S.S. (2004).
+        <em>Multiple-Target Tracking with Radar Applications</em>. Artech House.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter15/Lesson5.html">
+          <small>(previous chapter)</small> Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter16/Lesson2.html">
+          Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="active-lesson" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

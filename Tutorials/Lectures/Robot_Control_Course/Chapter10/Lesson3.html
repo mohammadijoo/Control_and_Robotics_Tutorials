@@ -1,0 +1,1870 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 10: Model Predictive Control (MPC) - Lesson 3: Handling Constraints with MPC | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 10: Model Predictive Control (MPC)</h1>
+    <h3><strong>Lesson 3: Handling Constraints with MPC</strong></h3>
+    <p>
+      This lesson develops a rigorous treatment of constraints in Model
+      Predictive Control (MPC) for robots. We formalize state and input
+      constraint sets for manipulator dynamics, derive constrained MPC
+      formulations as quadratic programs (QPs), study feasibility and recursive
+      feasibility, construct soft-constraint formulations via slack variables,
+      and give stability conditions based on terminal sets and terminal costs.
+      We conclude with multi-language implementations (Python, C++, Java,
+      MATLAB/Simulink, and Wolfram Mathematica) specialized to joint-space robot
+      control.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Role of Constraints in Robot MPC -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Role of Constraints in Robot MPC</h2>
+    <div class="down-content">
+      <p>
+        In robot control, constraints are intrinsic: joint limits, velocity
+        bounds, torque saturation, collision avoidance, and sometimes contact
+        forces. MPC is particularly attractive for robots because it can
+        <em>explicitly</em> handle these constraints while optimizing a
+        performance criterion.
+      </p>
+      <p>
+        Consider a discrete-time linear model (arising from linearization around
+        a nominal trajectory, from Lesson 2):
+      </p>
+      <h4 class="mathJax">\[ x_{k+1} = A x_k + B u_k, \]</h4>
+      <p>
+        where the state might stack joint positions and velocities,
+        <strong
+          >\( x_k = \begin{bmatrix} q_k \\ \dot{q}_k \end{bmatrix} \)</strong
+        >, and inputs are joint torques
+        <strong>\( u_k = \boldsymbol{&bsol;tau}_k \)</strong>. Typical hard
+        constraints are polyhedral:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{X} = \{ x \in \mathbb{R}^n \mid G_x x \le g_x \}, \quad
+        \mathcal{U} = \{ u \in \mathbb{R}^m \mid G_u u \le g_u \}, \]
+      </h4>
+      <p>for example, joint and torque limits:</p>
+      <h4 class="mathJax">
+        \[ q^{\min} \le q_k \le q^{\max}, \quad -\boldsymbol{&bsol;tau}^{\max}
+        \le \boldsymbol{&bsol;tau}_k \le \boldsymbol{&bsol;tau}^{\max}. \]
+      </h4>
+      <p>
+        MPC incorporates these constraints into an optimization problem solved
+        at each sampling instant. The high-level loop for constrained MPC is:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  Xk["Measure current state xk"] --> PRED["Predict dynamics over horizon"]
+  PRED --> CONST["Enforce state/input limits"]
+  CONST --> QP["Solve finite-horizon constrained QP"]
+  QP --> APPLY["Apply first control uk to robot"]
+  APPLY --> ROBOT["Robot joints and actuators"]
+  ROBOT --> NEXT["Next state x(k+1) at next sample"]
+  NEXT --> Xk
+        </pre>
+      </div>
+      <p>
+        This lesson focuses on how to encode and analyze the constraint part of
+        this loop: feasibility, softening, and stability.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Constrained MPC Formulation as a QP -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Constrained MPC Formulation as a QP</h2>
+    <div class="down-content">
+      <p>
+        We consider a standard quadratic tracking cost for deviations from a
+        reference
+        <strong>\( x_k^{\text{ref}}, u_k^{\text{ref}} \)</strong> (for brevity
+        we write regulation around zero; the tracking case is handled by
+        shifting variables as in Lesson 2). For horizon length
+        <strong>\( N \)</strong>, define:
+      </p>
+      <h4 class="mathJax">
+        \[ J_N(x_t,\mathbf{u}) = \sum_{k=0}^{N-1} \left( x_{t+k}^\top Q x_{t+k}
+        + u_{t+k}^\top R u_{t+k} \right) + x_{t+N}^\top P x_{t+N}, \]
+      </h4>
+      where <strong>\( Q \ge 0, R &gt; 0, P \ge 0 \)</strong>.
+      <p>At time <strong>\( t \)</strong>, the constrained MPC problem is</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \min_{\mathbf{u}, \mathbf{x}} \;& \sum_{k=0}^{N-1}
+        \left( x_{t+k}^\top Q x_{t+k} + u_{t+k}^\top R u_{t+k} \right) +
+        x_{t+N}^\top P x_{t+N} \\ \text{s.t. } \;& x_{t} = x(t), \\ & x_{t+k+1}
+        = A x_{t+k} + B u_{t+k}, \quad k = 0,\dots,N-1, \\ & x_{t+k} \in
+        \mathcal{X}, \quad u_{t+k} \in \mathcal{U}, \quad k = 0,\dots,N-1, \\ &
+        x_{t+N} \in \mathcal{X}_f. \end{aligned} \]
+      </h4>
+      <p>
+        Here <strong>\( \mathcal{X}_f \subseteq \mathcal{X} \)</strong> is a
+        terminal constraint set used to ensure stability (Section 5). Stacking
+        all decision variables into a vector
+        <strong>\( z \in \mathbb{R}^{N m + N n} \)</strong>, the problem can be
+        written in QP form
+      </p>
+      <h4 class="mathJax">
+        \[ \min_{z} \; \tfrac{1}{2} z^\top H z + f^\top z \quad \text{s.t.}
+        \quad G z \le h, \quad E z = b(x(t)), \]
+      </h4>
+      <p>
+        where equality constraints encode the dynamics and initial state, while
+        inequality constraints encode state, input, and terminal limits. This QP
+        structure is exploited by fast solvers (e.g. OSQP, qpOASES, CVXGEN) that
+        are widely used in robotics MPC.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Hard Constraints, Feasible Sets, and Recursive Feasibility -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Hard Constraints, Feasible Sets, and Recursive Feasibility</h2>
+    <div class="down-content">
+      <p>
+        When constraints are treated as <em>hard</em>, they must hold for all
+        predicted states and inputs. Define the feasible set of initial states
+        for horizon <strong>\( N \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{X}_N = \left\{ x \in \mathbb{R}^n \;\middle|\; \exists
+        \{u_0,\dots,u_{N-1}\} \subset \mathcal{U} \text{ such that } x_k \in
+        \mathcal{X},\; x_N \in \mathcal{X}_f \right\}. \]
+      </h4>
+      <p>
+        A central property for MPC is <em>recursive feasibility</em>: if the QP
+        is feasible at time <strong>\( t=0 \)</strong>, then it remains feasible
+        at all subsequent times under the MPC feedback law. We now state a
+        standard result for linear MPC.
+      </p>
+      <p>
+        <strong>Definition (Control-invariant set).</strong> A set
+        <strong>\( \mathcal{X}_f \subseteq \mathcal{X} \)</strong> is called
+        control-invariant if
+      </p>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ \forall x \in \mathcal{X}_f \; \exists u \in \mathcal{U} \text{ such that } A x + B u \in \mathcal{X}_f. \]
+      </h4>
+      <p><strong>Theorem 1 (Recursive feasibility).</strong> Assume:</p>
+      <ul>
+        <li>
+          <strong>\( \mathcal{X}, \mathcal{U} \)</strong> are convex and
+          compact.
+        </li>
+        <li>
+          <strong>\( \mathcal{X}_f \subseteq \mathcal{X} \)</strong> is
+          control-invariant.
+        </li>
+        <li>
+          At time <strong>\( t \)</strong>, the MPC QP is feasible and yields
+          optimal sequence
+          <strong>\( \{u_{t|t}^\star,\dots,u_{t+N-1|t}^\star\} \)</strong> with
+          corresponding <strong>\( \{x_{t+k|t}^\star\} \)</strong>.
+        </li>
+      </ul>
+      <p>
+        Then the MPC QP is feasible at time <strong>\( t+1 \)</strong>, i.e.,
+        <strong>\( x_{t+1} = x_{t+1|t}^\star \in \mathcal{X}_N \)</strong>.
+        Consequently, feasibility holds for all
+        <strong>\( t \ge 0 \)</strong> as long as
+        <strong>\( x_0 \in \mathcal{X}_N \)</strong>.
+      </p>
+      <p>
+        <strong>Proof sketch.</strong> At time <strong>\( t+1 \)</strong>,
+        consider the candidate input sequence
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{u}_{t+1|t+1} = u_{t+1|t}^\star,\dots, \tilde{u}_{t+N-1|t+1} =
+        u_{t+N-1|t}^\star,\; \tilde{u}_{t+N|t+1} = \kappa_f(x_{t+N|t}^\star), \]
+      </h4>
+      <p>
+        where <strong>\( \kappa_f \)</strong> is a control law that keeps
+        <strong>\( \mathcal{X}_f \)</strong>
+        invariant (its existence follows from control-invariance). The shifted
+        state sequence satisfies dynamics and all constraints:
+      </p>
+      <ul>
+        <li>
+          For <strong>\( k = 1,\dots,N-1 \)</strong>,
+          <strong>\( x_{t+k|t}^\star \in \mathcal{X} \)</strong> implies
+          <strong
+            >\( \tilde{x}_{t+k|t+1} = x_{t+k|t}^\star \in \mathcal{X} \)</strong
+          >.
+        </li>
+        <li>
+          <strong>\( x_{t+N|t}^\star \in \mathcal{X}_f \)</strong> and
+          invariance of <strong>\( \mathcal{X}_f \)</strong> imply
+          <strong
+            >\( \tilde{x}_{t+N+1|t+1} = A x_{t+N|t}^\star + B
+            \kappa_f(x_{t+N|t}^\star) \in \mathcal{X}_f \)</strong
+          >.
+        </li>
+      </ul>
+      <p>
+        Thus we have constructed a feasible sequence at time
+        <strong>\( t+1 \)</strong>, so
+        <strong>\( x_{t+1} \in \mathcal{X}_N \)</strong>. Repeating this
+        argument proves recursive feasibility.
+      </p>
+      <p>
+        For robots, control-invariant terminal sets are often computed in joint
+        space (e.g., by iteratively applying admissible torques and intersecting
+        with joint limits).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Soft Constraints with Slack Variables -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Soft Constraints with Slack Variables</h2>
+    <div class="down-content">
+      <p>
+        In practice, demanding strict satisfaction of all constraints can render
+        the QP infeasible (e.g. due to model mismatch or short horizon). A
+        common solution is to <em>soften</em> selected constraints using slack
+        variables. For example, suppose we want to enforce
+        <strong>\( C x_k \le d \)</strong> (e.g. workspace or obstacle-avoidance
+        constraints). We introduce slack variables
+        <strong>\( \epsilon_k \in \mathbb{R}^{p} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} C x_{t+k} &\le d + \epsilon_{t+k}, \\ \epsilon_{t+k}
+        &\ge 0. \end{aligned} \]
+      </h4>
+      <p>The cost is augmented with a penalty on violations:</p>
+      <h4 class="mathJax">
+        \[ J_N^{\text{soft}}(x_t,\mathbf{u},\boldsymbol{\epsilon}) =
+        J_N(x_t,\mathbf{u}) + \sum_{k=0}^{N} \rho \, \|\epsilon_{t+k}\|_1 \quad
+        (\rho &gt; 0 \text{ large}). \]
+      </h4>
+      <p>
+        The optimization variables now include
+        <strong>\( \epsilon_{t},\dots,\epsilon_{t+N} \)</strong>, and the
+        problem remains a QP (with additional variables and inequality
+        constraints). The penalty parameter <strong>\( \rho \)</strong> should
+        be chosen sufficiently large so that if there is a hard-feasible
+        solution, the optimal soft solution will not use slacks.
+      </p>
+      <p>
+        <strong>Theorem 2 (Exact penalty behavior, simplified).</strong> Suppose
+      </p>
+      <ul>
+        <li>
+          the original hard-constrained MPC problem is feasible at state
+          <strong>\( x_t \)</strong>, and
+        </li>
+        <li>
+          the cost <strong>\( J_N \)</strong> and constraints are convex, with
+          bounded Lagrange multipliers
+          <strong>\( \lambda_k^\star \)</strong> associated with
+          <strong>\( C x_{t+k} \le d \)</strong>
+          in the hard problem.
+        </li>
+      </ul>
+      <p>
+        Then there exists <strong>\( \bar{\rho} &gt; 0 \)</strong> such that for
+        all <strong>\( \rho \ge \bar{\rho} \)</strong>, the optimal solution of
+        the soft-constrained MPC problem satisfies
+        <strong>\( \epsilon_{t+k}^\star = 0 \)</strong> for all
+        <strong>\( k \)</strong>, i.e., the soft solution coincides with a
+        hard-feasible solution.
+      </p>
+      <p>
+        <strong>Idea of proof.</strong> In convex optimization, exact
+        <strong>\( \ell_1 \)</strong>-penalties can reproduce constrained optima
+        when the penalty parameter exceeds the maximum absolute Lagrange
+        multiplier of the original constraint. Here, choosing
+        <strong>\( \rho &gt; \max_k \|\lambda_k^\star\|_\infty \)</strong>
+        ensures that any violation increases cost more than satisfying the
+        constraint using the original optimal multipliers, hence optimal slacks
+        are zero whenever a hard-feasible solution exists.
+      </p>
+      <p>
+        Soft constraints are particularly useful in robotics for safety-related
+        constraints that should
+        <em>almost always</em> hold, but for which strict infeasibility could
+        cause control failure (for example, slightly penetrating a linearized
+        obstacle constraint to avoid solver failure).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Terminal Constraints and Stability -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Terminal Constraints and Stability</h2>
+    <div class="down-content">
+      <p>
+        Constraints can destroy the simple LQR stability proof. For constrained
+        MPC, stability is often enforced using a terminal cost and terminal set.
+        We recall the finite-horizon value function
+      </p>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ V_N(x) = \min_{\mathbf{u}} J_N(x,\mathbf{u}) \quad \text{s.t. constraints}. \]
+      </h4>
+      <p>
+        Under suitable conditions, <strong>\( V_N \)</strong> acts as a Lyapunov
+        function. Consider the regulation case
+        <strong>\( x^{\text{ref}} = 0 \)</strong>, and assume:
+      </p>
+      <ul>
+        <li>
+          <strong>\( Q \)</strong> and <strong>\( R \)</strong> are positive
+          definite (or at least <strong>\( Q \ge 0, R &gt; 0 \)</strong>), and
+        </li>
+        <li>
+          there exists a local linear feedback
+          <strong>\( u = K x \)</strong> and a terminal cost
+          <strong>\( V_f(x) = x^\top P x \)</strong> such that for all
+          <strong>\( x \in \mathcal{X}_f \)</strong>:
+        </li>
+      </ul>
+      <h4 class="mathJax">
+        \[ (A+BK)x \in \mathcal{X}_f,\quad K x \in \mathcal{U}, \]
+      </h4>
+      <h4 class="mathJax">
+        \[ (A+BK)^\top P (A+BK) - P + Q + K^\top R K \le 0. \]
+      </h4>
+      <p>
+        The last inequality is a discrete-time Lyapunov inequality capturing
+        that applying the local control
+        <strong>\( u = Kx \)</strong> inside
+        <strong>\( \mathcal{X}_f \)</strong> decreases the infinite-horizon LQR
+        cost. With these assumptions, one can prove:
+      </p>
+      <p>
+        <strong
+          >Theorem 3 (Asymptotic stability of constrained MPC, sketch).</strong
+        >
+        If <strong>\( x_0 \in \mathcal{X}_N \)</strong> and the above conditions
+        hold, then the origin <strong>\( x = 0 \)</strong> is asymptotically
+        stable under the constrained MPC law, and all constraints are satisfied
+        for all time.
+      </p>
+      <p>
+        <strong>Proof idea (decrease of value function).</strong> Let
+        <strong>\( x_t \)</strong> be the state at time
+        <strong>\( t \)</strong> and let
+        <strong>\( \{u_{t+k|t}^\star\} \)</strong> be the optimal sequence.
+        Construct a shifted candidate sequence for time
+        <strong>\( t+1 \)</strong> by dropping the first control and appending
+        the local terminal control <strong>\( K x_{t+N|t}^\star \)</strong>.
+        Using the Lyapunov inequality, one shows
+      </p>
+      <h4 class="mathJax">
+        \[ V_N(x_{t+1}) - V_N(x_t) \le - \left( x_t^\top Q x_t +
+        u_{t|t}^{\star\top} R u_{t|t}^\star \right) \le 0. \]
+      </h4>
+      <p>
+        Thus <strong>\( V_N \)</strong> is nonincreasing along MPC trajectories
+        and strictly decreases except at the origin. Together with positive
+        definiteness, this yields asymptotic stability by standard Lyapunov
+        arguments.
+      </p>
+      <p>
+        In robotics, <strong>\( \mathcal{X}_f \)</strong> is often chosen as an
+        ellipsoid around the desired configuration (e.g. small joint position
+        and velocity errors) where a local LQR/PD-type law is valid and respects
+        joint/torque limits.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Constraint-Handling Workflow in Robot MPC -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Constraint-Handling Workflow in Robot MPC</h2>
+    <div class="down-content">
+      <p>
+        Designing constraint handling in MPC for a robot proceeds through a
+        structured set of steps: modeling physical limits, classifying
+        constraints as hard/soft, selecting terminal ingredients, and generating
+        a solver-ready QP.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  START["Start from robot model and task"] --> LIM["Identify physical limits: joints, velocities, torques"]
+  LIM --> CLASS["Classify: hard vs soft constraints"]
+  CLASS --> SETS["Define sets X, U, Xf (polyhedral or ellipsoidal)"]
+  SETS --> COST["Choose Q, R, P and select horizon N"]
+  COST --> FORM["Formulate QP with dynamics, constraints, and slacks"]
+  FORM --> TEST["Offline test: feasibility and closed-loop behavior"]
+  TEST --> IMPL["Implement online MPC with chosen solver"]
+        </pre>
+      </div>
+      <p>
+        In later labs, this workflow is instantiated for joint-space and
+        task-space tracking, including joint limits and torque saturation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation — Constrained Joint-Space MPC -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation — Constrained Joint-Space MPC</h2>
+    <div class="down-content">
+      <p>
+        We sketch a Python implementation of constrained MPC for a single
+        revolute joint modeled as a discrete-time double integrator. We use
+        <code>cvxpy</code> for QP formulation and note how one would integrate
+        this with a robot modeling library such as <code>roboticstoolbox</code>.
+      </p>
+      <p>
+        The discrete-time model (sampling time <strong>\( T_s \)</strong>,
+        inertia <strong>\( J &gt; 0 \)</strong>):
+      </p>
+      <h4 class="mathJax">
+        \[ x_{k+1} = \begin{bmatrix} 1 &amp; T_s \\ 0 &amp; 1 \end{bmatrix} x_k
+        + \begin{bmatrix} 0 \\ T_s / J \end{bmatrix} u_k, \quad x_k =
+        \begin{bmatrix} q_k \\ \dot{q}_k \end{bmatrix}, \quad u_k = &bsol;tau_k.
+        \]
+      </h4>
+      <p>Python code for one MPC step:</p>
+      <pre><code class="language-python">
+import numpy as np
+import cvxpy as cp
+
+# Robot joint parameters
+Ts = 0.01  # sampling time
+J = 0.05   # joint inertia
+
+A = np.array([[1.0, Ts],
+              [0.0, 1.0]])
+B = np.array([[0.0],
+              [Ts / J]])
+
+# Horizon and cost
+N = 20
+Q = np.diag([50.0, 1.0])   # penalize position error heavily
+R = np.array([[0.1]])
+
+# Joint and torque limits
+q_min = -1.5
+q_max =  1.5
+dq_max = 2.0
+tau_max = 2.0
+
+def mpc_step(x0, x_ref):
+    """
+    Solve constrained MPC step for a single joint.
+    x0: current state (2,)
+    x_ref: desired joint position (scalar), zero desired velocity.
+    """
+    nx = A.shape[0]
+    nu = B.shape[1]
+
+    # Decision variables
+    x = cp.Variable((nx, N + 1))
+    u = cp.Variable((nu, N))
+
+    # Cost and constraints
+    cost = 0
+    constraints = []
+
+    # Initial condition
+    constraints.append(x[:, 0] == x0)
+
+    for k in range(N):
+        # Stage cost (track reference)
+        x_ref_vec = np.array([x_ref, 0.0])
+        cost += cp.quad_form(x[:, k] - x_ref_vec, Q) + cp.quad_form(u[:, k], R)
+
+        # Dynamics
+        constraints.append(x[:, k + 1] == A @ x[:, k] + B @ u[:, k])
+
+        # State constraints
+        constraints.append(x[0, k] &gt;= q_min)
+        constraints.append(x[0, k] &lt;= q_max)
+        constraints.append(cp.abs(x[1, k]) &lt;= dq_max)
+
+        # Input constraints
+        constraints.append(cp.abs(u[:, k]) &lt;= tau_max)
+
+    # Terminal cost
+    x_ref_vec = np.array([x_ref, 0.0])
+    cost += cp.quad_form(x[:, N] - x_ref_vec, Q)
+
+    # Solve QP
+    prob = cp.Problem(cp.Minimize(cost), constraints)
+    prob.solve(solver=cp.OSQP, warm_start=True)
+
+    if prob.status not in ["optimal", "optimal_inaccurate"]:
+        raise RuntimeError("MPC QP infeasible or solver failed")
+
+    # Receding-horizon: apply the first control
+    u0 = u[:, 0].value
+    return u0
+
+# Example usage in a control loop:
+if __name__ == "__main__":
+    x = np.array([0.0, 0.0])
+    x_ref = 1.0
+    for k in range(50):
+        u0 = mpc_step(x, x_ref)
+        # Simulate one step (here using the exact model)
+        x = A @ x + B @ u0
+        print(f"step {k}, q = {x[0]:.3f}, dq = {x[1]:.3f}, tau = {u0[0]:.3f}")
+      </code></pre>
+      <p>
+        For a multi-joint manipulator, one would obtain a higher-dimensional
+        discrete-time state-space model (e.g. from
+        <code>roboticstoolbox</code> or custom dynamics) and build an MPC QP
+        with stacked states and inputs, but the constraint structure (joint
+        limits, torque bounds) remains similar.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation Sketch — QP-Based MPC with Eigen and OSQP -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation Sketch — QP-Based MPC with Eigen and OSQP</h2>
+    <div class="down-content">
+      <p>
+        In C++, constrained MPC is frequently implemented by building the QP
+        matrices using
+        <code>Eigen</code> and solving them with a QP solver such as
+        <code>OSQP</code> or <code>qpOASES</code>. Below is a sketch that
+        assumes we have already constructed the condensed QP:
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;Eigen/Dense&gt;
+#include "osqp.h"  // OSQP C API
+
+// H, g, A, l, u define the QP
+//   minimize 0.5 z' H z + g' z
+//   subject to l &lt;= A z &lt;= u
+
+struct MPCQP {
+    Eigen::MatrixXd H;
+    Eigen::VectorXd g;
+    Eigen::MatrixXd A;
+    Eigen::VectorXd l;
+    Eigen::VectorXd u;
+};
+
+MPCQP buildJointMPCQP(const Eigen::Vector2d&amp; x0, double q_min, double q_max,
+                      double dq_max, double tau_max,
+                      double Ts, int N)
+{
+    MPCQP qp;
+    // For brevity, we omit full construction.
+    // In practice:
+    //  - Build prediction matrices for x(k) from x0 and sequence of u
+    //  - Encode constraints as linear inequalities on z (stacked u's or x,u)
+    //  - Fill qp.H, qp.g, qp.A, qp.l, qp.u
+    return qp;
+}
+
+Eigen::VectorXd solveOSQP(const MPCQP&amp; qp)
+{
+    // Convert Eigen matrices to OSQP CSR structures and call OSQP API.
+    // Here we only show the outline, not full boilerplate.
+    // ...
+    Eigen::VectorXd z_opt;
+    return z_opt;
+}
+
+int main()
+{
+    double Ts = 0.01;
+    int N = 20;
+    double q_min = -1.5, q_max = 1.5, dq_max = 2.0, tau_max = 2.0;
+
+    Eigen::Vector2d x;
+    x &lt;&lt; 0.0, 0.0;
+
+    for (int k = 0; k &lt; 50; ++k) {
+        MPCQP qp = buildJointMPCQP(x, q_min, q_max, dq_max, tau_max, Ts, N);
+        Eigen::VectorXd z_opt = solveOSQP(qp);
+
+        // First element(s) of z_opt correspond to first control input u0
+        double u0 = z_opt(0);
+
+        // Simulate simple joint model x(k+1) = A x(k) + B u(k)
+        Eigen::Matrix2d A;
+        A &lt;&lt; 1.0, Ts,
+              0.0, 1.0;
+        Eigen::Vector2d B;
+        B &lt;&lt; 0.0, Ts / 0.05;  // assume inertia J = 0.05
+
+        x = A * x + B * u0;
+
+        std::cout &lt;&lt; "step " &lt;&lt; k
+                  &lt;&lt; ", q = " &lt;&lt; x(0)
+                  &lt;&lt; ", dq = " &lt;&lt; x(1)
+                  &lt;&lt; ", tau = " &lt;&lt; u0 &lt;&lt; std::endl;
+    }
+    return 0;
+}
+      </code></pre>
+      <p>
+        In a full manipulator application, <code>buildJointMPCQP</code> uses the
+        robot&apos;s joint-space linearization (e.g. from a dynamics library)
+        and encodes joint/torque constraints as rows of the inequality matrix
+        <code>A</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation Sketch — MPC with EJML and ojAlgo -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation Sketch — MPC with EJML and ojAlgo</h2>
+    <div class="down-content">
+      <p>
+        Java is less common for low-level robot control, but it is used in some
+        simulation and high-level control frameworks. A typical approach uses
+        EJML for linear algebra and a QP solver such as
+        <code>ojAlgo</code>. Below is a conceptual snippet:
+      </p>
+      <pre><code class="language-java">
+import org.ejml.simple.SimpleMatrix;
+import org.ojalgo.optimisation.Optimisation;
+import org.ojalgo.optimisation.QuadraticSolver;
+import org.ojalgo.optimisation.QuadraticSolver.Builder;
+
+public class JointMPC {
+
+    public static class MPCQP {
+        public SimpleMatrix H;
+        public SimpleMatrix g;
+        public SimpleMatrix A;
+        public SimpleMatrix l;
+        public SimpleMatrix u;
+    }
+
+    public static MPCQP buildQP(SimpleMatrix x0, double qMin, double qMax,
+                                double dqMax, double tauMax,
+                                double Ts, int N) {
+        MPCQP qp = new MPCQP();
+        // Build prediction and constraint matrices here
+        // ...
+        return qp;
+    }
+
+    public static double solveAndGetFirstTorque(MPCQP qp) {
+        Builder builder = QuadraticSolver.getBuilder(qp.H.numRows());
+
+        // Set quadratic and linear terms
+        builder.quadratic(qp.H.getMatrix());
+        builder.linear(qp.g.getMatrix());
+
+        // Inequality constraints l &lt;= A z &lt;= u
+        // ojAlgo expects these in a specific canonical form;
+        // convert qp.A, qp.l, qp.u accordingly.
+        // ...
+
+        QuadraticSolver solver = builder.build();
+        Optimisation.Result result = solver.solve();
+
+        if (result.getState().isFailure()) {
+            throw new RuntimeException("MPC QP infeasible");
+        }
+
+        // Extract first control input
+        double[] z = result.toRawCopy1D();
+        return z[0];
+    }
+
+    public static void main(String[] args) {
+        double Ts = 0.01;
+        int N = 20;
+        double qMin = -1.5, qMax = 1.5, dqMax = 2.0, tauMax = 2.0;
+
+        SimpleMatrix x = new SimpleMatrix(2, 1);
+        x.set(0, 0, 0.0);
+        x.set(1, 0, 0.0);
+
+        for (int k = 0; k &lt; 50; ++k) {
+            MPCQP qp = buildQP(x, qMin, qMax, dqMax, tauMax, Ts, N);
+            double tau = solveAndGetFirstTorque(qp);
+
+            // Simulate discrete double integrator
+            SimpleMatrix A = new SimpleMatrix(new double[][]{
+                    {1.0, Ts},
+                    {0.0, 1.0}
+            });
+            SimpleMatrix B = new SimpleMatrix(new double[][]{
+                    {0.0},
+                    {Ts / 0.05}
+            });
+
+            x = A.mult(x).plus(B.scale(tau));
+
+            System.out.println("step " + k
+                    + ", q = " + x.get(0)
+                    + ", dq = " + x.get(1)
+                    + ", tau = " + tau);
+        }
+    }
+}
+      </code></pre>
+      <p>
+        In a multi-joint scenario, this pattern extends by stacking joint states
+        and torques, with joint and torque limits generating additional rows in
+        <code>A</code>, <code>l</code>, and <code>u</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation — MPC Toolbox and Robotics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Implementation — MPC Toolbox and Robotics</h2>
+    <div class="down-content">
+      <p>
+        MATLAB&apos;s Model Predictive Control Toolbox provides built-in support
+        for constrained MPC, which integrates naturally with robot models from
+        the Robotics System Toolbox. For a single joint:
+      </p>
+      <pre><code class="language-matlab">
+Ts = 0.01;
+J  = 0.05;
+
+A = [1 Ts;
+     0 1];
+B = [0;
+     Ts/J];
+C = eye(2);     % full state output
+D = [0; 0];
+
+plant = ss(A, B, C, D, Ts);
+
+% Horizon and weights
+p = 20;   % prediction horizon
+m = 3;    % control horizon
+
+mpcobj = mpc(plant, Ts, p, m);
+mpcobj.Weights.OutputVariables = [50 1];
+mpcobj.Weights.ManipulatedVariables = 0.1;
+
+% Joint and torque constraints
+q_min = -1.5; q_max = 1.5;
+dq_max = 2.0;
+tau_max = 2.0;
+
+mpcobj.MV.Min = -tau_max;
+mpcobj.MV.Max =  tau_max;
+
+% Output constraints (q, dq)
+mpcobj.OV(1).Min = q_min;
+mpcobj.OV(1).Max = q_max;
+mpcobj.OV(2).Min = -dq_max;
+mpcobj.OV(2).Max =  dq_max;
+
+% Reference (desired joint angle)
+yref = [1; 0];
+
+x = [0; 0];
+u = 0;
+
+for k = 1:50
+    % Compute constrained MPC move
+    u = mpcmove(mpcobj, x, x, yref);
+    % Simulate plant
+    x = A*x + B*u;
+    fprintf("step %d: q = %.3f, dq = %.3f, tau = %.3f\n", k, x(1), x(2), u);
+end
+      </code></pre>
+      <p>
+        In Simulink, the <code>MPC Controller</code> block can be connected to a
+        robot plant model defined using the Robotics System Toolbox, with joint
+        limits and torque saturation configured via block parameters. The
+        toolbox transparently constructs and solves the underlying QP at each
+        sample.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation — Symbolic and Numeric MPC -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation — Symbolic and Numeric MPC</h2>
+    <div class="down-content">
+      <p>
+        Mathematica can be used to symbolically derive the prediction model and
+        then numerically solve the constrained QP. For a short horizon, one can
+        directly construct the optimization problem:
+      </p>
+      <pre><code class="language-mathematica">
+(* System matrices for joint *)
+Ts = 0.01;
+J  = 0.05;
+A = { {1, Ts},
+     {0, 1} };
+B = { {0},
+     {Ts/J} };
+
+(* Horizon and cost weights *)
+N  = 10;
+Q  = DiagonalMatrix[{50, 1}];
+R  = {{0.1}};
+xRef = {1, 0};
+
+(* Decision variables: u[0..N-1], x[0..N] *)
+u = Array[u, N];
+x = Array[x, N + 1];
+
+(* Initial condition *)
+x0 = {0, 0};
+constraints = {x[1] == x0};
+
+(* Dynamics and constraints *)
+qMin = -1.5; qMax = 1.5;
+dqMax = 2.0; tauMax = 2.0;
+
+For[k = 0, k &lt; N, k++,
+  (* Dynamics: x[k+2] because x[1] is x0 *)
+  constraints = Join[constraints,
+    {x[k + 2] == A . x[k + 1] + B . {u[k + 1]}}];
+
+  (* State constraints *)
+  constraints = Join[constraints, {
+    qMin &lt;= x[k + 1][[1]] &lt;= qMax,
+    -dqMax &lt;= x[k + 1][[2]] &lt;= dqMax}];
+
+  (* Input constraints *)
+  constraints = Join[constraints, {
+    -tauMax &lt;= u[k + 1] &lt;= tauMax}];
+];
+
+(* Terminal state constraints *)
+constraints = Join[constraints, {
+  qMin &lt;= x[N + 1][[1]] &lt;= qMax,
+  -dqMax &lt;= x[N + 1][[2]] &lt;= dqMax}];
+
+(* Cost function *)
+cost =
+  Sum[(x[k + 1] - xRef).Q.(x[k + 1] - xRef) + {u[k + 1]}.R.{u[k + 1]},
+      {k, 0, N - 1}] +
+  (x[N + 1] - xRef).Q.(x[N + 1] - xRef);
+
+(* Solve constrained optimization numerically *)
+sol = NMinimize[{cost, constraints},
+  Flatten[{Table[u[k + 1], {k, 0, N - 1}],
+           Table[x[k + 1], {k, 0, N}]}]];
+
+u0Opt = u[1] /. Last[sol]
+      </code></pre>
+      <p>
+        For more complex robots, one can symbolically derive the discrete-time
+        linearized dynamics around a trajectory and plug them into a similar
+        finite-horizon optimization problem, then export the resulting
+        controller as C code for deployment.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (QP KKT conditions for constrained MPC).</strong>
+        Consider the linear MPC QP
+      </p>
+      <h4 class="mathJax">
+        \[ \min_z \; \tfrac{1}{2} z^\top H z + f^\top z \quad \text{s.t.} \quad
+        G z \le h, \; E z = b, \]
+      </h4>
+      <p>
+        where <strong>\( H \)</strong> is positive semidefinite. Derive the
+        Karush&ndash;Kuhn&ndash;Tucker (KKT) optimality conditions and interpret
+        them in the context of constrained MPC.
+      </p>
+      <p>
+        <strong>Solution.</strong> Introduce Lagrange multipliers
+        <strong>\( \lambda \ge 0 \)</strong> for
+        <strong>\( G z \le h \)</strong> and <strong>\( \nu \)</strong> for
+        <strong>\( E z = b \)</strong>. The Lagrangian is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(z,\lambda,\nu) = \tfrac{1}{2} z^\top H z + f^\top z +
+        \lambda^\top (G z - h) + \nu^\top (E z - b). \]
+      </h4>
+      <p>The KKT conditions are:</p>
+      <ul>
+        <li>
+          <em>Stationarity</em>:
+          <h4 class="mathJax">
+            \[ H z^\star + f + G^\top \lambda^\star + E^\top \nu^\star = 0. \]
+          </h4>
+        </li>
+        <li>
+          <em>Primal feasibility</em>:
+          <h4 class="mathJax">\[ G z^\star \le h, \quad E z^\star = b. \]</h4>
+        </li>
+        <li>
+          <em>Dual feasibility</em>:
+          <h4 class="mathJax">\[ \lambda^\star \ge 0. \]</h4>
+        </li>
+        <li>
+          <em>Complementary slackness</em>:
+          <h4 class="mathJax">
+            \[ \lambda_i^\star (G z^\star - h)_i = 0 \quad \forall i. \]
+          </h4>
+        </li>
+      </ul>
+      <p>
+        In MPC, <strong>\( z^\star \)</strong> collects predicted states and
+        inputs, while multipliers <strong>\( \lambda^\star \)</strong> measure
+        the sensitivity of the optimal cost to tightening constraints. Large
+        <strong>\( \lambda_i^\star \)</strong> indicate active, critical
+        constraints (e.g. torque or joint limits significantly shaping the
+        optimal trajectory).
+      </p>
+
+      <p>
+        <strong
+          >Problem 2 (Feasible set for 1D joint with input saturation).</strong
+        >
+        Consider the scalar system
+      </p>
+      <h4 class="mathJax">
+        \[ x_{k+1} = x_k + u_k, \quad |u_k| \le u_{\max}, \]
+      </h4>
+      <p>
+        with horizon <strong>\( N \)</strong> and state constraint
+        <strong>\( |x_k| \le x_{\max} \)</strong> for all
+        <strong>\( k = 0,\dots,N \)</strong>. There is no terminal set
+        constraint beyond <strong>\( |x_N| \le x_{\max} \)</strong>.
+        Characterize the set of initial conditions
+        <strong>\( \mathcal{X}_N \)</strong> for which there exists at least one
+        feasible input sequence.
+      </p>
+      <p>
+        <strong>Solution.</strong> The state after
+        <strong>\( N \)</strong> steps is
+        <strong>\( x_N = x_0 + \sum_{k=0}^{N-1} u_k \)</strong> with
+        <strong>\( |u_k| \le u_{\max} \)</strong>. The maximum reachable change
+        in state magnitude after <strong>\( N \)</strong> steps is
+        <strong>\( N u_{\max} \)</strong> in either direction. To satisfy
+        <strong>\( |x_k| \le x_{\max} \)</strong> at each step, we must ensure
+        in particular that it is possible to steer from
+        <strong>\( x_0 \)</strong> into the interval
+        <strong>\( [-x_{\max}, x_{\max}] \)</strong> at each step using bounded
+        increments.
+      </p>
+      <p>
+        A sufficient (and for this integrator, also necessary) condition is that
+        <strong>\( |x_0| \)</strong> is not farther than
+        <strong>\( N u_{\max} \)</strong> from the admissible interval:
+      </p>
+      <h4 class="mathJax">\[ |x_0| \le x_{\max} + N u_{\max}. \]</h4>
+      <p>
+        Indeed, if <strong>\( |x_0| &gt; x_{\max} + N u_{\max} \)</strong>, then
+        even applying the maximum input in the direction of the origin at every
+        step cannot bring the state into
+        <strong>\( [-x_{\max}, x_{\max}] \)</strong> by time
+        <strong>\( N \)</strong>, so no feasible sequence exists. Conversely, if
+        <strong>\( |x_0| \le x_{\max} + N u_{\max} \)</strong>, one can choose
+        inputs to drive <strong>\( x_k \)</strong> towards zero with steps of at
+        most <strong>\( u_{\max} \)</strong>, staying within the state bounds at
+        each time because the state moves monotonically towards the admissible
+        region.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Soft constraint penalty effect).</strong>
+        Consider the soft-constrained inequality
+        <strong>\( C x \le d + \epsilon \)</strong> with
+        <strong>\( \epsilon \ge 0 \)</strong> and penalty
+        <strong>\( \rho \|\epsilon\|_1 \)</strong> in the cost. Suppose the
+        unconstrained optimum of the original QP (without this inequality)
+        satisfies <strong>\( C x^\star \le d \)</strong>. Show that for any
+        <strong>\( \rho &gt; 0 \)</strong>, the optimal slack is zero if we add
+        this inequality as a soft constraint.
+      </p>
+      <p>
+        <strong>Solution.</strong> Let <strong>\( x^\star \)</strong> be the
+        optimum of the original problem (without the inequality). Because
+        <strong>\( C x^\star \le d \)</strong>, the pair
+        <strong>\( (x^\star, \epsilon = 0) \)</strong> is feasible for the soft
+        problem. Any solution with <strong>\( \epsilon \neq 0 \)</strong> has
+        cost
+      </p>
+      <h4 class="mathJax">
+        \[ J(x,\epsilon) = J(x,0) + \rho \|\epsilon\|_1 \ge J(x,0), \]
+      </h4>
+      <p>
+        and in particular, for <strong>\( x = x^\star \)</strong> we have
+        <strong>\( J(x^\star,\epsilon) &gt; J(x^\star,0) \)</strong> whenever
+        <strong>\( \epsilon \neq 0 \)</strong>. Thus a nonzero slack can never
+        be optimal; the optimizer must choose
+        <strong>\( \epsilon^\star = 0 \)</strong>. The role of a large penalty
+        <strong>\( \rho \)</strong> only appears when the original hard
+        inequality may become active or conflicting with other constraints.
+      </p>
+
+      <p>
+        <strong
+          >Problem 4 (Lyapunov inequality for linear MPC terminal cost).</strong
+        >
+        Let <strong>\( (A,B) \)</strong> be stabilizable and
+        <strong>\( K \)</strong> be an LQR gain with solution
+        <strong>\( P \)</strong> to the discrete-time Algebraic Riccati Equation
+        (DARE). Show that
+      </p>
+      <h4 class="mathJax">
+        \[ (A+BK)^\top P (A+BK) - P + Q + K^\top R K = 0, \]
+      </h4>
+      <p>and interpret this as a Lyapunov equality for the closed loop.</p>
+      <p><strong>Solution.</strong> The DARE is</p>
+      <h4 class="mathJax">
+        \[ P = A^\top P A - A^\top P B (R + B^\top P B)^{-1} B^\top P A + Q. \]
+      </h4>
+      <p>
+        The optimal LQR feedback is
+        <strong>\( K = - (R + B^\top P B)^{-1} B^\top P A \)</strong>.
+        Substituting <strong>\( K \)</strong> into the DARE and rearranging
+        terms yields exactly
+      </p>
+      <h4 class="mathJax">
+        \[ (A+BK)^\top P (A+BK) - P + Q + K^\top R K = 0. \]
+      </h4>
+      <p>
+        This equality states that along the closed-loop trajectories
+        <strong>\( x_{k+1} = (A+BK)x_k \)</strong>, the quantity
+        <strong>\( V(x_k) = x_k^\top P x_k \)</strong> satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ V(x_{k+1}) - V(x_k) = - \left( x_k^\top Q x_k + (K x_k)^\top R (K
+        x_k) \right) \le 0, \]
+      </h4>
+      <p>
+        which is exactly the Lyapunov decrease condition used in Theorem 3. Thus
+        the LQR terminal cost and terminal feedback law provide a rigorous
+        stability certificate for constrained MPC.
+      </p>
+
+      <p>
+        <strong
+          >Problem 5 (Encoding robot joint limits as linear
+          inequalities).</strong
+        >
+        Let <strong>\( q \in \mathbb{R}^n \)</strong> be joint positions with
+        limits <strong>\( q^{\min} \le q \le q^{\max} \)</strong>. Show how to
+        write these limits as a single matrix inequality
+        <strong>\( G_x x \le g_x \)</strong> when the state vector is
+        <strong
+          >\( x = \begin{bmatrix} q \\ \dot{q} \end{bmatrix} \in \mathbb{R}^{2n}
+          \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution.</strong> The conditions
+        <strong>\( q^{\min} \le q \le q^{\max} \)</strong> are equivalent to
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix} I_n \\ -I_n \end{bmatrix} q \le \begin{bmatrix}
+        q^{\max} \\ -q^{\min} \end{bmatrix}. \]
+      </h4>
+      <p>
+        Since
+        <strong>\( x = \begin{bmatrix} q \\ \dot{q} \end{bmatrix} \)</strong>,
+        define the selector matrix
+      </p>
+      <h4 class="mathJax">
+        \[ S_q = \begin{bmatrix} I_n &amp; 0_{n \times n} \end{bmatrix}, \]
+      </h4>
+      <p>
+        so that <strong>\( q = S_q x \)</strong>. Then the inequalities become
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix} I_n \\ -I_n \end{bmatrix} S_q x \le \begin{bmatrix}
+        q^{\max} \\ -q^{\min} \end{bmatrix}. \]
+      </h4>
+      <p>Therefore we can set</p>
+      <h4 class="mathJax">
+        \[ G_x = \begin{bmatrix} I_n \\ -I_n \end{bmatrix} S_q, \quad g_x =
+        \begin{bmatrix} q^{\max} \\ -q^{\min} \end{bmatrix}, \]
+      </h4>
+      <p>
+        which is the required linear-inequality form
+        <strong>\( G_x x \le g_x \)</strong> used in the MPC QP.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we formalized how MPC handles state and input constraints
+        for robotic systems, casting the finite-horizon problem as a QP with
+        polyhedral constraint sets. We defined feasible sets and proved
+        recursive feasibility under control-invariant terminal sets, introduced
+        soft constraints via slack variables and exact penalties, and
+        established stability through terminal costs and terminal feedback laws
+        derived from LQR. We also discussed practical implementations in Python,
+        C++, Java, MATLAB/Simulink, and Wolfram Mathematica for joint-space MPC
+        with joint/torque limits. These concepts form the core of constrained
+        robot MPC and will support the real-time and lab-focused developments in
+        subsequent lessons.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Rawlings, J. B., &amp; Mayne, D. Q. (2009).
+        <em>Model Predictive Control: Theory and Design</em>. Nob Hill
+        Publishing.
+      </li>
+      <li>
+        Mayne, D. Q., Rawlings, J. B., Rao, C. V., &amp; Scokaert, P. O. M.
+        (2000). Constrained model predictive control: Stability and optimality.
+        <em>Automatica</em>, 36(6), 789&ndash;814.
+      </li>
+      <li>
+        Chen, H., &amp; Allgöwer, F. (1998). A quasi-infinite horizon nonlinear
+        model predictive control scheme with guaranteed stability.
+        <em>Automatica</em>, 34(10), 1205&ndash;1217.
+      </li>
+      <li>
+        Scokaert, P. O. M., &amp; Rawlings, J. B. (1998). Constraints in linear
+        quadratic regulation: A study of closed-loop properties.
+        <em>Automatica</em>, 34(10), 1343&ndash;1354.
+      </li>
+      <li>
+        Gilbert, E. G., &amp; Tan, K. T. (1991). Linear systems with state and
+        control constraints: The theory and application of maximal output
+        admissible sets.
+        <em>IEEE Transactions on Automatic Control</em>, 36(9), 1008&ndash;1020.
+      </li>
+      <li>
+        Bemporad, A., Morari, M., Dua, V., &amp; Pistikopoulos, E. N. (2002).
+        The explicit linear quadratic regulator for constrained systems.
+        <em>Automatica</em>, 38(1), 3&ndash;20.
+      </li>
+      <li>
+        Wieland, P., &amp; Allgöwer, F. (2007). Constructive safety using
+        control barrier functions.
+        <em
+          >Proceedings of the 7th IFAC Symposium on Nonlinear Control
+          Systems</em
+        >.
+      </li>
+      <li>
+        Diehl, M., Ferreau, H. J., &amp; Haverbeke, N. (2009). Efficient
+        numerical methods for nonlinear MPC and moving horizon estimation. In L.
+        Magni, D. M. Raimondo, &amp; F. Allgöwer (Eds.),
+        <em>Nonlinear Model Predictive Control</em>, Springer.
+      </li>
+      <li>
+        Rosolia, U., &amp; Borrelli, F. (2017). Learning model predictive
+        control for iterative tasks.
+        <em>IEEE Transactions on Automatic Control</em>, 63(7), 1883&ndash;1896.
+      </li>
+      <li>
+        Pannocchia, G., &amp; Rawlings, J. B. (2003). Disturbance models for
+        offset-free model predictive control.
+        <em>AIChE Journal</em>, 49(2), 426&ndash;437.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter10/Lesson2.html">
+          Lesson 2: MPC Formulation for Robot Tracking
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter10/Lesson4.html">
+          Lesson 4: Real-Time MPC and Warm-Starting
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="active-lesson" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

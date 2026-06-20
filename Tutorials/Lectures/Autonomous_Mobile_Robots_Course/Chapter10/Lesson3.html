@@ -1,0 +1,2492 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 10: Scan Matching and Registration - Lesson 3: Correlative Scan Matching | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 10: Scan Matching and Registration</h1>
+    <h3><strong>Lesson 3: Correlative Scan Matching</strong></h3>
+    <p>
+      Correlative scan matching estimates the relative pose between a 2D LiDAR
+      scan and a prior map (or a reference scan) by <em>discrete</em> search
+      over candidate poses and by scoring each candidate through an image-like
+      correlation between transformed scan endpoints and a precomputed grid
+      representation of the environment. Unlike gradient-based methods (e.g.,
+      ICP variants), correlative methods can provide a near-global optimum over
+      a bounded search region and are therefore robust when the initial guess is
+      weak, at the cost of increased computation—mitigated in practice using
+      multi-resolution grids and branch-and-bound pruning.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        Let the robot pose in the plane be
+        <strong>\( \mathbf{x} = (x, y, \theta) \)</strong>. Given a 2D scan
+        expressed as a set of points in the LiDAR (robot) frame
+        <strong
+          >\( \mathcal{Z} = \{\mathbf{z}_j\}_{j=1}^N \subset \mathbb{R}^2
+          \)</strong
+        >
+        and a grid map encoding environment occupancy, correlative scan matching
+        selects the pose that maximizes a discrete score:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x} } =
+        \operatorname*{argmax}_{\mathbf{x}\in\mathcal{X}_\Delta} \;
+        S(\mathbf{x}), \qquad S(\mathbf{x}) = \sum_{j=1}^N \; \psi\!\left(
+        \mathcal{M}\big( \pi(\mathbf{T}(\mathbf{x})\,\mathbf{z}_j ) \big)
+        \right). \]
+      </h4>
+
+      <p>
+        Here <strong>\( \mathbf{T}(\mathbf{x}) \)</strong> is the rigid
+        transform in the plane applied to scan points,
+        <strong>\( \pi(\cdot) \)</strong> maps a world point to a grid cell
+        index, <strong>\( \mathcal{M} \)</strong> is the map value stored per
+        cell (binary occupancy, probability, log-odds, or likelihood-field
+        score), and <strong>\( \psi(\cdot) \)</strong> is a scoring function
+        (often identity, or log, or a bounded robust transform). The search set
+        <strong>\( \mathcal{X}_\Delta \)</strong> is a discretized neighborhood
+        around a prior estimate <strong>\( \mathbf{x}_0 \)</strong> produced by
+        odometry/IMU integration from Chapter 5.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  Z["Input: scan points {z_j} in robot frame"] --> P0["Prior pose x0 from odometry/IMU"]
+  M["Grid map representation \n(occupancy / log-odds / likelihood field)"] --> G["Build multi-resolution grid pyramid"]
+  P0 --> G
+  Z --> G
+  G --> C["Enumerate candidate poses in bounded window"]
+  C --> S["Score each candidate by summing grid values \nat transformed endpoints"]
+  S --> K["Keep best candidates (or use branch-and-bound pruning)"]
+  K --> R["Refine at higher resolution until finest grid"]
+  R --> XHAT["Output: matched pose x_hat + score/quality metrics"]
+        </pre>
+      </div>
+
+      <p>
+        Key properties for mobile robotics: (i) the objective is computed
+        directly from the grid map, hence does not require explicit point
+        correspondences; (ii) the optimization is discrete, so local minima are
+        reduced relative to purely iterative continuous methods; (iii) the
+        method is naturally parallelizable and can be accelerated by
+        multi-resolution search and pruning.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Probabilistic Scoring from an Occupancy Grid -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Probabilistic Scoring from an Occupancy Grid</h2>
+    <div class="down-content">
+      <p>
+        Assume the map is an occupancy grid where each cell
+        <strong>\( c \)</strong> stores an occupancy probability
+        <strong>\( p_\text{occ}(c) \)</strong> with
+        <strong>\( 0 \le p_\text{occ}(c) \le 1 \)</strong>. Consider a
+        simplified endpoint sensor model: each transformed endpoint
+        <strong
+          >\( \mathbf{p}_j(\mathbf{x})=\mathbf{T}(\mathbf{x})\mathbf{z}_j
+          \)</strong
+        >
+        is expected to land in an occupied cell with probability proportional to
+        <strong>\( p_\text{occ}(\pi(\mathbf{p}_j)) \)</strong>. Under
+        conditional independence given the pose (a standard approximation in
+        Chapter 6), the likelihood is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(\mathcal{Z}\mid\mathbf{x},\mathcal{M}) = \prod_{j=1}^N
+        p_\text{occ}\big( \pi(\mathbf{p}_j(\mathbf{x})) \big). \]
+      </h4>
+
+      <p>Taking logs yields an additive objective:</p>
+
+      <h4 class="mathJax">
+        \[ \log p(\mathcal{Z}\mid\mathbf{x},\mathcal{M}) = \sum_{j=1}^N \log
+        p_\text{occ}\big( \pi(\mathbf{p}_j(\mathbf{x})) \big). \]
+      </h4>
+
+      <p>
+        Therefore, a maximum-likelihood correlative scan matcher can use the
+        score
+        <strong
+          >\( S(\mathbf{x})=\sum_j \log
+          p_\text{occ}(\pi(\mathbf{p}_j(\mathbf{x}))) \)</strong
+        >. In practice, probabilities close to 0 or 1 are numerically
+        inconvenient and sensitive to mapping artifacts. A common alternative is
+        to store <strong>log-odds</strong>:
+        <strong
+          >\( \ell(c) = \log\!\left( \frac{p_\text{occ}(c)}{1-p_\text{occ}(c)}
+          \right) \)</strong
+        >, then score by summing <strong>\( \ell(c) \)</strong> at transformed
+        endpoints (often with clipping).
+      </p>
+
+      <p>
+        <strong>Likelihood-field scoring (robust to discretization).</strong>
+        Instead of using only occupied/free cells, precompute a field where each
+        cell stores a decaying function of the distance to the nearest occupied
+        cell. Let <strong>\( d(c) \)</strong> be that distance; then a Gaussian
+        field is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathcal{M}_\sigma(c) = \exp\!\left( -\frac{d(c)^2}{2\sigma^2}
+        \right), \qquad \sigma &gt; 0. \]
+      </h4>
+
+      <p>
+        This transforms hard matching into a smoother “attraction basin”,
+        improving robustness when scan endpoints fall between grid cell centers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Discretization, Search Windows, and Guarantees -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Discretization, Search Windows, and Guarantees</h2>
+    <div class="down-content">
+      <p>
+        Correlative scan matching replaces continuous optimization with a
+        discrete search over
+        <strong>\( (x,y,\theta) \)</strong> on a lattice. Let the search window
+        be: <strong>\( x \in [x_0-\Delta_x,\,x_0+\Delta_x] \)</strong>,
+        <strong>\( y \in [y_0-\Delta_y,\,y_0+\Delta_y] \)</strong>,
+        <strong
+          >\( \theta \in [\theta_0-\Delta_\theta,\,\theta_0+\Delta_\theta]
+          \)</strong
+        >. With steps <strong>\( \delta_x,\delta_y,\delta_\theta \)</strong>,
+        the candidate set size is approximately:
+      </p>
+
+      <h4 class="mathJax">
+        \[ |\mathcal{X}_\Delta| \approx \left(1 + \left\lfloor
+        \frac{2\Delta_x}{\delta_x} \right\rfloor \right) \left(1 + \left\lfloor
+        \frac{2\Delta_y}{\delta_y} \right\rfloor \right) \left(1 + \left\lfloor
+        \frac{2\Delta_\theta}{\delta_\theta} \right\rfloor \right). \]
+      </h4>
+
+      <p>
+        If score evaluation costs <strong>\( \Theta(N) \)</strong> for
+        <strong>\( N \)</strong> endpoints, total complexity is
+        <strong>\( \Theta(N|\mathcal{X}_\Delta|) \)</strong>. The key advantage
+        is a global optimality statement over the discrete set:
+      </p>
+
+      <p>
+        <strong>Proposition (discrete global optimality).</strong>
+        Let <strong>\( \mathcal{X}_\Delta \)</strong> be finite and let
+        <strong>\( S(\mathbf{x}) \)</strong> be computed exactly for each
+        candidate. Then the returned
+        <strong
+          >\( \hat{\mathbf{x} } =
+          \operatorname*{argmax}_{\mathbf{x}\in\mathcal{X}_\Delta} S(\mathbf{x})
+          \)</strong
+        >
+        is a global maximizer over <strong>\( \mathcal{X}_\Delta \)</strong>.
+      </p>
+
+      <p>
+        <strong>Proof.</strong> Since
+        <strong>\( \mathcal{X}_\Delta \)</strong> is finite, the maximum of
+        <strong>\( S \)</strong> exists. Exhaustively evaluating
+        <strong>\( S(\mathbf{x}) \)</strong> for all
+        <strong>\( \mathbf{x}\in\mathcal{X}_\Delta \)</strong> and selecting the
+        largest value returns a maximizer by definition. \(\square\)
+      </p>
+
+      <p>
+        This guarantee is “only” with respect to the discretized pose lattice;
+        the approximation error relative to the continuous optimum depends on
+        step sizes and the smoothness of <strong>\( S \)</strong>. Likelihood
+        fields and multi-resolution refinement reduce sensitivity to
+        discretization.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Multi-Resolution Correlative Scan Matching -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Multi-Resolution Correlative Scan Matching</h2>
+    <div class="down-content">
+      <p>
+        The core computational challenge is candidate explosion.
+        Multi-resolution correlative scan matching constructs a pyramid of grids
+        <strong
+          >\( \mathcal{M}^{(0)},\mathcal{M}^{(1)},\dots,\mathcal{M}^{(L)}
+          \)</strong
+        >
+        where level <strong>\( \ell \)</strong> has cell size
+        <strong>\( 2^\ell r \)</strong> if the base resolution is
+        <strong>\( r \)</strong>. At coarse levels, fewer cells mean fewer
+        distinct translations to test; at fine levels, we refine only promising
+        candidates.
+      </p>
+
+      <p>
+        A practical pattern (close to Olson-style multi-resolution matching) is:
+        (i) evaluate all candidates on a coarse grid with coarse steps; (ii)
+        keep the top <strong>\( K \)</strong> candidates; (iii) for each kept
+        candidate, search a smaller neighborhood on the next-finer grid.
+      </p>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ \text{Coarse-to-fine:} \quad \mathcal{C}^{(\ell-1)} =
+        \bigcup_{\mathbf{x}\in\operatorname{TopK}(\mathcal{C}^{(\ell)})} \left\{
+        \mathbf{x} + (\Delta x,\Delta y,\Delta\theta) \right\}, \quad \text{with smaller steps at finer levels.} \]
+      </h4>
+
+      <p>
+        The method is not guaranteed to preserve the global optimum unless the
+        refinement neighborhoods cover the entire coarse cell’s feasible set,
+        but in practice it provides excellent speed/accuracy trade-offs,
+        especially when paired with a strong prior
+        <strong>\( \mathbf{x}_0 \)</strong> from odometry/IMU.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Fast Correlative Scan Matching via Branch-and-Bound -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Fast Correlative Scan Matching via Branch-and-Bound</h2>
+    <div class="down-content">
+      <p>
+        A more principled acceleration replaces “keep top-K” heuristics with
+        <strong>branch-and-bound</strong>. The idea is to define a search tree
+        over pose hypotheses (usually over translation for each discrete
+        rotation), compute an <em>upper bound</em> on the best possible score
+        achievable inside a node, and prune any node whose upper bound is less
+        than the best score already found.
+      </p>
+
+      <p>
+        With a max-pooled pyramid, coarse cells store values that upper bound
+        the finest-grid values in their corresponding region. For a node
+        representing a set of translations <strong>\( \mathcal{T} \)</strong>,
+        define:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \overline{S}(\mathcal{T}) = \sum_{j=1}^N
+        \max_{\mathbf{t}\in\mathcal{T} } \mathcal{M}^{(\ell)}\big( \pi(
+        \mathbf{R}(\theta)\mathbf{z}_j + \mathbf{t} ) \big), \]
+      </h4>
+
+      <p>
+        where <strong>\( \mathcal{M}^{(\ell)} \)</strong> is a coarse level. If
+        <strong>\( \overline{S}(\mathcal{T}) \)</strong> is an admissible upper
+        bound on the finest-level scores of translations in
+        <strong>\( \mathcal{T} \)</strong>, then any node with
+        <strong>\( \overline{S}(\mathcal{T}) \le S_\text{best} \)</strong> can
+        be pruned.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Node: translation region T (coarse grid cell block)"] --> UB["Compute upper bound S_bar(T) \nusing coarse max values"]
+  UB --> D1{"S_bar(T) <= S_best ?"}
+  D1 -->|yes| PR["Prune: discard region T"]
+  D1 -->|no| SPLIT["Branch: subdivide T into 4 subregions"]
+  SPLIT --> A1["Child region T1"]
+  SPLIT --> A2["Child region T2"]
+  SPLIT --> A3["Child region T3"]
+  SPLIT --> A4["Child region T4"]
+  A1 --> UB
+        </pre>
+      </div>
+
+      <p>
+        This strategy is central to “fast correlative scan matching” used in
+        modern 2D LiDAR SLAM systems, where real-time constraints require
+        matching thousands of scans against local submaps.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Practical Engineering Notes -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Practical Engineering Notes</h2>
+    <div class="down-content">
+      <p>
+        <strong>Map precomputation.</strong> Build
+        <strong>\( \mathcal{M} \)</strong> once per submap update: binary
+        occupancy, log-odds, or likelihood fields. Likelihood fields often use
+        an exact Euclidean distance transform for speed/quality.
+      </p>
+      <p>
+        <strong>Which points to score?</strong> Endpoints only is common; adding
+        “free-space” ray cells increases cost and can over-penalize unseen
+        areas. A compromise is to score endpoints with likelihood fields and
+        optionally include a weak penalty for endpoints falling into highly free
+        space.
+      </p>
+      <p>
+        <strong>Rotation handling.</strong> In 2D, search over
+        <strong>\( \theta \)</strong> is discrete. For each candidate angle,
+        translation scoring is a 2D cross-correlation between map and a rotated
+        scan “image”. FFT methods can accelerate translation correlation
+        (especially for large maps), but multi-resolution and bounding
+        strategies are often sufficient in real-time systems.
+      </p>
+      <p>
+        <strong>Quality metrics.</strong> Keep not only the best score but also
+        the margin to the second best, and the spatial dispersion of near-best
+        candidates, as a proxy for pose uncertainty (used later in Chapter 19
+        evaluation metrics).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Implementations (Python / C++ / Java / MATLAB / Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following reference implementations demonstrate scan-to-map
+        correlative matching on a synthetic occupancy grid. They are designed
+        for clarity rather than maximum performance.
+      </p>
+
+      <h3>7.1 Python (NumPy; optional SciPy for distance transform)</h3>
+      <p><strong>Code file:</strong> Chapter10_Lesson3.py</p>
+      <pre><code class="language-python">
+import math
+import numpy as np
+
+"""
+Chapter 10 - Scan Matching and Registration
+Lesson 3 - Correlative Scan Matching
+
+This script implements a clear, self-contained 2D correlative scan matcher:
+- A synthetic occupancy grid map is created.
+- A synthetic LiDAR scan is generated from known pose.
+- A bounded discrete search finds the pose maximizing a correlation score.
+
+Notes:
+- This is a didactic implementation for a university course.
+- For real robots, you would:
+  (i) use a submap (local occupancy grid) built from recent scans,
+  (ii) precompute a likelihood field via distance transform,
+  (iii) use multi-resolution search + branch-and-bound for speed.
+"""
+
+def rot2(theta: float) -> np.ndarray:
+    c, s = math.cos(theta), math.sin(theta)
+    return np.array([[c, -s],
+                     [s,  c]], dtype=float)
+
+def world_to_grid(p_xy: np.ndarray, origin_xy: np.ndarray, resolution: float) -> np.ndarray:
+    """
+    Convert world coordinates (x,y) to integer grid indices (ix, iy).
+    origin_xy is the world coordinate of grid cell (0,0).
+    """
+    q = (p_xy - origin_xy) / resolution
+    return np.floor(q).astype(int)
+
+def in_bounds(ix: int, iy: int, W: int, H: int) -> bool:
+    return (0 <= ix < W) and (0 <= iy < H)
+
+def build_likelihood_field(occ: np.ndarray, sigma_cells: float = 2.0) -> np.ndarray:
+    """
+    Build a simple likelihood field from a binary occupancy grid.
+    Uses a fast approximate distance transform based on BFS in L1, then smooths with a Gaussian.
+
+    For a production system, use an exact Euclidean distance transform (scipy.ndimage.distance_transform_edt).
+    """
+    H, W = occ.shape
+    INF = 10**9
+    dist = np.full((H, W), INF, dtype=int)
+
+    # Initialize queue with occupied cells
+    from collections import deque
+    q = deque()
+    for y in range(H):
+        for x in range(W):
+            if occ[y, x] > 0:
+                dist[y, x] = 0
+                q.append((y, x))
+
+    # 4-neighborhood BFS for L1 distance
+    dirs = [(1,0),(-1,0),(0,1),(0,-1)]
+    while q:
+        y, x = q.popleft()
+        d0 = dist[y, x]
+        for dy, dx in dirs:
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < H and 0 <= xx < W:
+                if dist[yy, xx] > d0 + 1:
+                    dist[yy, xx] = d0 + 1
+                    q.append((yy, xx))
+
+    # Gaussian-like likelihood field
+    sigma2 = sigma_cells * sigma_cells
+    field = np.exp(-(dist.astype(float)**2) / (2.0 * sigma2))
+    return field
+
+def score_pose(field: np.ndarray,
+               scan_pts_robot: np.ndarray,
+               pose_xytheta: np.ndarray,
+               origin_xy: np.ndarray,
+               resolution: float) -> float:
+    """
+    Score a candidate pose by summing the likelihood field values at transformed scan endpoints.
+    """
+    x, y, th = float(pose_xytheta[0]), float(pose_xytheta[1]), float(pose_xytheta[2])
+    R = rot2(th)
+    t = np.array([x, y], dtype=float)
+
+    pts_w = (R @ scan_pts_robot.T).T + t  # (N,2)
+    idx = world_to_grid(pts_w, origin_xy, resolution)  # (N,2) -> (ix,iy) but as (x,y) indexes
+    H, W = field.shape
+
+    s = 0.0
+    for k in range(idx.shape[0]):
+        ix, iy = int(idx[k, 0]), int(idx[k, 1])
+        if 0 <= iy < H and 0 <= ix < W:
+            s += float(field[iy, ix])
+    return s
+
+def correlative_scan_match(field: np.ndarray,
+                           scan_pts_robot: np.ndarray,
+                           x0: float, y0: float, th0: float,
+                           search_xy: float, step_xy: float,
+                           search_th: float, step_th: float,
+                           origin_xy: np.ndarray,
+                           resolution: float):
+    """
+    Exhaustive correlative search within a bounded window around (x0,y0,th0).
+    Returns best pose and best score.
+    """
+    best = None
+    best_score = -1e300
+
+    # Discretize
+    xs = np.arange(x0 - search_xy, x0 + search_xy + 1e-12, step_xy)
+    ys = np.arange(y0 - search_xy, y0 + search_xy + 1e-12, step_xy)
+    ths = np.arange(th0 - search_th, th0 + search_th + 1e-12, step_th)
+
+    for th in ths:
+        for yy in ys:
+            for xx in xs:
+                s = score_pose(field, scan_pts_robot, np.array([xx, yy, th]), origin_xy, resolution)
+                if s > best_score:
+                    best_score = s
+                    best = (xx, yy, th)
+
+    return best, best_score
+
+def make_synthetic_map(W: int = 250, H: int = 250) -> np.ndarray:
+    """
+    Create a simple synthetic occupancy map:
+    - Outer walls
+    - A few rectangular obstacles
+    """
+    occ = np.zeros((H, W), dtype=np.uint8)
+    occ[0, :] = 1
+    occ[H-1, :] = 1
+    occ[:, 0] = 1
+    occ[:, W-1] = 1
+
+    # Obstacles
+    occ[60:80, 40:160] = 1
+    occ[120:140, 30:80] = 1
+    occ[150:210, 180:200] = 1
+    return occ
+
+def sample_scan_endpoints_from_map(occ: np.ndarray,
+                                   origin_xy: np.ndarray,
+                                   resolution: float,
+                                   pose_xytheta: np.ndarray,
+                                   max_range: float = 15.0,
+                                   n_rays: int = 360) -> np.ndarray:
+    """
+    Very simple ray-casting LiDAR simulator:
+    - Cast rays from the pose in the direction theta + angle_i
+    - Step along the ray until hit an occupied cell or max_range
+    - Return endpoints in ROBOT frame (so matching aligns scan in robot frame)
+
+    This is a didactic simulator (slow). Real systems use faster ray marching.
+    """
+    H, W = occ.shape
+    x, y, th = float(pose_xytheta[0]), float(pose_xytheta[1]), float(pose_xytheta[2])
+
+    endpoints_robot = []
+    angles = np.linspace(-math.pi, math.pi, n_rays, endpoint=False)
+    step = 0.05  # meters
+
+    for a in angles:
+        ang = th + a
+        ca, sa = math.cos(ang), math.sin(ang)
+        r = 0.0
+        hit = False
+        while r < max_range:
+            px = x + r * ca
+            py = y + r * sa
+            ix, iy = world_to_grid(np.array([px, py]), origin_xy, resolution)
+            if in_bounds(int(ix), int(iy), W, H):
+                if occ[int(iy), int(ix)] > 0:
+                    hit = True
+                    break
+            r += step
+
+        # endpoint in world
+        if not hit:
+            px = x + max_range * ca
+            py = y + max_range * sa
+
+        # convert to robot frame: p_r = R(th)^T (p_w - t)
+        R = rot2(th)
+        t = np.array([x, y], dtype=float)
+        p_w = np.array([px, py], dtype=float)
+        p_r = (R.T @ (p_w - t))
+        endpoints_robot.append(p_r)
+
+    return np.array(endpoints_robot, dtype=float)
+
+def main():
+    # Grid parameters
+    resolution = 0.05  # m/cell
+    W, H = 250, 250
+    origin_xy = np.array([-6.25, -6.25], dtype=float)  # world coordinate of cell (0,0)
+
+    occ = make_synthetic_map(W=W, H=H)
+    field = build_likelihood_field(occ, sigma_cells=2.0)
+
+    # Ground truth pose
+    x_gt, y_gt, th_gt = 2.0, 1.5, math.radians(20.0)
+    gt = np.array([x_gt, y_gt, th_gt], dtype=float)
+
+    # Simulate a scan
+    scan_pts_robot = sample_scan_endpoints_from_map(
+        occ, origin_xy, resolution, gt, max_range=10.0, n_rays=240
+    )
+
+    # Prior (odometry) pose with error
+    x0, y0, th0 = x_gt + 0.25, y_gt - 0.15, th_gt + math.radians(6.0)
+
+    # Search window (bounded)
+    best, best_score = correlative_scan_match(
+        field, scan_pts_robot,
+        x0=x0, y0=y0, th0=th0,
+        search_xy=0.6, step_xy=0.05,
+        search_th=math.radians(12.0), step_th=math.radians(1.0),
+        origin_xy=origin_xy, resolution=resolution
+    )
+
+    print("Ground truth:", gt)
+    print("Prior:", (x0, y0, th0))
+    print("Best:", best)
+    print("Best score:", best_score)
+
+    # Error report
+    ex = best[0] - x_gt
+    ey = best[1] - y_gt
+    eth = (best[2] - th_gt)
+    print("Errors (x,y,theta):", (ex, ey, math.degrees(eth)))
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <h3>7.2 C++ (self-contained; C++17)</h3>
+      <p><strong>Code file:</strong> Chapter10_Lesson3.cpp</p>
+      <pre><code class="language-cpp">
+#include &lt;algorithm&gt;
+#include &lt;array&gt;
+#include &lt;cmath&gt;
+#include &lt;cstdint&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;queue&gt;
+#include &lt;tuple&gt;
+#include &lt;vector&gt;
+
+/*
+Chapter 10 - Scan Matching and Registration
+Lesson 3 - Correlative Scan Matching
+
+A didactic, self-contained 2D correlative scan matcher:
+- Build a synthetic occupancy grid.
+- Build an approximate likelihood field (L1 BFS distance + Gaussian decay).
+- Simulate a scan (simple ray casting).
+- Run bounded discrete search around a noisy prior.
+
+Compile:
+  g++ -O2 -std=c++17 Chapter10_Lesson3.cpp -o csm
+
+Run:
+  ./csm
+*/
+
+struct Vec2 {
+  double x{0}, y{0};
+};
+
+static inline Vec2 rot_apply(double theta, const Vec2&amp; p) {
+  const double c = std::cos(theta), s = std::sin(theta);
+  return Vec2{c * p.x - s * p.y, s * p.x + c * p.y};
+}
+
+static inline Vec2 rot_apply_T(double theta, const Vec2&amp; p) {
+  // Apply R(theta)^T to p (i.e., rotation by -theta)
+  const double c = std::cos(theta), s = std::sin(theta);
+  return Vec2{c * p.x + s * p.y, -s * p.x + c * p.y};
+}
+
+struct Grid {
+  int W{0}, H{0};
+  double resolution{0.05};
+  Vec2 origin{-6.25, -6.25}; // world coord of cell (0,0)
+  std::vector&lt;uint8_t&gt; occ;  // occupancy: 0/1
+  std::vector&lt;double&gt; field; // likelihood field
+
+  inline bool in_bounds(int ix, int iy) const {
+    return (0 &lt;= ix &amp;&amp; ix &lt; W &amp;&amp; 0 &lt;= iy &amp;&amp; iy &lt; H);
+  }
+
+  inline int idx(int ix, int iy) const {
+    return iy * W + ix;
+  }
+
+  std::pair&lt;int,int&gt; world_to_grid(const Vec2&amp; p) const {
+    const double qx = (p.x - origin.x) / resolution;
+    const double qy = (p.y - origin.y) / resolution;
+    const int ix = static_cast&lt;int&gt;(std::floor(qx));
+    const int iy = static_cast&lt;int&gt;(std::floor(qy));
+    return {ix, iy};
+  }
+};
+
+static Grid make_synthetic_map(int W, int H, double resolution, Vec2 origin) {
+  Grid g;
+  g.W = W; g.H = H;
+  g.resolution = resolution;
+  g.origin = origin;
+  g.occ.assign(W * H, 0);
+
+  // Outer walls
+  for (int x = 0; x &lt; W; ++x) {
+    g.occ[g.idx(x, 0)] = 1;
+    g.occ[g.idx(x, H-1)] = 1;
+  }
+  for (int y = 0; y &lt; H; ++y) {
+    g.occ[g.idx(0, y)] = 1;
+    g.occ[g.idx(W-1, y)] = 1;
+  }
+
+  // Obstacles (rectangles)
+  auto fill_rect = [&](int x0, int x1, int y0, int y1) {
+    for (int y = y0; y &lt; y1; ++y) {
+      for (int x = x0; x &lt; x1; ++x) {
+        if (g.in_bounds(x, y)) g.occ[g.idx(x, y)] = 1;
+      }
+    }
+  };
+  fill_rect(40, 160, 60, 80);
+  fill_rect(30, 80, 120, 140);
+  fill_rect(180, 200, 150, 210);
+
+  return g;
+}
+
+static void build_likelihood_field(Grid&amp; g, double sigma_cells) {
+  const int W = g.W, H = g.H;
+  const int INF = 1e9;
+  std::vector&lt;int&gt; dist(W * H, INF);
+
+  std::queue&lt;std::pair&lt;int,int&gt;&gt; q;
+  for (int y = 0; y &lt; H; ++y) {
+    for (int x = 0; x &lt; W; ++x) {
+      if (g.occ[g.idx(x, y)] &gt; 0) {
+        dist[g.idx(x, y)] = 0;
+        q.push({x, y});
+      }
+    }
+  }
+
+  const std::array&lt;std::pair&lt;int,int&gt;,4&gt; dirs = { {
+    {1,0},{-1,0},{0,1},{0,-1}
+  } };
+
+  while (!q.empty()) {
+    auto [x, y] = q.front();
+    q.pop();
+    const int d0 = dist[g.idx(x, y)];
+    for (auto [dx, dy] : dirs) {
+      const int xx = x + dx, yy = y + dy;
+      if (!g.in_bounds(xx, yy)) continue;
+      const int ii = g.idx(xx, yy);
+      if (dist[ii] &gt; d0 + 1) {
+        dist[ii] = d0 + 1;
+        q.push({xx, yy});
+      }
+    }
+  }
+
+  g.field.assign(W * H, 0.0);
+  const double sigma2 = sigma_cells * sigma_cells;
+  for (int i = 0; i &lt; W * H; ++i) {
+    const double d = static_cast&lt;double&gt;(dist[i]);
+    g.field[i] = std::exp(-(d * d) / (2.0 * sigma2));
+  }
+}
+
+static std::vector&lt;Vec2&gt; sample_scan(const Grid&amp; g,
+                                      Vec2 t_w, double th,
+                                      double max_range, int n_rays) {
+  std::vector&lt;Vec2&gt; endpoints_robot;
+  endpoints_robot.reserve(n_rays);
+
+  const double step = 0.05; // meters
+  for (int k = 0; k &lt; n_rays; ++k) {
+    const double a = -M_PI + (2.0 * M_PI) * (static_cast&lt;double&gt;(k) / n_rays);
+    const double ang = th + a;
+    const double ca = std::cos(ang), sa = std::sin(ang);
+
+    double r = 0.0;
+    bool hit = false;
+    Vec2 p_w{t_w.x, t_w.y};
+
+    while (r &lt; max_range) {
+      p_w = Vec2{t_w.x + r * ca, t_w.y + r * sa};
+      auto [ix, iy] = g.world_to_grid(p_w);
+      if (g.in_bounds(ix, iy)) {
+        if (g.occ[g.idx(ix, iy)] &gt; 0) { hit = true; break; }
+      }
+      r += step;
+    }
+    if (!hit) {
+      p_w = Vec2{t_w.x + max_range * ca, t_w.y + max_range * sa};
+    }
+
+    // Convert endpoint to robot frame: p_r = R(th)^T (p_w - t_w)
+    Vec2 dp{p_w.x - t_w.x, p_w.y - t_w.y};
+    Vec2 p_r = rot_apply_T(th, dp);
+    endpoints_robot.push_back(p_r);
+  }
+
+  return endpoints_robot;
+}
+
+static double score_pose(const Grid&amp; g, const std::vector&lt;Vec2&gt;&amp; scan_robot,
+                         Vec2 t_w, double th) {
+  double s = 0.0;
+  for (const auto&amp; pr : scan_robot) {
+    Vec2 pw = rot_apply(th, pr);
+    pw.x += t_w.x; pw.y += t_w.y;
+
+    auto [ix, iy] = g.world_to_grid(pw);
+    if (g.in_bounds(ix, iy)) {
+      s += g.field[g.idx(ix, iy)];
+    }
+  }
+  return s;
+}
+
+static std::tuple&lt;Vec2,double,double&gt; correlative_match(
+    const Grid&amp; g, const std::vector&lt;Vec2&gt;&amp; scan_robot,
+    Vec2 prior_t, double prior_th,
+    double search_xy, double step_xy,
+    double search_th, double step_th) {
+
+  double best_score = -std::numeric_limits&lt;double&gt;::infinity();
+  Vec2 best_t{prior_t.x, prior_t.y};
+  double best_th = prior_th;
+
+  const int nx = static_cast&lt;int&gt;(std::floor((2.0 * search_xy) / step_xy)) + 1;
+  const int ny = nx;
+  const int nth = static_cast&lt;int&gt;(std::floor((2.0 * search_th) / step_th)) + 1;
+
+  for (int it = 0; it &lt; nth; ++it) {
+    const double th = prior_th - search_th + it * step_th;
+    for (int iy = 0; iy &lt; ny; ++iy) {
+      const double y = prior_t.y - search_xy + iy * step_xy;
+      for (int ix = 0; ix &lt; nx; ++ix) {
+        const double x = prior_t.x - search_xy + ix * step_xy;
+        const double sc = score_pose(g, scan_robot, Vec2{x,y}, th);
+        if (sc &gt; best_score) {
+          best_score = sc;
+          best_t = Vec2{x, y};
+          best_th = th;
+        }
+      }
+    }
+  }
+
+  return {best_t, best_th, best_score};
+}
+
+int main() {
+  const double resolution = 0.05;
+  const int W = 250, H = 250;
+  const Vec2 origin{-6.25, -6.25};
+
+  Grid g = make_synthetic_map(W, H, resolution, origin);
+  build_likelihood_field(g, 2.0);
+
+  // Ground truth pose
+  const Vec2 t_gt{2.0, 1.5};
+  const double th_gt = 20.0 * M_PI / 180.0;
+
+  // Simulated scan
+  auto scan_robot = sample_scan(g, t_gt, th_gt, 10.0, 240);
+
+  // Prior with error
+  const Vec2 t0{t_gt.x + 0.25, t_gt.y - 0.15};
+  const double th0 = th_gt + 6.0 * M_PI / 180.0;
+
+  // Bounded search
+  auto [best_t, best_th, best_score] = correlative_match(
+      g, scan_robot,
+      t0, th0,
+      0.6, 0.05,
+      12.0 * M_PI / 180.0, 1.0 * M_PI / 180.0
+  );
+
+  std::cout &lt;&lt; "Ground truth: (" &lt;&lt; t_gt.x &lt;&lt; ", " &lt;&lt; t_gt.y &lt;&lt; ", " &lt;&lt; th_gt &lt;&lt; ")\n";
+  std::cout &lt;&lt; "Prior:        (" &lt;&lt; t0.x &lt;&lt; ", " &lt;&lt; t0.y &lt;&lt; ", " &lt;&lt; th0 &lt;&lt; ")\n";
+  std::cout &lt;&lt; "Best:         (" &lt;&lt; best_t.x &lt;&lt; ", " &lt;&lt; best_t.y &lt;&lt; ", " &lt;&lt; best_th &lt;&lt; ")\n";
+  std::cout &lt;&lt; "Best score:   " &lt;&lt; best_score &lt;&lt; "\n";
+
+  std::cout &lt;&lt; "Errors: dx=" &lt;&lt; (best_t.x - t_gt.x)
+            &lt;&lt; ", dy=" &lt;&lt; (best_t.y - t_gt.y)
+            &lt;&lt; ", dtheta(deg)=" &lt;&lt; ((best_th - th_gt) * 180.0 / M_PI) &lt;&lt; "\n";
+
+  return 0;
+}
+      </code></pre>
+
+      <h3>7.3 Java (self-contained)</h3>
+      <p><strong>Code file:</strong> Chapter10_Lesson3.java</p>
+      <pre><code class="language-java">
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+
+/*
+Chapter 10 - Scan Matching and Registration
+Lesson 3 - Correlative Scan Matching
+
+Self-contained Java implementation:
+- Synthetic occupancy grid
+- Approximate likelihood field via BFS (L1 distance) + Gaussian decay
+- Simple ray-casting LiDAR simulator
+- Bounded discrete correlative scan matching around a prior
+
+Compile:
+  javac Chapter10_Lesson3.java
+
+Run:
+  java Chapter10_Lesson3
+*/
+
+public class Chapter10_Lesson3 {
+
+    static class Vec2 {
+        double x, y;
+        Vec2(double x, double y) { this.x = x; this.y = y; }
+    }
+
+    static Vec2 rotApply(double theta, Vec2 p) {
+        double c = Math.cos(theta), s = Math.sin(theta);
+        return new Vec2(c*p.x - s*p.y, s*p.x + c*p.y);
+    }
+
+    static Vec2 rotApplyT(double theta, Vec2 p) {
+        // Apply R(theta)^T = R(-theta)
+        double c = Math.cos(theta), s = Math.sin(theta);
+        return new Vec2(c*p.x + s*p.y, -s*p.x + c*p.y);
+    }
+
+    static class Grid {
+        int W, H;
+        double resolution;
+        Vec2 origin;
+        byte[] occ;     // 0/1
+        double[] field; // likelihood
+
+        Grid(int W, int H, double resolution, Vec2 origin) {
+            this.W = W; this.H = H;
+            this.resolution = resolution;
+            this.origin = origin;
+            this.occ = new byte[W*H];
+            this.field = new double[W*H];
+        }
+
+        int idx(int ix, int iy) { return iy*W + ix; }
+
+        boolean inBounds(int ix, int iy) {
+            return (0 &lt;= ix &amp;&amp; ix &lt; W &amp;&amp; 0 &lt;= iy &amp;&amp; iy &lt; H);
+        }
+
+        int[] worldToGrid(Vec2 p) {
+            double qx = (p.x - origin.x) / resolution;
+            double qy = (p.y - origin.y) / resolution;
+            int ix = (int)Math.floor(qx);
+            int iy = (int)Math.floor(qy);
+            return new int[]{ix, iy};
+        }
+    }
+
+    static Grid makeSyntheticMap(int W, int H, double resolution, Vec2 origin) {
+        Grid g = new Grid(W, H, resolution, origin);
+
+        // Outer walls
+        for (int x = 0; x &lt; W; x++) {
+            g.occ[g.idx(x, 0)] = 1;
+            g.occ[g.idx(x, H-1)] = 1;
+        }
+        for (int y = 0; y &lt; H; y++) {
+            g.occ[g.idx(0, y)] = 1;
+            g.occ[g.idx(W-1, y)] = 1;
+        }
+
+        // Rect obstacles
+        fillRect(g, 40, 160, 60, 80);
+        fillRect(g, 30, 80, 120, 140);
+        fillRect(g, 180, 200, 150, 210);
+
+        return g;
+    }
+
+    static void fillRect(Grid g, int x0, int x1, int y0, int y1) {
+        for (int y = y0; y &lt; y1; y++) {
+            for (int x = x0; x &lt; x1; x++) {
+                if (g.inBounds(x, y)) g.occ[g.idx(x, y)] = 1;
+            }
+        }
+    }
+
+    static void buildLikelihoodField(Grid g, double sigmaCells) {
+        int W = g.W, H = g.H;
+        int INF = 1_000_000_000;
+        int[] dist = new int[W*H];
+        for (int i = 0; i &lt; dist.length; i++) dist[i] = INF;
+
+        Deque&lt;int[]&gt; q = new ArrayDeque&lt;&gt;();
+        for (int y = 0; y &lt; H; y++) {
+            for (int x = 0; x &lt; W; x++) {
+                if (g.occ[g.idx(x, y)] != 0) {
+                    dist[g.idx(x, y)] = 0;
+                    q.addLast(new int[]{x, y});
+                }
+            }
+        }
+
+        int[][] dirs = new int[][]{ {1,0},{-1,0},{0,1},{0,-1} };
+        while (!q.isEmpty()) {
+            int[] cur = q.removeFirst();
+            int x = cur[0], y = cur[1];
+            int d0 = dist[g.idx(x, y)];
+            for (int[] d : dirs) {
+                int xx = x + d[0], yy = y + d[1];
+                if (!g.inBounds(xx, yy)) continue;
+                int ii = g.idx(xx, yy);
+                if (dist[ii] &gt; d0 + 1) {
+                    dist[ii] = d0 + 1;
+                    q.addLast(new int[]{xx, yy});
+                }
+            }
+        }
+
+        double sigma2 = sigmaCells * sigmaCells;
+        for (int i = 0; i &lt; W*H; i++) {
+            double dd = dist[i];
+            g.field[i] = Math.exp(-(dd*dd)/(2.0*sigma2));
+        }
+    }
+
+    static List&lt;Vec2&gt; sampleScan(Grid g, Vec2 tW, double th, double maxRange, int nRays) {
+        List&lt;Vec2&gt; endpointsRobot = new ArrayList&lt;&gt;(nRays);
+        double step = 0.05;
+
+        for (int k = 0; k &lt; nRays; k++) {
+            double a = -Math.PI + (2.0*Math.PI) * (k / (double)nRays);
+            double ang = th + a;
+            double ca = Math.cos(ang), sa = Math.sin(ang);
+
+            double r = 0.0;
+            boolean hit = false;
+            Vec2 pW = new Vec2(tW.x, tW.y);
+
+            while (r &lt; maxRange) {
+                pW = new Vec2(tW.x + r*ca, tW.y + r*sa);
+                int[] ij = g.worldToGrid(pW);
+                int ix = ij[0], iy = ij[1];
+                if (g.inBounds(ix, iy)) {
+                    if (g.occ[g.idx(ix, iy)] != 0) { hit = true; break; }
+                }
+                r += step;
+            }
+            if (!hit) {
+                pW = new Vec2(tW.x + maxRange*ca, tW.y + maxRange*sa);
+            }
+
+            // Convert to robot frame: p_r = R(th)^T (p_w - t_w)
+            Vec2 dp = new Vec2(pW.x - tW.x, pW.y - tW.y);
+            Vec2 pR = rotApplyT(th, dp);
+            endpointsRobot.add(pR);
+        }
+
+        return endpointsRobot;
+    }
+
+    static double scorePose(Grid g, List&lt;Vec2&gt; scanRobot, Vec2 tW, double th) {
+        double s = 0.0;
+        for (Vec2 pR : scanRobot) {
+            Vec2 pW = rotApply(th, pR);
+            pW.x += tW.x; pW.y += tW.y;
+
+            int[] ij = g.worldToGrid(pW);
+            int ix = ij[0], iy = ij[1];
+            if (g.inBounds(ix, iy)) {
+                s += g.field[g.idx(ix, iy)];
+            }
+        }
+        return s;
+    }
+
+    static class MatchResult {
+        Vec2 t;
+        double th;
+        double score;
+        MatchResult(Vec2 t, double th, double score) { this.t = t; this.th = th; this.score = score; }
+    }
+
+    static MatchResult correlativeMatch(Grid g, List&lt;Vec2&gt; scanRobot,
+                                        Vec2 priorT, double priorTh,
+                                        double searchXY, double stepXY,
+                                        double searchTh, double stepTh) {
+
+        double bestScore = -Double.MAX_VALUE;
+        Vec2 bestT = new Vec2(priorT.x, priorT.y);
+        double bestTh = priorTh;
+
+        int nxy = (int)Math.floor((2.0*searchXY)/stepXY) + 1;
+        int nth = (int)Math.floor((2.0*searchTh)/stepTh) + 1;
+
+        for (int it = 0; it &lt; nth; it++) {
+            double th = priorTh - searchTh + it*stepTh;
+            for (int iy = 0; iy &lt; nxy; iy++) {
+                double y = priorT.y - searchXY + iy*stepXY;
+                for (int ix = 0; ix &lt; nxy; ix++) {
+                    double x = priorT.x - searchXY + ix*stepXY;
+                    double sc = scorePose(g, scanRobot, new Vec2(x, y), th);
+                    if (sc &gt; bestScore) {
+                        bestScore = sc;
+                        bestT = new Vec2(x, y);
+                        bestTh = th;
+                    }
+                }
+            }
+        }
+        return new MatchResult(bestT, bestTh, bestScore);
+    }
+
+    public static void main(String[] args) {
+        double resolution = 0.05;
+        int W = 250, H = 250;
+        Vec2 origin = new Vec2(-6.25, -6.25);
+
+        Grid g = makeSyntheticMap(W, H, resolution, origin);
+        buildLikelihoodField(g, 2.0);
+
+        // Ground truth pose
+        Vec2 tGT = new Vec2(2.0, 1.5);
+        double thGT = Math.toRadians(20.0);
+
+        // Simulated scan
+        List&lt;Vec2&gt; scanRobot = sampleScan(g, tGT, thGT, 10.0, 240);
+
+        // Prior with error
+        Vec2 t0 = new Vec2(tGT.x + 0.25, tGT.y - 0.15);
+        double th0 = thGT + Math.toRadians(6.0);
+
+        // Search window
+        MatchResult res = correlativeMatch(
+                g, scanRobot,
+                t0, th0,
+                0.6, 0.05,
+                Math.toRadians(12.0), Math.toRadians(1.0)
+        );
+
+        System.out.println("Ground truth: (" + tGT.x + ", " + tGT.y + ", " + thGT + ")");
+        System.out.println("Prior:        (" + t0.x + ", " + t0.y + ", " + th0 + ")");
+        System.out.println("Best:         (" + res.t.x + ", " + res.t.y + ", " + res.th + ")");
+        System.out.println("Best score:   " + res.score);
+
+        double dx = res.t.x - tGT.x;
+        double dy = res.t.y - tGT.y;
+        double dthDeg = Math.toDegrees(res.th - thGT);
+        System.out.println("Errors: dx=" + dx + ", dy=" + dy + ", dtheta(deg)=" + dthDeg);
+    }
+}
+      </code></pre>
+
+      <h3>7.4 MATLAB (uses <code>bwdist</code> if available)</h3>
+      <p><strong>Code file:</strong> Chapter10_Lesson3.m</p>
+      <pre><code class="language-matlab">
+% Chapter 10 - Scan Matching and Registration
+% Lesson 3 - Correlative Scan Matching
+%
+% Chapter10_Lesson3.m
+%
+% A clear MATLAB reference implementation:
+% - synthetic occupancy map
+% - likelihood field via distance transform (bwdist) if available
+% - scan simulation (slow ray casting)
+% - bounded correlative scan matching around a prior
+%
+% Notes:
+% - For speed, real systems use multi-resolution grids and branch-and-bound.
+% - This is a didactic script (unoptimized).
+
+function Chapter10_Lesson3()
+    rng(0);
+
+    % Grid parameters
+    resolution = 0.05;     % m/cell
+    W = 250; H = 250;
+    origin = [-6.25; -6.25]; % world coordinate of cell (0,0)
+
+    occ = makeSyntheticMap(W, H);
+    field = buildLikelihoodField(occ, 2.0);
+
+    % Ground truth pose
+    gt = [2.0; 1.5; deg2rad(20.0)];
+
+    % Simulate scan endpoints in robot frame
+    scan_robot = sampleScan(occ, origin, resolution, gt, 10.0, 240);
+
+    % Prior pose (odometry) with error
+    prior = [gt(1) + 0.25; gt(2) - 0.15; gt(3) + deg2rad(6.0)];
+
+    % Bounded search window
+    search_xy = 0.6; step_xy = 0.05;
+    search_th = deg2rad(12.0); step_th = deg2rad(1.0);
+
+    [best, bestScore] = correlativeMatch(field, scan_robot, origin, resolution, ...
+                                         prior, search_xy, step_xy, search_th, step_th);
+
+    disp("Ground truth:"); disp(gt');
+    disp("Prior:"); disp(prior');
+    disp("Best:"); disp(best');
+    disp("Best score:"); disp(bestScore);
+
+    err = [best(1)-gt(1), best(2)-gt(2), rad2deg(best(3)-gt(3))];
+    disp("Errors: [dx, dy, dtheta(deg)]"); disp(err);
+end
+
+function occ = makeSyntheticMap(W, H)
+    occ = zeros(H, W, 'uint8');
+    occ(1,:) = 1; occ(H,:) = 1;
+    occ(:,1) = 1; occ(:,W) = 1;
+
+    occ(61:80, 41:160) = 1;   % rect 1
+    occ(121:140, 31:80) = 1;  % rect 2
+    occ(151:210, 181:200) = 1;% rect 3
+end
+
+function field = buildLikelihoodField(occ, sigma_cells)
+    % Prefer exact distance transform if available
+    if exist('bwdist', 'file') == 2
+        % Distance to nearest occupied cell: use complement as "background"
+        dist = bwdist(occ &gt; 0);
+    else
+        % Fallback: approximate L1 distance with BFS
+        dist = bfsL1Distance(occ &gt; 0);
+    end
+
+    field = exp(-(double(dist).^2) / (2*sigma_cells^2));
+end
+
+function dist = bfsL1Distance(occ_bool)
+    [H, W] = size(occ_bool);
+    INF = 1e9;
+    dist = INF * ones(H, W);
+
+    % Queue of occupied cells
+    qx = zeros(H*W,1); qy = zeros(H*W,1);
+    head = 1; tail = 0;
+
+    for y=1:H
+        for x=1:W
+            if occ_bool(y,x)
+                dist(y,x) = 0;
+                tail = tail + 1;
+                qx(tail) = x; qy(tail) = y;
+            end
+        end
+    end
+
+    dirs = [1 0; -1 0; 0 1; 0 -1];
+    while head &lt;= tail
+        x = qx(head); y = qy(head); head = head + 1;
+        d0 = dist(y,x);
+        for k=1:4
+            xx = x + dirs(k,1);
+            yy = y + dirs(k,2);
+            if xx &gt;= 1 &amp;&amp; xx &lt;= W &amp;&amp; yy &gt;= 1 &amp;&amp; yy &lt;= H
+                if dist(yy,xx) &gt; d0 + 1
+                    dist(yy,xx) = d0 + 1;
+                    tail = tail + 1;
+                    qx(tail) = xx; qy(tail) = yy;
+                end
+            end
+        end
+    end
+end
+
+function scan_robot = sampleScan(occ, origin, resolution, pose, max_range, n_rays)
+    % Slow ray casting to generate scan endpoints in robot frame
+    H = size(occ,1); W = size(occ,2);
+    x = pose(1); y = pose(2); th = pose(3);
+
+    angles = linspace(-pi, pi, n_rays+1);
+    angles(end) = [];
+
+    step = 0.05;
+    scan_robot = zeros(n_rays, 2);
+
+    R = [cos(th) -sin(th); sin(th) cos(th)];
+    t = [x; y];
+
+    for i=1:n_rays
+        ang = th + angles(i);
+        ca = cos(ang); sa = sin(ang);
+
+        r = 0.0; hit = false;
+        while r &lt; max_range
+            pw = [x + r*ca; y + r*sa];
+            ij = worldToGrid(pw, origin, resolution);
+            ix = ij(1); iy = ij(2);
+            if ix &gt;= 1 &amp;&amp; ix &lt;= W &amp;&amp; iy &gt;= 1 &amp;&amp; iy &lt;= H
+                if occ(iy, ix) &gt; 0
+                    hit = true;
+                    break;
+                end
+            end
+            r = r + step;
+        end
+        if ~hit
+            pw = [x + max_range*ca; y + max_range*sa];
+        end
+
+        % Convert to robot frame: pr = R^T (pw - t)
+        pr = R' * (pw - t);
+        scan_robot(i,:) = pr';
+    end
+end
+
+function ij = worldToGrid(pw, origin, resolution)
+    q = (pw - origin) / resolution;
+    ix = floor(q(1)) + 1; % MATLAB 1-based
+    iy = floor(q(2)) + 1;
+    ij = [ix; iy];
+end
+
+function s = scorePose(field, scan_robot, origin, resolution, pose)
+    H = size(field,1); W = size(field,2);
+    x = pose(1); y = pose(2); th = pose(3);
+
+    R = [cos(th) -sin(th); sin(th) cos(th)];
+    t = [x; y];
+
+    s = 0.0;
+    for k=1:size(scan_robot,1)
+        pr = scan_robot(k,:)';
+        pw = R*pr + t;
+        ij = worldToGrid(pw, origin, resolution);
+        ix = ij(1); iy = ij(2);
+        if ix &gt;= 1 &amp;&amp; ix &lt;= W &amp;&amp; iy &gt;= 1 &amp;&amp; iy &lt;= H
+            s = s + field(iy, ix);
+        end
+    end
+end
+
+function [best, bestScore] = correlativeMatch(field, scan_robot, origin, resolution, prior, ...
+                                              search_xy, step_xy, search_th, step_th)
+    bestScore = -1e300;
+    best = prior;
+
+    xs = (prior(1)-search_xy):step_xy:(prior(1)+search_xy);
+    ys = (prior(2)-search_xy):step_xy:(prior(2)+search_xy);
+    ths = (prior(3)-search_th):step_th:(prior(3)+search_th);
+
+    for th = ths
+        for yy = ys
+            for xx = xs
+                pose = [xx; yy; th];
+                sc = scorePose(field, scan_robot, origin, resolution, pose);
+                if sc &gt; bestScore
+                    bestScore = sc;
+                    best = pose;
+                end
+            end
+        end
+    end
+end
+      </code></pre>
+
+      <h3>7.5 Wolfram Mathematica (Notebook expression)</h3>
+      <p><strong>Code file:</strong> Chapter10_Lesson3.nb</p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter 10 - Scan Matching and Registration
+   Lesson 3 - Correlative Scan Matching
+
+   Chapter10_Lesson3.nb (Notebook expression)
+
+   A compact Mathematica reference:
+   - Synthetic occupancy grid
+   - L1 distance transform via BFS-like wavefront
+   - Likelihood field as exp(-d^2/(2 sigma^2))
+   - Simple correlative search on a bounded lattice
+
+   This is intentionally didactic (not optimized).
+*)
+
+ClearAll["Global`*"];
+
+rot2[th_] := { {Cos[th], -Sin[th]}, {Sin[th], Cos[th]} };
+
+worldToGrid[p_, origin_, res_] := Floor[(p - origin)/res];
+
+inBoundsQ[{ix_, iy_}, W_, H_] := (0 <= ix < W) && (0 <= iy < H);
+
+makeSyntheticMap[W_, H_] := Module[{occ},
+  occ = ConstantArray[0, {H, W}];
+  occ[[1, All]] = 1; occ[[H, All]] = 1;
+  occ[[All, 1]] = 1; occ[[All, W]] = 1;
+  occ[[60 ;; 79, 40 ;; 159]] = 1;
+  occ[[120 ;; 139, 30 ;; 79]] = 1;
+  occ[[150 ;; 209, 180 ;; 199]] = 1;
+  occ
+];
+
+(* Approximate L1 distance transform with wavefront expansion *)
+l1DistanceTransform[occ_] := Module[
+  {H, W, INF, dist, q, dirs, y, x, d0, yy, xx},
+  {H, W} = Dimensions[occ];
+  INF = 10^9;
+  dist = ConstantArray[INF, {H, W}];
+  q = {};
+
+  Do[
+    If[occ[[y, x]] == 1,
+      dist[[y, x]] = 0;
+      AppendTo[q, {y, x}]
+    ],
+    {y, 1, H}, {x, 1, W}
+  ];
+
+  dirs = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+
+  While[Length[q] > 0,
+    {y, x} = First[q];
+    q = Rest[q];
+    d0 = dist[[y, x]];
+    Do[
+      yy = y + dirs[[k, 1]];
+      xx = x + dirs[[k, 2]];
+      If[1 <= yy <= H && 1 <= xx <= W,
+        If[dist[[yy, xx]] > d0 + 1,
+          dist[[yy, xx]] = d0 + 1;
+          AppendTo[q, {yy, xx}]
+        ]
+      ],
+      {k, 1, 4}
+    ];
+  ];
+
+  dist
+];
+
+buildLikelihoodField[occ_, sigmaCells_] := Module[{dist},
+  dist = l1DistanceTransform[occ];
+  Exp[-(N[dist]^2)/(2 sigmaCells^2)]
+];
+
+scorePose[field_, scanRobot_, origin_, res_, pose_] := Module[
+  {x, y, th, R, t, H, W, s, pr, pw, ij, ix, iy},
+  {H, W} = Dimensions[field];
+  {x, y, th} = pose;
+  R = rot2[th]; t = {x, y};
+  s = 0.0;
+  Do[
+    pr = scanRobot[[k]];
+    pw = R.pr + t;
+    ij = worldToGrid[pw, origin, res];
+    {ix, iy} = ij;
+    If[inBoundsQ[{ix, iy}, W, H],
+      s += field[[iy + 1, ix + 1]]
+    ],
+    {k, 1, Length[scanRobot]}
+  ];
+  s
+];
+
+(* Synthetic scan generation (simplified):
+   create endpoints on a circle in robot frame (didactic),
+   then correlative matching still demonstrates correlation mechanics. *)
+makeSyntheticScan[n_, radius_] := Table[
+  radius*{Cos[2 Pi (k - 1)/n], Sin[2 Pi (k - 1)/n]},
+  {k, 1, n}
+];
+
+correlativeMatch[field_, scanRobot_, origin_, res_, prior_, searchXY_, stepXY_, searchTh_, stepTh_] := Module[
+  {best = prior, bestScore = -10^99, xs, ys, ths, pose, sc},
+  xs = Range[prior[[1]] - searchXY, prior[[1]] + searchXY, stepXY];
+  ys = Range[prior[[2]] - searchXY, prior[[2]] + searchXY, stepXY];
+  ths = Range[prior[[3]] - searchTh, prior[[3]] + searchTh, stepTh];
+
+  Do[
+    Do[
+      Do[
+        pose = {xx, yy, th};
+        sc = scorePose[field, scanRobot, origin, res, pose];
+        If[sc > bestScore, bestScore = sc; best = pose;],
+        {xx, xs}
+      ],
+      {yy, ys}
+    ],
+    {th, ths}
+  ];
+
+  {best, bestScore}
+];
+
+(* Main *)
+W = 250; H = 250; res = 0.05;
+origin = {-6.25, -6.25};
+
+occ = makeSyntheticMap[W, H];
+field = buildLikelihoodField[occ, 2.0];
+
+(* Pose and scan *)
+gt = {2.0, 1.5, 20 Degree};
+scanRobot = makeSyntheticScan[240, 5.0];
+
+(* Prior *)
+prior = {gt[[1]] + 0.25, gt[[2]] - 0.15, gt[[3]] + 6 Degree};
+
+{best, bestScore} = correlativeMatch[field, scanRobot, origin, res, prior,
+  0.6, 0.05, 12 Degree, 1 Degree
+];
+
+Print["Ground truth: ", gt];
+Print["Prior: ", prior];
+Print["Best: ", best];
+Print["Best score: ", bestScore];
+Print["Errors: dx, dy, dtheta(deg) = ",
+  {best[[1]] - gt[[1]], best[[2]] - gt[[2]], (best[[3]] - gt[[3]])/Degree}
+];
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (From likelihood to correlation score):</strong>
+        Assume an endpoint-only model where each transformed endpoint lands in a
+        cell
+        <strong
+          >\( c_j(\mathbf{x})=\pi(\mathbf{T}(\mathbf{x})\mathbf{z}_j) \)</strong
+        >
+        and the probability of observing that endpoint is
+        <strong>\( p_\text{occ}(c_j) \)</strong>. Show that maximizing the scan
+        likelihood is equivalent to maximizing
+        <strong
+          >\( S(\mathbf{x})=\sum_j \log p_\text{occ}(c_j(\mathbf{x})) \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        By conditional independence of endpoints given pose and map,
+        <strong
+          >\( p(\mathcal{Z}\mid\mathbf{x},\mathcal{M})=\prod_j
+          p_\text{occ}(c_j(\mathbf{x})) \)</strong
+        >. Taking logs converts the product to a sum:
+      </p>
+      <h4 class="mathJax">
+        \[ \log p(\mathcal{Z}\mid\mathbf{x},\mathcal{M}) = \sum_{j=1}^N \log
+        p_\text{occ}(c_j(\mathbf{x})). \]
+      </h4>
+      <p>
+        Since <strong>\( \log(\cdot) \)</strong> is strictly increasing,
+        maximizing the likelihood is equivalent to maximizing its log, hence the
+        stated score. \(\square\)
+      </p>
+
+      <p>
+        <strong>Problem 2 (Candidate count and complexity):</strong>
+        A matcher uses <strong>\( \Delta_x=\Delta_y=0.5\,\text{m} \)</strong>,
+        <strong>\( \delta_x=\delta_y=0.05\,\text{m} \)</strong>,
+        <strong>\( \Delta_\theta=10^\circ \)</strong>, and
+        <strong>\( \delta_\theta=1^\circ \)</strong>. Estimate the number of
+        candidates and the total number of grid lookups for
+        <strong>\( N=600 \)</strong> endpoints.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        The translation counts are
+        <strong
+          >\( 1+\lfloor 2\Delta_x/\delta_x \rfloor = 1+\lfloor 1.0/0.05 \rfloor
+          = 21 \)</strong
+        >
+        in each axis. The angle count is
+        <strong>\( 1+\lfloor 20/1 \rfloor = 21 \)</strong>. Therefore:
+      </p>
+      <h4 class="mathJax">
+        \[ |\mathcal{X}_\Delta| \approx 21\times 21\times 21 = 9261. \]
+      </h4>
+      <p>
+        Each candidate scores <strong>\( N=600 \)</strong> points, so the total
+        lookups are roughly
+        <strong>\( 9261\times 600 \approx 5.56\times 10^6 \)</strong>, which
+        motivates multi-resolution and pruning.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Why likelihood fields help):</strong>
+        Explain, using a short mathematical argument, why replacing binary
+        occupancy
+        <strong>\( \mathcal{M}(c)\in\{0,1\} \)</strong> with a likelihood field
+        <strong>\( \mathcal{M}_\sigma(c)=\exp(-d(c)^2/(2\sigma^2)) \)</strong>
+        improves robustness to discretization.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        With binary occupancy, a small perturbation of pose can move an endpoint
+        across a cell boundary, changing a term from 1 to 0 and producing a
+        discontinuous objective. With the likelihood field, the score term
+        becomes a smooth function of distance to the nearest occupied cell. If
+        the nearest obstacle boundary is locally smooth, then for a small pose
+        perturbation <strong>\( \delta\mathbf{x} \)</strong>, distances change
+        continuously and <strong>\( \mathcal{M}_\sigma \)</strong> changes
+        smoothly, providing a larger basin of attraction and fewer “aliasing”
+        artifacts caused purely by grid quantization.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Upper bounds for pruning):</strong>
+        Consider a coarse grid level built by max-pooling from the finest
+        likelihood field: each coarse cell stores the maximum value of the
+        corresponding <strong>\( 2\times 2 \)</strong> block in the finer grid.
+        Argue why summing coarse values at transformed endpoints yields an
+        admissible upper bound for any translation consistent with that coarse
+        cell region.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Let <strong>\( v_f \)</strong> be any finest-level value in a block and
+        <strong>\( v_c=\max_{\text{block} } v_f \)</strong> the corresponding
+        coarse value. Then for all finest cells in the block,
+        <strong>\( v_f \le v_c \)</strong>. If a translation region maps an
+        endpoint to some unknown finest cell within a known coarse block, the
+        best possible contribution of that endpoint is at most
+        <strong>\( v_c \)</strong>. Summing across endpoints preserves the
+        inequality, so the coarse-grid score is an upper bound on the best
+        achievable finest-grid score in that region.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Correlative vs ICP behavior):</strong>
+        Provide one scenario where correlative scan matching is expected to
+        outperform ICP variants (Lesson 2), and one scenario where ICP variants
+        may be preferable. Justify using objective landscape and computation.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Correlative methods outperform when the initial guess has large error or
+        when correspondences are ambiguous: the discrete search can recover the
+        best pose inside a wide window, while ICP can converge to a poor local
+        minimum due to incorrect correspondences. ICP can be preferable when the
+        initial guess is already close and the environment has rich geometric
+        structure; continuous optimization can achieve sub-grid accuracy at
+        lower cost than a wide discrete search, especially when the scan size is
+        large and real-time constraints are strict.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formulated correlative scan matching as a discrete maximization
+        problem over a bounded pose lattice, derived probabilistic scoring from
+        occupancy grids (and smoother likelihood-field variants), and explained
+        why multi-resolution pyramids and branch-and-bound pruning make
+        correlation-based matching feasible in real-time 2D LiDAR navigation
+        pipelines. This lesson provides a robust alternative to purely iterative
+        correspondence-based alignment, and sets up the robustness discussion in
+        Lesson 4.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References (Research-Style) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Olson, E.B. (2009). Real-time correlative scan matching.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >, 4387–4393.
+      </li>
+      <li>
+        Olson, E.B. (2015). M3RSM: Many-to-many multi-resolution scan matching.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >, 5815–5821.
+      </li>
+      <li>
+        Hess, W., Kohler, D., Rapp, H., &amp; Andor, D. (2016). Real-time loop
+        closure in 2D LiDAR SLAM.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >, 1271–1278.
+      </li>
+      <li>
+        Jiang, G., &amp; Gu, D. (2018). FFT-based scan-matching for SLAM
+        applications with low-cost laser range finders.
+        <em>Applied Sciences</em>, 9(1), 41.
+      </li>
+      <li>
+        Filotheou, A., &amp; Kyrki, V. (2021). Correspondenceless
+        scan–to–map-scan matching of homoriented 2D scans for mobile robot
+        localisation.
+        <em>arXiv preprint</em>, arXiv:2106.14003.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter10/Lesson2.html">
+          Lesson 2: ICP Variants for Mobile Robots
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter10/Lesson4.html">
+          Lesson 4: Robustness to Dynamic Obstacles
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="active-lesson" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1743 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: Digital Control and Real-Time Implementation - Lesson 5: Lab: Implement Controller with Real Loop Timing | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: Digital Control and Real-Time Implementation</h1>
+    <h3>
+      <strong>Lesson 5: Lab: Implement Controller with Real Loop Timing</strong>
+    </h3>
+    <p>
+      This lab connects the theory of sampled-data robot control to an actual
+      real-time loop implementation. You will implement a discrete-time
+      joint-space controller, measure real loop timing (sampling, computation
+      delay, jitter), and interpret its effect on stability and tracking
+      performance. We combine state-space sampled-data models with practical
+      timing primitives in Python, C++, Java, MATLAB/Simulink, and Wolfram
+      Mathematica, using robotics-related libraries where appropriate.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Setup -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Setup</h2>
+    <div class="down-content">
+      <p>
+        We assume you already designed a stabilizing continuous-time joint-space
+        controller in previous chapters (e.g., PD or computed-torque) and
+        discretized it with a zero-order hold in Lessons 12.1–12.2. In this lab,
+        we:
+      </p>
+      <ul>
+        <li>
+          Implement a <em>discrete-time</em> joint controller with sampling
+          period <strong>\( T_s \)</strong>.
+        </li>
+        <li>
+          Measure the <em>actual</em> inter-sample intervals
+          <strong>\( T_k \)</strong> and computation time
+          <strong>\( T_c(k) \)</strong>.
+        </li>
+        <li>
+          Model sampling jitter as a perturbation of the nominal discrete-time
+          closed loop and analyze robustness.
+        </li>
+        <li>
+          Use language-specific real-time constructs (threads, timers,
+          executors) and robotics frameworks:
+          <ul>
+            <li>
+              Python: <code>rclpy</code> (ROS 2), <code>numpy</code>, simple
+              timing with <code>time.perf_counter()</code>.
+            </li>
+            <li>
+              C++: <code>rclcpp</code>, <code>Eigen</code>,
+              <code>&lt;chrono&gt;</code>/<code>&lt;thread&gt;</code> for
+              timing.
+            </li>
+            <li>
+              Java: <code>ScheduledExecutorService</code>, optionally
+              <code>rosjava</code> for integration.
+            </li>
+            <li>
+              MATLAB/Simulink: discrete-time blocks, Robotics System Toolbox.
+            </li>
+            <li>Wolfram Mathematica: numerical integration and timed loops.</li>
+          </ul>
+        </li>
+      </ul>
+      <p>
+        We focus on a single revolute joint modeled as a linearized second-order
+        system around a given operating point. Let
+        <strong>\( q(t) \)</strong> denote joint position,
+        <strong>\( \dot{q}(t) \)</strong> velocity, and control input
+        <strong>\( &bsol;tau(t) \)</strong> the actuator torque command.
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}(t) = \begin{bmatrix} q(t) \\ \dot{q}(t) \end{bmatrix},
+        \quad \dot{\mathbf{x}}(t) = \mathbf{A}\,\mathbf{x}(t) +
+        \mathbf{B}\,u(t), \quad y(t) = \mathbf{C}\,\mathbf{x}(t), \quad u(t) =
+        &bsol;tau(t) \]
+      </h4>
+      <p>
+        Here <strong>\( \mathbf{A} \in \mathbb{R}^{2\times 2} \)</strong> and
+        <strong>\( \mathbf{B} \in \mathbb{R}^{2\times 1} \)</strong> come from
+        the linearization of the robot joint dynamics around the operating
+        point, which you already know from kinematics and dynamics.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Discrete-Time Controller with Nominal Sampling -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Discrete-Time Controller with Nominal Sampling</h2>
+    <div class="down-content">
+      <p>
+        Using a zero-order hold (ZOH) with nominal sample time
+        <strong>\( T_s \)</strong>, the equivalent discrete-time model is:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}[k+1] = \mathbf{\Phi}\,\mathbf{x}[k] +
+        \mathbf{\Gamma}\,u[k], \quad y[k] = \mathbf{C}\,\mathbf{x}[k], \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \mathbf{\Phi} = \exp(\mathbf{A} T_s), \quad \mathbf{\Gamma} =
+        \int_{0}^{T_s} \exp\!\big(\mathbf{A}\sigma\big)\,\mathrm{d}\sigma\,
+        \mathbf{B}. \]
+      </h4>
+      <p>
+        A joint-space PD controller in discrete time for tracking a desired
+        trajectory <strong>\( q_d[k] \)</strong> is:
+      </p>
+      <h4 class="mathJax">
+        \[ e[k] = q_d[k] - q[k], \quad \dot{e}[k] \approx \frac{e[k] -
+        e[k-1]}{T_s}, \]
+      </h4>
+      <h4 class="mathJax">
+        \[ &bsol;tau[k] = K_p\,e[k] + K_d\,\dot{e}[k] = K_p\,e[k] +
+        K_d\frac{e[k]-e[k-1]}{T_s}. \]
+      </h4>
+      <p>
+        In state-space form, if we augment the state with the previous error
+        <strong>\( e[k-1] \)</strong>, this becomes a linear dynamic controller.
+        When combined with the discrete-time plant, we obtain a closed-loop
+        system
+        <strong>\( \mathbf{x}_c[k+1] = \mathbf{A}_c \mathbf{x}_c[k] \)</strong>
+        whose eigenvalues must satisfy
+        <strong>\( |\lambda_i(\mathbf{A}_c)| &lt; 1 \)</strong>
+        for stability.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Modeling Real Loop Timing and Jitter -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Modeling Real Loop Timing and Jitter</h2>
+    <div class="down-content">
+      <p>
+        In a real implementation, the loop does not execute at perfectly
+        periodic instants. Let <strong>\( t_k \)</strong> be the time at which
+        the control input <strong>\( u[k] \)</strong> is applied (after sensing
+        and computation). We model:
+      </p>
+      <h4 class="mathJax">\[ t_k = k T_s + \delta_k, \]</h4>
+      <p>
+        where <strong>\( \delta_k \)</strong> is the (unknown) timing error. The
+        actual inter-sample interval is
+      </p>
+      <h4 class="mathJax">
+        \[ T_k = t_{k+1} - t_k = T_s + \Delta T_k, \quad \Delta T_k =
+        \delta_{k+1} - \delta_k. \]
+      </h4>
+      <p>
+        We call <strong>\( \Delta T_k \)</strong> the <em>sampling jitter</em>.
+        In practice, the OS scheduler, cache misses, communication delay, and
+        other tasks cause <strong>\( \Delta T_k \neq 0 \)</strong>. Assume
+        <strong>\( |\Delta T_k| \leq J_{\max} \)</strong> (bounded jitter).
+      </p>
+      <p>The sampled-data model with aperiodic sampling is</p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}[k+1] = \mathbf{\Phi}_k\,\mathbf{x}[k] +
+        \mathbf{\Gamma}_k\,u[k], \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \mathbf{\Phi}_k = \exp\big(\mathbf{A}(T_s+\Delta T_k)\big), \quad
+        \mathbf{\Gamma}_k = \int_{0}^{T_s+\Delta T_k}
+        \exp(\mathbf{A}\sigma)\,\mathrm{d}\sigma\, \mathbf{B}. \]
+      </h4>
+      <p>
+        For small jitter <strong>\( |\Delta T_k| \ll T_s \)</strong>, a
+        first-order expansion yields
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{\Phi}_k \approx \mathbf{\Phi} + \Delta
+        T_k\,\mathbf{A}\mathbf{\Phi}, \quad \mathbf{\Gamma}_k \approx
+        \mathbf{\Gamma} + \Delta T_k\,\mathbf{B}. \]
+      </h4>
+      <p>
+        With state feedback
+        <strong>\( u[k] = -\mathbf{K}\mathbf{x}[k] \)</strong>, the closed-loop
+        dynamics become
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}[k+1] = \big(\mathbf{\Phi}_k -
+        \mathbf{\Gamma}_k\mathbf{K}\big)\mathbf{x}[k] = \big(\mathbf{A}_d +
+        \Delta\mathbf{A}_k\big)\mathbf{x}[k], \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \mathbf{A}_d = \mathbf{\Phi} - \mathbf{\Gamma}\mathbf{K}, \quad
+        \Delta\mathbf{A}_k \approx \Delta T_k\left(\mathbf{A}\mathbf{\Phi} -
+        \mathbf{B}\mathbf{K}\right). \]
+      </h4>
+      <p>
+        Thus jitter appears as a <em>multiplicative perturbation</em> of the
+        nominal discrete-time closed-loop matrix
+        <strong>\( \mathbf{A}_d \)</strong>. We can analyze robustness using
+        matrix norms.
+      </p>
+      <p><strong>Lemma (robust stability with small jitter).</strong></p>
+      <p>
+        Suppose there exists a matrix norm
+        <strong>\( \|\cdot\| \)</strong> and a number
+        <strong>\( \alpha \)</strong> with
+        <strong>\( \|\mathbf{A}_d\| \leq \alpha &lt; 1 \)</strong>. If
+      </p>
+      <h4 class="mathJax">
+        \[ \|\Delta\mathbf{A}_k\| \leq \varepsilon \quad \text{for all } k \]
+      </h4>
+      <p>
+        and <strong>\( \alpha + \varepsilon &lt; 1 \)</strong>, then the origin
+        of the perturbed system
+        <strong
+          >\( \mathbf{x}[k+1]=( \mathbf{A}_d + \Delta\mathbf{A}_k )\mathbf{x}[k]
+          \)</strong
+        >
+        is exponentially stable.
+      </p>
+      <p><strong>Proof sketch.</strong></p>
+      <p>
+        From submultiplicativity:
+        <strong
+          >\( \|\mathbf{x}[k+1]\| \leq
+          \|\mathbf{A}_d+\Delta\mathbf{A}_k\|\;\|\mathbf{x}[k]\| \leq
+          (\alpha+\varepsilon)\|\mathbf{x}[k]\| \)</strong
+        >. Induction gives
+      </p>
+      <h4 class="mathJax">
+        \[ \|\mathbf{x}[k]\| \leq (\alpha+\varepsilon)^k \|\mathbf{x}[0]\|. \]
+      </h4>
+      <p>
+        Because <strong>\( \alpha+\varepsilon &lt; 1 \)</strong>, the bound
+        decays geometrically, implying exponential stability.
+      </p>
+      <p>
+        In the lab, you will <em>estimate</em> jitter from timing measurements
+        and reason whether it threatens the stability margin implied by your
+        discrete-time design.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Real-Time Control Loop Flow -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Real-Time Control Loop Flow</h2>
+    <div class="down-content">
+      <p>
+        The following flow describes the structure of a real-time control task
+        executing at nominal period <strong>\( T_s \)</strong>. This is the
+        pattern you will implement in each language.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  START["Start lab program"] --> INIT["Initialize robot interface, gains, Ts"]
+  INIT --> TIMESET["Set 'next_time' = 'now' + Ts"]
+  TIMESET --> LOOP{"Loop while 't' &lt; 't_final'"}
+  LOOP --> SENSE["Read joint states q, dq from sensors or simulator"]
+  SENSE --> REF["Compute reference q_d, dq_d at current time"]
+  REF --> CTRL["Compute error e, de and control torque tau_k"]
+  CTRL --> SEND["Send tau_k to robot or simulator"]
+  SEND --> LOG["Log timestamps, measured dt, jitter, and state"]
+  LOG --> SLEEP["Sleep until 'next_time' (if time remains)"]
+  SLEEP --> UPDATE["Update 'next_time' = 'next_time' + Ts"]
+  UPDATE --> LOOP
+        </pre>
+      </div>
+      <p>Critical measurements for analysis:</p>
+      <ul>
+        <li>
+          <strong>Measured period:</strong>
+          <strong>\( T_k = t_{k} - t_{k-1} \)</strong>.
+        </li>
+        <li>
+          <strong>Computation time:</strong> wall-clock between sensing and end
+          of control computation.
+        </li>
+        <li>
+          <strong>Jitter:</strong>
+          <strong>\( \Delta T_k = T_k - T_s \)</strong>.
+        </li>
+      </ul>
+      <p>
+        For each experiment, you will plot <strong>\( T_k \)</strong>,
+        <strong>\( \Delta T_k \)</strong>, and tracking error
+        <strong>\( e[k] \)</strong> against time to relate timing and control
+        quality.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Python Lab Implementation (ROS 2 / Simulation Friendly) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Python Lab Implementation (ROS 2 / Simulation Friendly)</h2>
+    <div class="down-content">
+      <p>
+        Python is not a hard real-time language, but it is convenient for rapid
+        prototyping and simulation. We assume either:
+      </p>
+      <ul>
+        <li>
+          A ROS 2 node using <code>rclpy</code> subscribing to joint states and
+          publishing torque commands, or
+        </li>
+        <li>
+          A simulation backend (e.g., PyBullet or a custom ODE integrator) that
+          advances in real time.
+        </li>
+      </ul>
+      <p>
+        The code below illustrates a 1-DOF PD controller with timing
+        measurement. Replace the <code>read_joint()</code> and
+        <code>write_torque()</code> functions with your robot or simulator APIs.
+      </p>
+      <pre><code class="language-python">
+import time
+import math
+import numpy as np
+
+# Controller parameters
+Ts = 0.002  # nominal sampling time [s]
+Kp = 50.0
+Kd = 2.0
+
+# Reference trajectory: simple sinusoid
+def q_ref(t):
+    qd = 0.5 * math.sin(2.0 * math.pi * 0.5 * t)  # 0.5 rad amplitude, 0.5 Hz
+    dqd = 0.5 * 2.0 * math.pi * 0.5 * math.cos(2.0 * math.pi * 0.5 * t)
+    return qd, dqd
+
+# Robot I/O (to be implemented for your platform)
+def read_joint():
+    """
+    Return (q, dq) for the controlled joint.
+    Connect this to your low-level interface or simulator.
+    """
+    # Example dummy implementation:
+    # return sim.get_joint_state()
+    raise NotImplementedError
+
+def write_torque(tau):
+    """
+    Send torque tau to the actuator.
+    """
+    # Example dummy implementation:
+    # sim.set_joint_torque(tau)
+    raise NotImplementedError
+
+# Logging arrays
+log_t = []
+log_Tk = []
+log_jitter = []
+log_q = []
+log_qd = []
+log_e = []
+
+t_final = 5.0  # run 5 seconds
+t0 = time.perf_counter()
+last_time = t0
+next_time = t0 + Ts
+
+e_prev = 0.0
+
+while True:
+    now = time.perf_counter()
+    t = now - t0
+    if t &gt;= t_final:
+        break
+
+    # Measured period and jitter
+    Tk = now - last_time
+    jitter = Tk - Ts
+    last_time = now
+
+    # Read current joint state
+    q, dq = read_joint()
+
+    # Reference at current time
+    qd, dqd = q_ref(t)
+
+    # PD control in discrete time
+    e = qd - q
+    de = (e - e_prev) / max(Tk, 1e-6)  # use measured Tk in derivative
+    e_prev = e
+
+    tau = Kp * e + Kd * de
+
+    # Send control
+    write_torque(tau)
+
+    # Log signals
+    log_t.append(t)
+    log_Tk.append(Tk)
+    log_jitter.append(jitter)
+    log_q.append(q)
+    log_qd.append(qd)
+    log_e.append(e)
+
+    # Sleep until next nominal sample time
+    next_time += Ts
+    sleep_time = next_time - time.perf_counter()
+    if sleep_time &gt; 0.0:
+        time.sleep(sleep_time)
+
+# After the loop, analyze logs:
+# - Plot Tk vs t
+# - Plot jitter vs t
+# - Plot tracking error vs t
+      </code></pre>
+      <p>
+        <strong>Remark.</strong> In this implementation, the derivative term
+        uses the measured <strong>\( T_k \)</strong> instead of nominal
+        <strong>\( T_s \)</strong>, partially compensating for jitter in the
+        derivative estimate. For small jitter and sufficiently low closed-loop
+        bandwidth, this improves robustness compared to a fixed
+        <strong>\( T_s \)</strong>-based derivative.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: C++ Implementation with High-Resolution Timing -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. C++ Implementation with High-Resolution Timing</h2>
+    <div class="down-content">
+      <p>
+        C++ is common for low-level control, particularly in ROS 2 with
+        <code>rclcpp</code> and <code>ros2_control</code>. Here we show a bare
+        loop using <code>std::chrono</code>. In a full system, the same logic
+        would be inside a controller <em>update</em> method called by the
+        real-time manager.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;chrono&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+
+// Replace with your own robot interface
+struct JointInterface {
+  double readPosition();
+  double readVelocity();
+  void   writeTorque(double tau);
+};
+
+int main() {
+  using clock = std::chrono::high_resolution_clock;
+  using std::chrono::duration_cast;
+  using std::chrono::microseconds;
+
+  JointInterface joint;
+
+  const double Ts = 0.002;   // 2 ms
+  const double Kp = 50.0;
+  const double Kd = 2.0;
+
+  auto t0 = clock::now();
+  auto last = t0;
+  auto next = t0 + std::chrono::duration&lt;double&gt;(Ts);
+
+  double e_prev = 0.0;
+  double t_final = 5.0;
+
+  std::vector&lt;double&gt; log_t, log_Tk, log_jitter, log_q, log_qd, log_e;
+
+  while (true) {
+    auto now = clock::now();
+    double t = std::chrono::duration&lt;double&gt;(now - t0).count();
+    if (t &gt;= t_final) break;
+
+    double Tk = std::chrono::duration&lt;double&gt;(now - last).count();
+    last = now;
+    double jitter = Tk - Ts;
+
+    // Joint state
+    double q  = joint.readPosition();
+    double dq = joint.readVelocity();
+
+    // Reference
+    double qd  = 0.5 * std::sin(2.0 * M_PI * 0.5 * t);
+    double dqd = 0.5 * 2.0 * M_PI * 0.5 * std::cos(2.0 * M_PI * 0.5 * t);
+
+    double e  = qd - q;
+    double de = (e - e_prev) / std::max(Tk, 1e-6);
+    e_prev = e;
+
+    double tau = Kp * e + Kd * de;
+
+    joint.writeTorque(tau);
+
+    // Log signals
+    log_t.push_back(t);
+    log_Tk.push_back(Tk);
+    log_jitter.push_back(jitter);
+    log_q.push_back(q);
+    log_qd.push_back(qd);
+    log_e.push_back(e);
+
+    // Sleep until next nominal instant
+    next += std::chrono::duration&lt;double&gt;(Ts);
+    auto now2 = clock::now();
+    if (next &gt; now2) {
+      std::this_thread::sleep_until(next);
+    }
+  }
+
+  // Post-process logs (e.g., save to file) for plotting.
+  return 0;
+}
+      </code></pre>
+      <p>
+        On POSIX systems you can further improve determinism by assigning a
+        real-time scheduling policy (<code>SCHED_FIFO</code>) and core affinity
+        to the control thread. These OS-level details are beyond the scope of
+        this lab, but are essential for hard real-time guarantees.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Java Implementation with ScheduledExecutorService -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Java Implementation with ScheduledExecutorService</h2>
+    <div class="down-content">
+      <p>
+        Java is less common in low-level robotics, but illustrates periodic
+        tasks with <code>ScheduledExecutorService</code>. Integrations with ROS
+        are possible via <code>rosjava</code>. Here, the emphasis is measuring
+        timing and logging jitter.
+      </p>
+      <pre><code class="language-java">
+import java.util.concurrent.*;
+import java.util.*;
+import java.lang.Math;
+
+class JointInterface {
+    public double readPosition() { /* ... */ return 0.0; }
+    public double readVelocity() { /* ... */ return 0.0; }
+    public void writeTorque(double tau) { /* ... */ }
+}
+
+public class RealTimeController {
+    public static void main(String[] args) {
+        final double Ts = 0.002; // 2 ms
+        final double Kp = 50.0;
+        final double Kd = 2.0;
+        final double tFinal = 5.0;
+
+        JointInterface joint = new JointInterface();
+
+        List&lt;Double&gt; log_t = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; log_Tk = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; log_jitter = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; log_q = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; log_qd = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; log_e = new ArrayList&lt;&gt;();
+
+        ScheduledExecutorService exec = Executors.newSingleThreadScheduledExecutor();
+
+        final long startNano = System.nanoTime();
+        final double[] ePrev = new double[]{0.0};
+        final long periodNano = (long)(Ts * 1e9);
+
+        Runnable task = new Runnable() {
+            long lastNano = startNano;
+
+            @Override
+            public void run() {
+                long nowNano = System.nanoTime();
+                double t = (nowNano - startNano) / 1e9;
+                if (t &gt;= tFinal) {
+                    exec.shutdown();
+                    return;
+                }
+
+                double Tk = (nowNano - lastNano) / 1e9;
+                lastNano = nowNano;
+                double jitter = Tk - Ts;
+
+                double q  = joint.readPosition();
+                double dq = joint.readVelocity();
+
+                double qd  = 0.5 * Math.sin(2.0 * Math.PI * 0.5 * t);
+                double dqd = 0.5 * 2.0 * Math.PI * 0.5 * Math.cos(2.0 * Math.PI * 0.5 * t);
+
+                double e  = qd - q;
+                double de = (e - ePrev[0]) / Math.max(Tk, 1e-6);
+                ePrev[0] = e;
+
+                double tau = Kp * e + Kd * de;
+                joint.writeTorque(tau);
+
+                log_t.add(t);
+                log_Tk.add(Tk);
+                log_jitter.add(jitter);
+                log_q.add(q);
+                log_qd.add(qd);
+                log_e.add(e);
+            }
+        };
+
+        exec.scheduleAtFixedRate(task, 0, periodNano, TimeUnit.NANOSECONDS);
+    }
+}
+      </code></pre>
+      <p>
+        The JVM introduces nontrivial jitter compared to C++. The experiment of
+        comparing <strong>\( \Delta T_k \)</strong> distributions between Java
+        and C++ is instructive for appreciating language/runtime overhead in
+        control.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB and Simulink are widely used for prototyping and
+        hardware-in-the-loop experiments. We outline both a script-based
+        discrete-time loop and a Simulink model configuration.
+      </p>
+      <h3>8.1 Script-Based Discrete Loop in MATLAB</h3>
+      <pre><code class="language-matlab">
+Ts = 0.002;
+Kp = 50;
+Kd = 2;
+tFinal = 5.0;
+
+% Robot interface: implement these as needed
+readJoint  = @() deal(0.0, 0.0);  % [q, dq]
+writeTorque = @(tau) [];          % send torque
+
+t0 = tic;
+lastTime = 0.0;
+nextTime = Ts;
+
+e_prev = 0.0;
+
+log_t = [];
+log_Tk = [];
+log_jitter = [];
+log_q = [];
+log_qd = [];
+log_e = [];
+
+while true
+    now = toc(t0);
+    if now &gt;= tFinal
+        break;
+    end
+
+    Tk = now - lastTime;
+    lastTime = now;
+    jitter = Tk - Ts;
+
+    [q, dq] = readJoint();
+
+    qd  = 0.5 * sin(2*pi*0.5*now);
+    dqd = 0.5 * 2*pi*0.5 * cos(2*pi*0.5*now);
+
+    e  = qd - q;
+    de = (e - e_prev) / max(Tk, 1e-6);
+    e_prev = e;
+
+    tau = Kp * e + Kd * de;
+    writeTorque(tau);
+
+    log_t(end+1,1) = now;
+    log_Tk(end+1,1) = Tk;
+    log_jitter(end+1,1) = jitter;
+    log_q(end+1,1) = q;
+    log_qd(end+1,1) = qd;
+    log_e(end+1,1) = e;
+
+    % Sleep to enforce nominal Ts
+    pause(max(0.0, nextTime - now));
+    nextTime = nextTime + Ts;
+end
+
+% Plot log_Tk, log_jitter, and log_e vs log_t
+      </code></pre>
+      <h3>8.2 Simulink Model</h3>
+      <p>In Simulink, create a model with:</p>
+      <ul>
+        <li>
+          A discrete-time controller subsystem (sample time
+          <strong>\( T_s \)</strong>) implementing the PD law.
+        </li>
+        <li>
+          A continuous-time joint plant (from prior chapters) connected through
+          a zero-order hold.
+        </li>
+        <li>
+          A <em>Rate Transition</em> block if you simulate multi-rate loops.
+        </li>
+        <li>
+          <em>Scope</em> blocks logging sample times via <code>Clock</code> and
+          difference blocks to measure <strong>\( T_k \)</strong>.
+        </li>
+      </ul>
+      <p>
+        For hardware deployment (e.g., Simulink Real-Time), the same model can
+        execute on a real-time target, giving near-ideal sampling with minimal
+        jitter, against which you can compare PC-based implementations.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is most convenient for symbolic analysis and offline
+        simulation, but we can still emulate a real-time loop by sampling
+        <strong>\( \mathbf{A} \)</strong>, <strong>\( \mathbf{B} \)</strong> and
+        iterating a discrete-time model while measuring wall-clock time.
+      </p>
+      <pre><code class="language-mathematica">
+(* Parameters *)
+Ts = 0.002;
+Kp = 50.;
+Kd = 2.;
+tFinal = 5.0;
+
+(* Simple linearized joint model: x = {q, dq} *)
+A = { {0., 1.}, {-100., -5.} };
+B = { {0.}, {100.} };
+
+Phi = MatrixExp[A Ts];
+Gamma = Integrate[MatrixExp[A s], {s, 0, Ts}].B;
+
+(* Initial state *)
+x = {0., 0.};
+ePrev = 0.;
+
+(* Logging *)
+log = {};
+
+t0 = AbsoluteTime[];
+last = t0;
+next = t0 + Ts;
+
+While[True,
+  now = AbsoluteTime[];
+  t = now - t0;
+  If[t &gt;= tFinal, Break[]];
+
+  Tk = now - last;
+  last = now;
+  jitter = Tk - Ts;
+
+  (* Reference *)
+  qd  = 0.5*Sin[2.*Pi*0.5*t];
+  dqd = 0.5*2.*Pi*0.5*Cos[2.*Pi*0.5*t];
+
+  q = x[[1]];
+  dq = x[[2]];
+  e = qd - q;
+  de = (e - ePrev)/Max[Tk, 10.^-6];
+  ePrev = e;
+
+  tau = Kp*e + Kd*de;
+
+  (* Discrete-time update using nominal Phi, Gamma *)
+  x = Phi.x + Gamma*tau;
+
+  AppendTo[log, {t, Tk, jitter, q, qd, e}];
+
+  pause = next - AbsoluteTime[];
+  If[pause &gt; 0., Pause[pause]];
+  next = next + Ts;
+]
+
+(* 'log' contains {t, Tk, jitter, q, qd, e} for plotting and analysis *)
+      </code></pre>
+      <p>
+        Symbolic capabilities can further be used to derive
+        <strong>\( \mathbf{\Phi}(T) \)</strong> and
+        <strong>\( \mathbf{\Gamma}(T) \)</strong> exactly as functions of sample
+        time, enabling analytic sensitivity analysis of closed-loop eigenvalues
+        to timing variations.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong
+          >Problem 1 (Discrete-Time Model from Continuous-Time Joint
+          Dynamics).</strong
+        >
+        Consider the linearized joint model
+        <strong
+          >\( \dot{\mathbf{x}}(t) = \mathbf{A}\mathbf{x}(t) + \mathbf{B}u(t)
+          \)</strong
+        >
+        with constant matrices <strong>\( \mathbf{A} \)</strong>,
+        <strong>\( \mathbf{B} \)</strong>. Show that under a zero-order hold
+        with sampling period <strong>\( T_s \)</strong>, the discrete-time model
+        is
+        <strong
+          >\( \mathbf{x}[k+1] = \mathbf{\Phi}\,\mathbf{x}[k] +
+          \mathbf{\Gamma}\,u[k] \)</strong
+        >
+        with
+        <strong>\( \mathbf{\Phi} = \exp(\mathbf{A} T_s) \)</strong> and
+        <strong
+          >\( \mathbf{\Gamma} = \int_0^{T_s}
+          \exp(\mathbf{A}\sigma)\,\mathrm{d}\sigma\,\mathbf{B} \)</strong
+        >.
+      </p>
+      <p><strong>Solution.</strong></p>
+      <p>
+        Assume <strong>\( u(t) = u[k] \)</strong> for
+        <strong>\( t \in [kT_s,(k+1)T_s) \)</strong>. The solution of the linear
+        ODE from <strong>\( t_k = kT_s \)</strong> to
+        <strong>\( t_{k+1} = (k+1)T_s \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}(t_{k+1}) = \exp(\mathbf{A} T_s)\,\mathbf{x}(t_k) +
+        \int_{0}^{T_s}
+        \exp\big(\mathbf{A}(T_s-\sigma)\big)\,\mathbf{B}u[k]\;\mathrm{d}\sigma.
+        \]
+      </h4>
+      <p>
+        Using the substitution <strong>\( r = T_s-\sigma \)</strong>,
+        <strong>\( \mathrm{d}r = -\mathrm{d}\sigma \)</strong>, the limits
+        reverse and we get
+      </p>
+      <h4 class="mathJax">
+        \[ \int_{0}^{T_s} \exp\big(\mathbf{A}(T_s-\sigma)\big)\,\mathrm{d}\sigma
+        = \int_0^{T_s} \exp(\mathbf{A}r)\,\mathrm{d}r. \]
+      </h4>
+      <p>
+        Identifying <strong>\( \mathbf{x}[k] = \mathbf{x}(t_k) \)</strong> and
+        <strong>\( \mathbf{x}[k+1]=\mathbf{x}(t_{k+1}) \)</strong> yields the
+        ZOH formulas for <strong>\( \mathbf{\Phi} \)</strong> and
+        <strong>\( \mathbf{\Gamma} \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Jitter-Induced Perturbation Bound).</strong>
+        Let
+        <strong
+          >\( \mathbf{A}_d = \mathbf{\Phi} - \mathbf{\Gamma}\mathbf{K}
+          \)</strong
+        >
+        be the nominal closed-loop matrix for a state-feedback design with
+        sampling period <strong>\( T_s \)</strong>. Suppose jitter produces
+        time-varying matrices
+        <strong>\( \mathbf{A}_d + \Delta\mathbf{A}_k \)</strong> with
+        <strong>\( \|\Delta\mathbf{A}_k\| \leq c J_{\max} \)</strong> for some
+        known constant <strong>\( c &gt; 0 \)</strong>. Give a sufficient
+        inequality on <strong>\( J_{\max} \)</strong> to guarantee robust
+        stability in the sense of the lemma from Section 3.
+      </p>
+      <p><strong>Solution.</strong></p>
+      <p>
+        From the lemma, a sufficient condition for exponential stability is the
+        existence of a norm with
+        <strong>\( \|\mathbf{A}_d\| \leq \alpha &lt; 1 \)</strong> and
+        <strong>\( \alpha + \varepsilon &lt; 1 \)</strong>, where
+        <strong>\( \varepsilon \geq \|\Delta\mathbf{A}_k\| \)</strong> for all
+        <strong>\( k \)</strong>. If
+        <strong>\( \|\Delta\mathbf{A}_k\| \leq c J_{\max} \)</strong>, we can
+        choose <strong>\( \varepsilon = c J_{\max} \)</strong> and require
+      </p>
+      <h4 class="mathJax">
+        \[ \alpha + c J_{\max} &lt; 1 \quad \Longrightarrow \quad J_{\max} &lt;
+        \frac{1-\alpha}{c}. \]
+      </h4>
+      <p>
+        Hence any jitter bound <strong>\( J_{\max} \)</strong> satisfying this
+        inequality preserves stability.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Real-Time Feasibility of the Control Task).</strong>
+        Consider a single control task with worst-case computation time
+        <strong>\( C \)</strong> and sampling period <strong>\( T_s \)</strong>.
+        Under a simple rate-monotonic analysis for a single task, show that if
+        <strong>\( C &lt; T_s \)</strong>, the task can meet its deadline. Then,
+        for your implementation, estimate <strong>\( C \)</strong> from timing
+        logs and check feasibility.
+      </p>
+      <p><strong>Solution.</strong></p>
+      <p>
+        For a single periodic task with relative deadline equal to period, the
+        schedulability condition under a uniprocessor scheduler is that its
+        processor utilization <strong>\( U = C/T_s \)</strong> is less than or
+        equal to 1. If <strong>\( C &lt; T_s \)</strong>, then
+        <strong>\( U &lt; 1 \)</strong>, meaning the CPU has enough time within
+        each period to execute the task before the next release. In your
+        implementation, the measured computation time per iteration can be
+        approximated as
+      </p>
+      <h4 class="mathJax">
+        \[ C \approx \max_k \big(t_k^{\text{end}} - t_k^{\text{start}}\big), \]
+      </h4>
+      <p>
+        where <strong>\( t_k^{\text{start}} \)</strong> is the timestamp just
+        before sensing and <strong>\( t_k^{\text{end}} \)</strong> just after
+        control output is sent. If the empirical
+        <strong>\( C \)</strong> satisfies <strong>\( C &lt; T_s \)</strong>,
+        your controller is schedulable under ideal conditions. If not, you must
+        reduce computation (e.g., simplify computations, move heavy tasks to
+        slower threads) or increase <strong>\( T_s \)</strong>.
+      </p>
+
+      <p>
+        <strong
+          >Problem 4 (Effect of Using \( T_k \) vs \( T_s \) in the Derivative
+          Term).</strong
+        >
+        In the PD controller, consider two implementations of the derivative:
+      </p>
+      <h4 class="mathJax">
+        \[ \text{(a)}\quad \dot{e}[k] = \frac{e[k]-e[k-1]}{T_s}, \qquad
+        \text{(b)}\quad \dot{e}[k] = \frac{e[k]-e[k-1]}{T_k}. \]
+      </h4>
+      <p>
+        Qualitatively analyze which implementation is more robust to jitter and
+        explain the trade-off in terms of noise amplification.
+      </p>
+      <p><strong>Solution.</strong></p>
+      <p>
+        Implementation (a) ignores jitter and uses constant
+        <strong>\( T_s \)</strong>. When <strong>\( T_k \)</strong> deviates
+        from <strong>\( T_s \)</strong>, the effective derivative gain becomes
+      </p>
+      <h4 class="mathJax">\[ K_d^{\text{eff}}(k) = K_d \frac{T_k}{T_s}, \]</h4>
+      <p>
+        i.e., timing variation translates into multiplicative variation of the
+        derivative gain, which can destabilize the loop for large jitter.
+        Implementation (b) uses the actual period <strong>\( T_k \)</strong>,
+        which keeps the derivative estimate closer to the true derivative
+        <strong>\( \frac{\mathrm{d}e}{\mathrm{d}t} \)</strong> and thus is more
+        robust to jitter. However, <strong>\( T_k \)</strong> fluctuates sample
+        to sample, and noise in the measurement is divided by a random quantity.
+        If <strong>\( T_k \)</strong> occasionally becomes very small, the
+        derivative can amplify sensor noise dramatically. In practice, a hybrid
+        approach with saturation
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{e}[k] = \frac{e[k]-e[k-1]}{\max(T_k,T_{\min})} \]
+      </h4>
+      <p>
+        with a lower bound <strong>\( T_{\min} &gt; 0 \)</strong> balances
+        jitter compensation and noise robustness.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Conceptual Timing Analysis Flow).</strong>
+        Sketch a conceptual flow for evaluating whether a proposed control
+        period <strong>\( T_s \)</strong> is feasible on given hardware, taking
+        into account computation time, scheduling, and robustness margin. Use
+        the flow to justify either decreasing or increasing
+        <strong>\( T_s \)</strong> in your lab implementation.
+      </p>
+      <p><strong>Solution (flow).</strong></p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Choose nominal Ts and design discrete controller"] --> M["Measure worst case computation time C"]
+  M --> F{"Is C &lt; Ts with margin?"}
+  F -->|yes| J["Measure jitter and estimate J_max"]
+  F -->|no| ADJ["Adjust: optimize code or increase Ts"]
+  J --> R{"Is jitter bound small \nvs stability margin?"}
+  R -->|yes| OK["Accept Ts and deploy controller"]
+  R -->|no| RED["Reduce bandwidth or increase Ts"]
+        </pre>
+      </div>
+      <p>
+        This flow emphasizes that timing analysis and control design must be
+        performed together: an aggressive <strong>\( T_s \)</strong> with too
+        heavy computations can violate both schedulability and stability.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lab, you bridged the gap between discrete-time control theory
+        and actual real-time implementation. Starting from a linearized joint
+        model, you implemented a sampled PD controller, measured real sampling
+        periods, computation times, and jitter, and interpreted their influence
+        on stability and performance via a perturbation view of the closed-loop
+        matrix. Through implementations in Python, C++, Java, MATLAB/Simulink,
+        and Mathematica, you observed language- and runtime-dependent jitter
+        characteristics and learned how to structure a deterministic control
+        loop and check basic schedulability conditions. These skills underpin
+        advanced real-time control architectures and safety-critical controllers
+        in later chapters.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: References (Theoretical Papers on Sampled-Data and Real-Time Control) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. References</h2>
+    <ol>
+      <li>
+        Åström, K. J., &amp; Wittenmark, B. (1984). Computer-controlled systems:
+        Theory and design. <em>Prentice Hall</em>.
+      </li>
+      <li>
+        Henningsson, T., Cervin, A., &amp; Årzén, K.-E. (2008). Sampling jitter
+        effects in computer control systems.
+        <em>European Journal of Control</em>, 14(3), 241–254.
+      </li>
+      <li>
+        Fujioka, H. (2009). Stability analysis of systems with aperiodic
+        sample-and-hold devices. <em>Automatica</em>, 45(3), 771–775.
+      </li>
+      <li>
+        Zhang, W., Branicky, M. S., &amp; Phillips, S. M. (2001). Stability of
+        networked control systems. <em>IEEE Control Systems Magazine</em>,
+        21(1), 84–99.
+      </li>
+      <li>
+        Cervin, A., Henriksson, D., Lincoln, B., Eker, J., &amp; Årzén, K.-E.
+        (2003). How does control timing affect performance? Analysis and
+        simulation of timing using Jitterbug and TrueTime.
+        <em>IEEE Control Systems Magazine</em>, 23(3), 16–30.
+      </li>
+      <li>
+        Buttazzo, G. C., Lipari, G., &amp; Abeni, L. (1998). Elastic task model
+        for adaptive rate control. <em>IEEE Real-Time Systems Symposium</em>,
+        286–295.
+      </li>
+      <li>
+        Goodwin, G. C., Salgado, M. E., Middleton, R. H., &amp; McInnis, B. C.
+        (1995). Frequency domain tools for designing fast sampling rate
+        controllers. <em>Automatica</em>, 31(4), 659–669.
+      </li>
+      <li>
+        Nesic, D., Teel, A. R., &amp; Carnevale, D. (2009). Explicit computation
+        of the sampling period in emulation of controllers for nonlinear
+        sampled-data systems. <em>IEEE Transactions on Automatic Control</em>,
+        54(3), 619–624.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter12/Lesson4.html">
+          Lesson 4: Real-Time Scheduling and Jitter Effects
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Control Barrier Functions (CBF) Fundamentals
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

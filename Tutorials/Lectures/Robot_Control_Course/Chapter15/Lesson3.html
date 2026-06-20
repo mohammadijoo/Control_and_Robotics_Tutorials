@@ -1,0 +1,1870 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 15: Learning-Augmented Control (Non-RL Focus) - Lesson 3: Gaussian Process (GP) Error Compensation | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 15: Learning-Augmented Control (Non-RL Focus)</h1>
+    <h3><strong>Lesson 3: Gaussian Process (GP) Error Compensation</strong></h3>
+    <p>
+      This lesson introduces Gaussian process (GP) regression as a nonparametric
+      tool to learn residual robot dynamics and compensate modeling errors
+      inside model-based controllers. We develop the GP posterior equations,
+      connect them to kernel ridge regression, and integrate GP residual models
+      into computed-torque control, with attention to stability and real-time
+      implementation. The focus is on using learning as an <em>add-on</em> to
+      existing controllers rather than replacing them.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview of GP Error Compensation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview of GP Error Compensation</h2>
+    <div class="down-content">
+      <p>
+        In earlier chapters, we designed controllers assuming a reasonably
+        accurate dynamics model. In practice, unmodeled friction, payload
+        changes, flexible elements, and calibration errors introduce a residual
+        dynamics term
+        <strong>\( d(\cdot) \)</strong> that degrades tracking performance.
+      </p>
+      <p>
+        A <em>learning-augmented controller</em> keeps the nominal model-based
+        structure (e.g., computed-torque) but augments it with a learned
+        estimate of this residual:
+      </p>
+      <h4 class="mathJax">\[ u = u_{\text{nom}}(x, r) + \hat d(x, r), \]</h4>
+      <p>
+        where <strong>\( x \)</strong> collects measured robot states (e.g.,
+        joint positions and velocities), <strong>\( r \)</strong> collects
+        reference signals (desired joint trajectories), and
+        <strong>\( \hat d \)</strong> is a learned function. A Gaussian process
+        provides:
+      </p>
+      <ul>
+        <li>A flexible, nonparametric regression model for \( d(\cdot) \).</li>
+        <li>
+          A <em>distribution</em> over functions, producing both a mean estimate
+          and predictive variance (uncertainty).
+        </li>
+        <li>
+          A natural way to incorporate prior smoothness and scale assumptions
+          via kernel functions.
+        </li>
+      </ul>
+      <p>At a high level, a GP-based error compensation pipeline looks like:</p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Robot + nominal controller"] --> B["Collect (state, reference, torque) data"]
+  B --> C["Compute residual = measured torque - nominal torque"]
+  C --> D["Form dataset X: inputs, y: residuals"]
+  D --> E["Train Gaussian process model"]
+  E --> F["Deploy GP: online residual prediction"]
+  F --> G["Command torque = nominal term + GP residual"]
+        </pre>
+      </div>
+      <p>
+        In the remainder of this lesson, we formalize the GP model, derive the
+        posterior, and embed \( \hat d \) into a tracking controller for robot
+        manipulators.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Gaussian Process Regression for Scalar Residuals -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Gaussian Process Regression for Scalar Residuals</h2>
+    <div class="down-content">
+      <p>
+        Consider a scalar residual function
+        <strong>\( f : \mathbb{R}^d \to \mathbb{R} \)</strong>, where
+        <strong>\( x \in \mathbb{R}^d \)</strong> encodes robot states and
+        references. We observe noisy samples
+        <strong>\( y_i = f(x_i) + \varepsilon_i \)</strong> with
+        <strong>\( \varepsilon_i \sim \mathcal{N}(0,\sigma_n^2) \)</strong>.
+      </p>
+      <p>
+        A Gaussian process prior specifies that any finite collection of
+        function values is jointly Gaussian:
+      </p>
+      <h4 class="mathJax">
+        \[ f(\cdot) \sim \mathcal{GP}(m(\cdot), k(\cdot,\cdot)), \]
+      </h4>
+      <p>
+        where \( m(x) \) is the mean function (often taken as \( 0 \)) and \(
+        k(x,x') \) is a positive semidefinite kernel encoding similarity. A
+        common choice is the squared-exponential (RBF) kernel:
+      </p>
+      <h4 class="mathJax">
+        \[ k(x,x') = \sigma_f^2 \exp\!\Big( -\tfrac{1}{2}(x - x')^\top
+        \Lambda^{-1} (x - x') \Big), \]
+      </h4>
+      <p>
+        with diagonal length-scale matrix
+        <strong
+          >\( \Lambda = \operatorname{diag}(\ell_1^2,\dots,\ell_d^2) \)</strong
+        >, signal variance \( \sigma_f^2 \), and noise variance \( \sigma_n^2
+        \).
+      </p>
+      <h3>2.1 Joint prior and posterior</h3>
+      <p>
+        Stack \( N \) training inputs into
+        <strong
+          >\( X = [x_1,\dots,x_N]^\top \in \mathbb{R}^{N \times d} \)</strong
+        >
+        and outputs into
+        <strong>\( \mathbf{y} = [y_1,\dots,y_N]^\top \)</strong>. Let
+        <strong>\( \mathbf{f} = [f(x_1),\dots,f(x_N)]^\top \)</strong>. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{f} \sim \mathcal{N}(\mathbf{0}, \mathbf{K}), \quad
+        \mathbf{K}_{ij} = k(x_i,x_j), \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \mathbf{y} \mid \mathbf{f} \sim \mathcal{N}(\mathbf{f}, \sigma_n^2
+        \mathbf{I}_N). \]
+      </h4>
+      <p>The marginal prior over \( \mathbf{y} \) is then</p>
+      <h4 class="mathJax">
+        \[ \mathbf{y} \sim \mathcal{N}\big(\mathbf{0}, \mathbf{K}_y\big), \quad
+        \mathbf{K}_y = \mathbf{K} + \sigma_n^2 \mathbf{I}_N. \]
+      </h4>
+      <p>
+        For a test input \( x_\ast \), define \( f_\ast = f(x_\ast) \), kernel
+        vector
+        <strong
+          >\( \mathbf{k}_\ast = [k(x_1,x_\ast),\dots,k(x_N,x_\ast)]^\top
+          \)</strong
+        >, and scalar \( k_{\ast\ast} = k(x_\ast,x_\ast) \). The joint prior of
+        <strong>\( [\mathbf{y}^\top, f_\ast]^\top \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix} \mathbf{y} \\ f_\ast \end{bmatrix} \sim
+        \mathcal{N}\!\left( \begin{bmatrix} \mathbf{0} \\ 0 \end{bmatrix},
+        \begin{bmatrix} \mathbf{K}_y & \mathbf{k}_\ast \\ \mathbf{k}_\ast^\top &
+        k_{\ast\ast} \end{bmatrix}\right). \]
+      </h4>
+      <h3>2.2 Posterior mean and variance (derivation)</h3>
+      <p>
+        Using the conditioning formula for multivariate Gaussians, the posterior
+        distribution of \( f_\ast \) given the data is
+      </p>
+      <h4 class="mathJax">
+        \[ f_\ast \mid X,\mathbf{y},x_\ast \sim \mathcal{N}\big(\mu_\ast,
+        \sigma_\ast^2\big), \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \mu_\ast = \mathbf{k}_\ast^\top \mathbf{K}_y^{-1} \mathbf{y}, \quad
+        \sigma_\ast^2 = k_{\ast\ast} - \mathbf{k}_\ast^\top \mathbf{K}_y^{-1}
+        \mathbf{k}_\ast. \]
+      </h4>
+      <p>
+        <strong>Proof sketch.</strong> For a jointly Gaussian vector \(
+        \begin{bmatrix} a \\ b \end{bmatrix} \) with zero mean and covariance \(
+        \begin{bmatrix} \Sigma_{aa} & \Sigma_{ab} \\ \Sigma_{ba} & \Sigma_{bb}
+        \end{bmatrix} \), the conditional distribution of \( b \mid a \) is
+        Gaussian with
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbb{E}[b \mid a] = \Sigma_{ba}\Sigma_{aa}^{-1} a, \quad
+        \operatorname{Cov}(b \mid a) = \Sigma_{bb} -
+        \Sigma_{ba}\Sigma_{aa}^{-1}\Sigma_{ab}. \]
+      </h4>
+      <p>
+        Identifying \( a \equiv \mathbf{y} \), \( b \equiv f_\ast \), \(
+        \Sigma_{aa} \equiv \mathbf{K}_y \), \( \Sigma_{ab} \equiv
+        \mathbf{k}_\ast \), \( \Sigma_{bb} \equiv k_{\ast\ast} \), we obtain the
+        claimed expressions.
+      </p>
+      <h3>2.3 Equivalence to kernel ridge regression</h3>
+      <p>
+        Defining
+        <strong>\( \boldsymbol{\alpha} = \mathbf{K}_y^{-1} \mathbf{y} \)</strong
+        >, the posterior mean can be written as
+      </p>
+      <h4 class="mathJax">
+        \[ \mu_\ast = \mathbf{k}_\ast^\top \boldsymbol{\alpha} = \sum_{i=1}^N
+        \alpha_i k(x_i,x_\ast). \]
+      </h4>
+      <p>
+        This coincides with the predictor of kernel ridge regression with
+        regularization parameter \( \lambda = \sigma_n^2 \). Thus, a GP with
+        Gaussian noise can be viewed as kernel ridge regression together with a
+        principled predictive variance \( \sigma_\ast^2 \).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: GP Models for Robot Residual Dynamics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. GP Models for Robot Residual Dynamics</h2>
+    <div class="down-content">
+      <p>
+        We recall the standard rigid-body manipulator dynamics (which you know
+        from kinematics and dynamics):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q})\ddot{\mathbf{q}} +
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}(\mathbf{q}) = \boldsymbol{\tau}, \]
+      </h4>
+      <p>
+        where \( \mathbf{q} \in \mathbb{R}^n \) are joint positions, \(
+        \dot{\mathbf{q}} \) joint velocities, \( \ddot{\mathbf{q}} \) joint
+        accelerations, \( \mathbf{M}(\mathbf{q}) \) is the inertia matrix, \(
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}}) \) collects Coriolis and
+        centripetal terms, \( \mathbf{g}(\mathbf{q}) \) is gravity, and \(
+        \boldsymbol{\tau} \) the commanded joint torques.
+      </p>
+      <h3>3.1 Nominal model and residual torque</h3>
+      <p>
+        Suppose we have a nominal model \( \mathbf{M}_0(\mathbf{q}),
+        \mathbf{C}_0(\mathbf{q},\dot{\mathbf{q}}), \mathbf{g}_0(\mathbf{q}) \)
+        from CAD or identification. Then the
+        <em>nominal torque</em> needed to produce the measured motion is
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\tau}_{\text{nom,inv}} =
+        \mathbf{M}_0(\mathbf{q})\ddot{\mathbf{q}} +
+        \mathbf{C}_0(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}_0(\mathbf{q}). \]
+      </h4>
+      <p>The torque residual is then</p>
+      <h4 class="mathJax">
+        \[ \mathbf{d}(\mathbf{x}) = \boldsymbol{\tau} -
+        \boldsymbol{\tau}_{\text{nom,inv}} = \boldsymbol{\tau} - \big(
+        \mathbf{M}_0(\mathbf{q})\ddot{\mathbf{q}} +
+        \mathbf{C}_0(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}_0(\mathbf{q}) \big), \]
+      </h4>
+      <p>
+        where the input vector \( \mathbf{x} \) typically includes
+        <strong>\( \mathbf{q}, \dot{\mathbf{q}}, \ddot{\mathbf{q}} \)</strong>,
+        possibly desired quantities and task variables. For GP modeling we
+        choose, for example,
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x} = \begin{bmatrix} \mathbf{q}^\top & \dot{\mathbf{q}}^\top
+        & \ddot{\mathbf{q}}^\top \end{bmatrix}^\top \in \mathbb{R}^{3n}. \]
+      </h4>
+      <h3>3.2 Vector-valued outputs via independent GPs</h3>
+      <p>
+        The residual torque \( \mathbf{d}(\mathbf{x}) \in \mathbb{R}^n \) is
+        vector-valued. A simple and common approximation is to model each joint
+        residual independently with its own scalar GP:
+      </p>
+      <h4 class="mathJax">
+        \[ d_j(\cdot) \sim \mathcal{GP}\big(0, k_j(\cdot,\cdot)\big), \quad j =
+        1,\dots,n, \]
+      </h4>
+      <p>
+        trained on the same input vectors \( \mathbf{x} \) but different outputs
+        \( y^{(j)}_i = d_j(\mathbf{x}_i) \). This ignores cross-correlation
+        among joints but is significantly simpler and often effective in
+        practice.
+      </p>
+      <p>
+        More advanced constructions use multi-output kernels to jointly model
+        correlations between joint residuals, but we will stay with independent
+        GPs here.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: GP-Augmented Computed-Torque Control -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. GP-Augmented Computed-Torque Control</h2>
+    <div class="down-content">
+      <p>
+        Consider the standard computed-torque / inverse-dynamics control law
+        (with approximate model) for tracking a desired trajectory \(
+        \mathbf{q}_d(t) \), \( \dot{\mathbf{q}}_d(t) \), \(
+        \ddot{\mathbf{q}}_d(t) \). Define tracking error \( \mathbf{e} =
+        \mathbf{q}_d - \mathbf{q} \), \( \dot{\mathbf{e}} = \dot{\mathbf{q}}_d -
+        \dot{\mathbf{q}} \) and choose positive definite gain matrices \(
+        \mathbf{K}_p, \mathbf{K}_d \).
+      </p>
+      <p>
+        The <em>nominal</em> computed-torque law based on the approximate model
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\tau}_{\text{nom}} = \mathbf{M}_0(\mathbf{q}) \big(
+        \ddot{\mathbf{q}}_d + \mathbf{K}_d \dot{\mathbf{e}} + \mathbf{K}_p
+        \mathbf{e} \big) +
+        \mathbf{C}_0(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}_0(\mathbf{q}). \]
+      </h4>
+      <p>
+        If the nominal model were exact, the resulting error dynamics would
+        (approximately) satisfy
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{\mathbf{e}} + \mathbf{K}_d \dot{\mathbf{e}} + \mathbf{K}_p
+        \mathbf{e} = \mathbf{0}, \]
+      </h4>
+      <p>
+        which is exponentially stable for appropriate gains. With model
+        mismatch, there is an additional disturbance term.
+      </p>
+      <h3>4.1 Error dynamics with residual compensation</h3>
+      <p>Let the true dynamics be</p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q})\ddot{\mathbf{q}} +
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}(\mathbf{q}) = \boldsymbol{\tau}. \]
+      </h4>
+      <p>Substitute the GP-augmented input</p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\tau} = \boldsymbol{\tau}_{\text{nom}} +
+        \hat{\mathbf{d}}(\mathbf{x}), \]
+      </h4>
+      <p>
+        where \( \hat{\mathbf{d}}(\mathbf{x}) \) is the vector of GP posterior
+        means for each joint. After standard manipulations (similar to the
+        computed-torque derivation) one can show
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q}) \big(\ddot{\mathbf{e}} + \mathbf{K}_d
+        \dot{\mathbf{e}} + \mathbf{K}_p \mathbf{e}\big) = \mathbf{d}(\mathbf{x})
+        - \hat{\mathbf{d}}(\mathbf{x}), \]
+      </h4>
+      <p>
+        where \( \mathbf{d}(\mathbf{x}) \) is the true residual torque defined
+        in Section 3. Thus the closed-loop error dynamics are nominally linear
+        and exponentially stable, but driven by the
+        <em>residual prediction error</em>
+        \( \mathbf{d} - \hat{\mathbf{d}} \).
+      </p>
+      <h3>4.2 Practical stability with bounded GP error</h3>
+      <p>
+        Assume the standard manipulator properties (e.g., bounded, symmetric
+        positive definite inertia matrix) so that there exist constants \( 0
+        &lt; m_{\min} \leq m_{\max} \) such that
+      </p>
+      <h4 class="mathJax">
+        \[ m_{\min} \|\mathbf{v}\|^2 \leq \mathbf{v}^\top \mathbf{M}(\mathbf{q})
+        \mathbf{v} \leq m_{\max} \|\mathbf{v}\|^2 \quad \forall \mathbf{q},
+        \mathbf{v}. \]
+      </h4>
+      <p>Consider the Lyapunov function</p>
+      <h4 class="mathJax">
+        \[ V(\mathbf{e},\dot{\mathbf{e}}) = \tfrac{1}{2} \dot{\mathbf{e}}^\top
+        \mathbf{M}(\mathbf{q}) \dot{\mathbf{e}} + \tfrac{1}{2} \mathbf{e}^\top
+        \mathbf{K}_p \mathbf{e}. \]
+      </h4>
+      <p>
+        Using standard manipulator properties (skew-symmetry of \(
+        \dot{\mathbf{M}} - 2\mathbf{C} \)), one can derive
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{V} = - \dot{\mathbf{e}}^\top \mathbf{K}_d \dot{\mathbf{e}} +
+        \dot{\mathbf{e}}^\top \big( \mathbf{d}(\mathbf{x}) -
+        \hat{\mathbf{d}}(\mathbf{x}) \big). \]
+      </h4>
+      <p>Applying the Cauchy–Schwarz inequality,</p>
+      <h4 class="mathJax">
+        \[ \dot{V} \leq - \lambda_{\min}(\mathbf{K}_d) \|\dot{\mathbf{e}}\|^2 +
+        \|\dot{\mathbf{e}}\| \big\| \mathbf{d}(\mathbf{x}) -
+        \hat{\mathbf{d}}(\mathbf{x}) \big\|. \]
+      </h4>
+      <p>
+        If the GP prediction error is bounded, \( \big\| \mathbf{d}(\mathbf{x})
+        - \hat{\mathbf{d}}(\mathbf{x}) \big\| \leq \bar{\delta} \) in the region
+        of interest, then outside a small ball of radius proportional to \(
+        \bar{\delta} \) the negative quadratic term dominates, and the closed
+        loop is <em>practically exponentially stable</em>
+        (tracking error converges to a small neighborhood of zero). This shows
+        how improved GP accuracy directly reduces steady-state tracking error.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Hyperparameter Learning and Real-Time Issues -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Hyperparameter Learning and Real-Time Issues</h2>
+    <div class="down-content">
+      <p>
+        GP behavior is controlled by kernel hyperparameters \( \theta =
+        (\sigma_f^2, \ell_1,\dots,\ell_d, \sigma_n^2) \). Given training data \(
+        (X,\mathbf{y}) \), the log marginal likelihood is
+      </p>
+      <h4 class="mathJax">
+        \[ \log p(\mathbf{y}\mid X,\theta) = -\tfrac{1}{2} \mathbf{y}^\top
+        \mathbf{K}_y^{-1} \mathbf{y} -\tfrac{1}{2} \log|\mathbf{K}_y|
+        -\tfrac{N}{2}\log(2\pi), \]
+      </h4>
+      <p>
+        which can be maximized with respect to \( \theta \) using gradient-based
+        methods. The gradients have closed forms in terms of \( \partial
+        \mathbf{K}_y / \partial \theta_i \).
+      </p>
+      <p>
+        However, exact GP inference scales as \( \mathcal{O}(N^3) \) in the
+        number of data points \( N \) due to matrix inversion. For real-time
+        robot control at high servo rates, one typically:
+      </p>
+      <ul>
+        <li>Limits \( N \) (e.g., uses a sliding window of recent data).</li>
+        <li>
+          Employs sparse GPs (inducing points) or structured approximations
+          (beyond this lesson).
+        </li>
+        <li>
+          Precomputes \( \mathbf{K}_y^{-1} \) offline and only evaluates \(
+          \mu_\ast \) online.
+        </li>
+      </ul>
+      <p>A typical implementation flow is:</p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Offline: collect batch data"] --> B["Tune GP hyperparameters by marginal likelihood"]
+  B --> C["Precompute inverse of Ky"]
+  C --> D["Store GP parameters on controller"]
+  D --> E["Online: each control cycle"]
+  E --> F["Form input x from sensors + reference"]
+  F --> G["Evaluate GP mean for residual"]
+  G --> H["Add residual to nominal torque and send to actuators"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation — 1-DOF GP Error Compensation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Implementation &mdash; 1-DOF GP Error Compensation</h2>
+    <div class="down-content">
+      <p>
+        We implement a simple GP-based residual compensator for a 1-DOF rotary
+        joint using <code>scikit-learn</code> and <code>numpy</code>. The
+        nominal dynamics assume a simple pendulum model; the GP learns unmodeled
+        friction and disturbances.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+from numpy.linalg import norm
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+
+# Physical parameters (unknown to the controller, but used for data generation)
+m_true = 1.0
+l_true = 0.5
+g = 9.81
+b_true = 0.2  # viscous friction coefficient
+
+def true_dynamics(q, dq, tau):
+    """
+    1-DOF rotary joint:
+        I * ddq + b_true * dq + m_true * g * l_true * sin(q) = tau
+    """
+    I = m_true * l_true**2
+    ddq = (tau - b_true * dq - m_true * g * l_true * np.sin(q)) / I
+    return ddq
+
+# Nominal model used in controller (misses friction)
+m_nom = 0.9       # slightly wrong mass
+l_nom = 0.45
+def nominal_inverse_dynamics(q, dq, ddq):
+    I0 = m_nom * l_nom**2
+    tau_nom = I0 * ddq + m_nom * g * l_nom * np.sin(q)
+    return tau_nom
+
+# Generate training data under some excitation trajectory
+def generate_training_data(T=5.0, dt=0.01):
+    t = np.arange(0.0, T, dt)
+    N = t.size
+    q = 0.5 * np.sin(2.0 * t)
+    dq = np.gradient(q, dt)
+    ddq_des = np.gradient(dq, dt)
+
+    X = []
+    y = []
+
+    q_curr = 0.0
+    dq_curr = 0.0
+    for k in range(N):
+        # Nominal control: inverse dynamics for desired ddq plus PD
+        e = q[k] - q_curr
+        de = dq[k] - dq_curr
+        kp = 50.0
+        kd = 10.0
+        v = ddq_des[k] + kd * de + kp * e
+        tau_nom = nominal_inverse_dynamics(q_curr, dq_curr, v)
+
+        # Apply to true plant and simulate one step
+        ddq_true = true_dynamics(q_curr, dq_curr, tau_nom)
+        dq_curr = dq_curr + ddq_true * dt
+        q_curr = q_curr + dq_curr * dt
+
+        # Compute residual torque that would make nominal model exact
+        tau_inv_nom = nominal_inverse_dynamics(q_curr, dq_curr, ddq_true)
+        d = tau_nom - tau_inv_nom  # torque residual
+
+        x_k = np.array([q_curr, dq_curr, ddq_des[k]])
+        X.append(x_k)
+        y.append(d)
+
+    return np.asarray(X), np.asarray(y)
+
+X_train, y_train = generate_training_data()
+
+# Fit GP on residual torque
+kernel = 1.0 * RBF(length_scale=np.ones(3)) + WhiteKernel(noise_level=1e-4)
+gp = GaussianProcessRegressor(kernel=kernel, alpha=0.0, normalize_y=True)
+gp.fit(X_train, y_train)
+
+print("Trained GP kernel:", gp.kernel_)
+
+# Control loop with GP compensation
+def control_with_gp(q0, dq0, qd_fun, dqd_fun, ddqd_fun, T=3.0, dt=0.002):
+    t_grid = np.arange(0.0, T, dt)
+    q = q0
+    dq = dq0
+    traj = {"t": [], "q": [], "qd": [], "dq": [], "tau": []}
+
+    kp = 80.0
+    kd = 20.0
+
+    for t in t_grid:
+        qd = qd_fun(t)
+        dqd = dqd_fun(t)
+        ddqd = ddqd_fun(t)
+
+        e = qd - q
+        de = dqd - dq
+
+        v = ddqd + kd * de + kp * e
+        tau_nom = nominal_inverse_dynamics(q, dq, v)
+
+        x = np.array([[q, dq, ddqd]])
+        d_hat, sigma = gp.predict(x, return_std=True)
+        tau = tau_nom + d_hat[0]
+
+        ddq_true = true_dynamics(q, dq, tau)
+        dq = dq + ddq_true * dt
+        q = q + dq * dt
+
+        traj["t"].append(t)
+        traj["q"].append(q)
+        traj["qd"].append(qd)
+        traj["dq"].append(dq)
+        traj["tau"].append(tau)
+
+    for key in traj:
+        traj[key] = np.asarray(traj[key])
+    return traj
+
+# Example: track a slow sinusoid
+qd_fun = lambda t: 0.3 * np.sin(1.0 * t)
+dqd_fun = lambda t: 0.3 * np.cos(1.0 * t)
+ddqd_fun = lambda t: -0.3 * np.sin(1.0 * t)
+
+traj_gp = control_with_gp(0.0, 0.0, qd_fun, dqd_fun, ddqd_fun)
+
+print("Final position error:", traj_gp["qd"][-1] - traj_gp["q"][-1])
+      </code></pre>
+      <p>
+        In practice, you would compare the tracking performance of the nominal
+        controller with and without GP compensation, evaluate the reduction in
+        steady tracking error and sensitivity to disturbances, and check
+        real-time computation time of the GP prediction.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation — Simple GP Class with Eigen -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Implementation &mdash; Simple GP Class with Eigen</h2>
+    <div class="down-content">
+      <p>
+        In C++, robotics projects often rely on <code>Eigen</code> for linear
+        algebra and libraries such as RBDL or KDL for rigid-body dynamics. Below
+        is a minimal GP regression class for scalar residuals using an RBF
+        kernel. It can be used inside a joint-space controller that already
+        computes nominal torque from a dynamics library.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+#include &lt;vector&gt;
+
+class SimpleGP1D {
+public:
+    using Vec = Eigen::VectorXd;
+    using Mat = Eigen::MatrixXd;
+
+    SimpleGP1D(double length_scale,
+               double sigma_f,
+               double sigma_n)
+        : ell_(length_scale),
+          sigma_f_(sigma_f),
+          sigma_n_(sigma_n),
+          trained_(false) {}
+
+    void setTrainingData(const Mat&amp; X, const Vec&amp; y) {
+        X_ = X;
+        y_ = y;
+        const int N = static_cast&lt;int&gt;(y_.size());
+        Mat K(N, N);
+        for (int i = 0; i &lt; N; ++i) {
+            for (int j = 0; j &lt; N; ++j) {
+                K(i, j) = kernel(X_.row(i), X_.row(j));
+            }
+        }
+        Mat Ky = K
+               + (sigma_n_ * sigma_n_) * Mat::Identity(N, N);
+
+        // Precompute Ky^{-1} y using LDLT
+        Eigen::LDLT&lt;Mat&gt; ldlt(Ky);
+        alpha_ = ldlt.solve(y_);
+        trained_ = true;
+    }
+
+    double predict(const Vec&amp; x_star, double* var_out = nullptr) const {
+        assert(trained_);
+        const int N = static_cast&lt;int&gt;(y_.size());
+        Vec k_star(N);
+        for (int i = 0; i &lt; N; ++i) {
+            k_star(i) = kernel(X_.row(i), x_star.transpose());
+        }
+        double mean = k_star.dot(alpha_);
+
+        if (var_out) {
+            // For simplicity, we omit efficient reuse of the factorization and
+            // compute Ky^{-1} k_star directly.
+            const int Nloc = N;
+            Mat K(Nloc, Nloc);
+            for (int i = 0; i &lt; Nloc; ++i) {
+                for (int j = 0; j &lt; Nloc; ++j) {
+                    K(i, j) = kernel(X_.row(i), X_.row(j));
+                }
+            }
+            Mat Ky = K
+                   + (sigma_n_ * sigma_n_) * Mat::Identity(Nloc, Nloc);
+            Eigen::LDLT&lt;Mat&gt; ldlt(Ky);
+            Vec v = ldlt.solve(k_star);
+            double k_ss = kernel(x_star.transpose(), x_star.transpose());
+            *var_out = k_ss - k_star.dot(v);
+        }
+
+        return mean;
+    }
+
+private:
+    double kernel(const Eigen::RowVectorXd&amp; x1,
+                  const Eigen::RowVectorXd&amp; x2) const {
+        // Isotropic RBF kernel
+        double r2 = (x1 - x2).squaredNorm();
+        return sigma_f_ * sigma_f_ * std::exp(-0.5 * r2 / (ell_ * ell_));
+    }
+
+    Mat X_;
+    Vec y_;
+    Vec alpha_;      // Ky^{-1} y
+    double ell_;
+    double sigma_f_;
+    double sigma_n_;
+    bool trained_;
+};
+
+// Example use inside a joint controller loop
+double computeTorqueWithGP(
+    const Eigen::VectorXd&amp; q,
+    const Eigen::VectorXd&amp; dq,
+    const Eigen::VectorXd&amp; qd,
+    const Eigen::VectorXd&amp; dqd,
+    const Eigen::VectorXd&amp; ddqd,
+    SimpleGP1D&amp; gp,
+    double tau_nom)  // scalar nominal torque for 1-DOF
+{
+    Eigen::VectorXd x(3);
+    x(0) = q(0);
+    x(1) = dq(0);
+    x(2) = ddqd(0);
+    double d_hat = gp.predict(x);
+    double tau = tau_nom + d_hat;
+    return tau;
+}
+      </code></pre>
+      <p>
+        In a full robot codebase, the nominal torque would be computed from a
+        rigid-body dynamics library, and the GP input vector would include the
+        relevant joint states and references. For multi-DOF robots, one can
+        maintain one <code>SimpleGP1D</code> instance per joint.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation — GP Wrapper with EJML -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Implementation &mdash; GP Wrapper with EJML</h2>
+    <div class="down-content">
+      <p>
+        In Java-based robotics stacks (for example, some ROS clients or custom
+        middleware), one can implement GP regression using a numerical linear
+        algebra library such as <code>EJML</code>. Below is a minimal sketch of
+        a scalar GP that can be called from a joint controller:
+      </p>
+      <pre><code class="language-java">
+import org.ejml.simple.SimpleMatrix;
+
+public class SimpleGP1D {
+    private SimpleMatrix X;       // N x d
+    private SimpleMatrix y;       // N x 1
+    private SimpleMatrix alpha;   // N x 1, Ky^{-1} y
+
+    private double ell;
+    private double sigmaF;
+    private double sigmaN;
+    private boolean trained = false;
+
+    public SimpleGP1D(double ell, double sigmaF, double sigmaN) {
+        this.ell = ell;
+        this.sigmaF = sigmaF;
+        this.sigmaN = sigmaN;
+    }
+
+    private double kernel(SimpleMatrix x1, SimpleMatrix x2) {
+        SimpleMatrix diff = x1.minus(x2);
+        double r2 = diff.transpose().mult(diff).get(0);
+        return sigmaF * sigmaF * Math.exp(-0.5 * r2 / (ell * ell));
+    }
+
+    public void setTrainingData(double[][] Xdata, double[] ydata) {
+        int N = ydata.length;
+        int d = Xdata[0].length;
+        X = new SimpleMatrix(N, d);
+        y = new SimpleMatrix(N, 1);
+
+        for (int i = 0; i &lt; N; ++i) {
+            y.set(i, 0, ydata[i]);
+            for (int j = 0; j &lt; d; ++j) {
+                X.set(i, j, Xdata[i][j]);
+            }
+        }
+
+        SimpleMatrix K = new SimpleMatrix(N, N);
+        for (int i = 0; i &lt; N; ++i) {
+            for (int j = 0; j &lt; N; ++j) {
+                SimpleMatrix xi = X.extractVector(true, i);
+                SimpleMatrix xj = X.extractVector(true, j);
+                K.set(i, j, kernel(xi, xj));
+            }
+        }
+        SimpleMatrix Ky = K.plus(SimpleMatrix.identity(N).scale(sigmaN * sigmaN));
+        alpha = Ky.solve(y);
+        trained = true;
+    }
+
+    public double predict(double[] xStar) {
+        if (!trained) {
+            throw new IllegalStateException("GP not trained");
+        }
+        int N = X.numRows();
+        SimpleMatrix kStar = new SimpleMatrix(N, 1);
+        SimpleMatrix xStarMat = new SimpleMatrix(1, xStar.length, true, xStar);
+        for (int i = 0; i &lt; N; ++i) {
+            SimpleMatrix xi = X.extractVector(true, i);
+            kStar.set(i, 0, kernel(xi, xStarMat));
+        }
+        double mean = kStar.transpose().mult(alpha).get(0);
+        return mean;
+    }
+}
+
+// Example usage inside a joint controller
+public class JointController {
+    private SimpleGP1D gp;
+    // Nominal dynamics and PD gains are assumed to be implemented elsewhere.
+
+    public JointController(SimpleGP1D gpModel) {
+        this.gp = gpModel;
+    }
+
+    public double computeTorque(double q, double dq,
+                                double qd, double dqd, double ddqd,
+                                double tauNominal) {
+        double[] x = new double[] { q, dq, ddqd };
+        double dHat = gp.predict(x);
+        return tauNominal + dHat;
+    }
+}
+      </code></pre>
+      <p>
+        Here the robotics-specific part (e.g., kinematics, dynamics, ROS
+        messaging) is decoupled from the GP code, which only requires linear
+        algebra.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB has built-in support for Gaussian process regression via
+        <code>fitrgp</code> (Statistics and Machine Learning Toolbox). Together
+        with Robotics System Toolbox, one can easily integrate GP residuals into
+        a Simulink controller.
+      </p>
+      <pre><code class="language-matlab">
+% X_train: N x d matrix of inputs [q, dq, ddq_des, ...]
+% y_train: N x 1 vector of torque residuals
+load("training_data.mat","X_train","y_train");
+
+gprMdl = fitrgp(X_train, y_train, ...
+    "KernelFunction","squaredexponential", ...
+    "KernelScale","auto", ...
+    "Sigma",1e-3, ...
+    "Standardize",true);
+
+% Example: online control step (inside a control loop or Simulink MATLAB Function block)
+function tau = gp_augmented_torque(q, dq, qd, dqd, ddqd)
+    % Nominal computed-torque (for 1-DOF example)
+    m_nom = 0.9;
+    l_nom = 0.45;
+    g = 9.81;
+    kp = 80;
+    kd = 20;
+
+    e = qd - q;
+    de = dqd - dq;
+    v = ddqd + kd * de + kp * e;
+
+    I0 = m_nom * l_nom^2;
+    tau_nom = I0 * v + m_nom * g * l_nom * sin(q);
+
+    % GP input vector must match training features
+    x = [q, dq, ddqd];
+    d_hat = predict(gprMdl, x);
+
+    tau = tau_nom + d_hat;
+end
+      </code></pre>
+      <p>In Simulink, one can either:</p>
+      <ul>
+        <li>
+          Use a MATLAB Function block calling <code>predict(gprMdl,...)</code>,
+          or
+        </li>
+        <li>
+          Use the Regression GP block (if available) and feed it the same
+          features used in training.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        In Wolfram Mathematica, a convenient way to perform GP regression is via
+        <code>Predict</code> with method <code>"GaussianProcess"</code>. Below
+        is a basic residual model for a single joint.
+      </p>
+      <pre><code class="language-mathematica">
+(* Training data: list of rules {x_i -&gt; y_i} where x_i is a feature vector *)
+trainingInputs = {
+  {q1, dq1, ddq1},
+  {q2, dq2, ddq2},
+  (* ... *)
+};
+trainingTargets = {d1, d2, (* ... *)};
+
+trainingData = Thread[trainingInputs -&gt; trainingTargets];
+
+gpModel = Predict[
+  trainingData,
+  Method -&gt; "GaussianProcess"
+];
+
+(* Nominal torque (for 1-DOF example) *)
+nominalTorque[q_, dq_, qd_, dqd_, ddqd_] :=
+ Module[{mNom = 0.9, lNom = 0.45, g = 9.81, kp = 80., kd = 20.,
+   e, de, v, I0, tauNom},
+  e = qd - q;
+  de = dqd - dq;
+  v = ddqd + kd*de + kp*e;
+  I0 = mNom*lNom^2;
+  tauNom = I0*v + mNom*g*lNom*Sin[q];
+  tauNom
+ ]
+
+(* GP-augmented torque *)
+gpAugmentedTorque[q_, dq_, qd_, dqd_, ddqd_] :=
+ Module[{x, dHat, tauNom},
+  x = {q, dq, ddqd};
+  dHat = gpModel[x];
+  tauNom = nominalTorque[q, dq, qd, dqd, ddqd];
+  tauNom + dHat
+ ]
+      </code></pre>
+      <p>
+        The function <code>gpAugmentedTorque</code> can be called from a
+        numerical integration of the manipulator dynamics, or from an external
+        interface to a robotics simulator, to study GP error compensation
+        effects.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Posterior mean derivation):</strong>
+        Let \( f(\cdot) \sim \mathcal{GP}(0,k(\cdot,\cdot)) \) and noisy
+        observations \( y_i = f(x_i) + \varepsilon_i \) with \( \varepsilon_i
+        \sim \mathcal{N}(0,\sigma_n^2) \) independently. Show that the posterior
+        mean at a test input \( x_\ast \) is \( \mu_\ast = \mathbf{k}_\ast^\top
+        \mathbf{K}_y^{-1} \mathbf{y} \), with notation as in Section 2.
+      </p>
+      <p>
+        <strong>Solution:</strong> The joint Gaussian distribution of \(
+        [\mathbf{y}^\top, f_\ast]^\top \) is
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix} \mathbf{y} \\ f_\ast \end{bmatrix} \sim
+        \mathcal{N}\!\left( \begin{bmatrix} \mathbf{0} \\ 0 \end{bmatrix},
+        \begin{bmatrix} \mathbf{K}_y & \mathbf{k}_\ast \\ \mathbf{k}_\ast^\top &
+        k_{\ast\ast} \end{bmatrix}\right). \]
+      </h4>
+      <p>
+        Using the general Gaussian conditioning formula (see Section 2.2), we
+        have
+      </p>
+      <h4 class="mathJax">
+        \[ \mu_\ast = \mathbb{E}[f_\ast \mid \mathbf{y}] = \mathbf{k}_\ast^\top
+        \mathbf{K}_y^{-1} \mathbf{y}, \]
+      </h4>
+      <p>which is exactly the claimed expression.</p>
+
+      <p>
+        <strong>Problem 2 (Kernel ridge interpretation):</strong>
+        Consider kernel ridge regression with loss
+      </p>
+      <h4 class="mathJax">
+        \[ J(\boldsymbol{\alpha}) = \big\| \mathbf{y} -
+        \mathbf{K}\boldsymbol{\alpha} \big\|_2^2 + \lambda
+        \boldsymbol{\alpha}^\top \mathbf{K} \boldsymbol{\alpha}. \]
+      </h4>
+      <p>
+        Show that the optimal coefficient vector is \( \boldsymbol{\alpha}^\star
+        = (\mathbf{K} + \lambda \mathbf{I})^{-1}\mathbf{y} \) and the predictor
+        \( \hat f(x_\ast) = \mathbf{k}_\ast^\top \boldsymbol{\alpha}^\star \)
+        equals the GP posterior mean with \( \lambda = \sigma_n^2 \).
+      </p>
+      <p>
+        <strong>Solution:</strong> Differentiating \( J \) with respect to \(
+        \boldsymbol{\alpha} \) and setting to zero:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial J}{\partial \boldsymbol{\alpha}} =
+        -2\mathbf{K}^\top(\mathbf{y} - \mathbf{K}\boldsymbol{\alpha}) + 2\lambda
+        \mathbf{K}\boldsymbol{\alpha} = -2\mathbf{K}(\mathbf{y} -
+        \mathbf{K}\boldsymbol{\alpha}) + 2\lambda \mathbf{K}\boldsymbol{\alpha}
+        = \mathbf{0}. \]
+      </h4>
+      <p>
+        Because \( \mathbf{K} \) is symmetric, \( \mathbf{K}\mathbf{y} -
+        \mathbf{K}^2\boldsymbol{\alpha} + \lambda \mathbf{K}\boldsymbol{\alpha}
+        = \mathbf{0} \), so
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{K}\mathbf{y} = \mathbf{K}(\mathbf{K} + \lambda
+        \mathbf{I})\boldsymbol{\alpha}. \]
+      </h4>
+      <p>
+        Assuming \( \mathbf{K} \) is invertible, we obtain \( \mathbf{y} =
+        (\mathbf{K} + \lambda \mathbf{I})\boldsymbol{\alpha} \), hence
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\alpha}^\star = (\mathbf{K} + \lambda
+        \mathbf{I})^{-1}\mathbf{y}. \]
+      </h4>
+      <p>
+        Setting \( \lambda = \sigma_n^2 \) and noting that \( \mathbf{K}_y =
+        \mathbf{K} + \sigma_n^2 \mathbf{I} \), we have \(
+        \boldsymbol{\alpha}^\star = \mathbf{K}_y^{-1} \mathbf{y} \), so the
+        predictor
+      </p>
+      <h4 class="mathJax">
+        \[ \hat f(x_\ast) = \mathbf{k}_\ast^\top \boldsymbol{\alpha}^\star =
+        \mathbf{k}_\ast^\top \mathbf{K}_y^{-1} \mathbf{y} \]
+      </h4>
+      <p>matches the GP posterior mean \( \mu_\ast \).</p>
+
+      <p>
+        <strong>Problem 3 (Residual-based error dynamics):</strong>
+        For an \( n \)-DOF manipulator with GP residual compensation as in
+        Section 4, show that the error dynamics satisfy
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot{\mathbf{e}} + \mathbf{K}_d \dot{\mathbf{e}} + \mathbf{K}_p
+        \mathbf{e} = \mathbf{M}^{-1}(\mathbf{q}) \big( \mathbf{d}(\mathbf{x}) -
+        \hat{\mathbf{d}}(\mathbf{x}) \big). \]
+      </h4>
+      <p>
+        <strong>Solution:</strong> Starting from the true dynamics \(
+        \mathbf{M}\ddot{\mathbf{q}} + \mathbf{C}\dot{\mathbf{q}} + \mathbf{g} =
+        \boldsymbol{\tau} \), substitute \( \boldsymbol{\tau} =
+        \boldsymbol{\tau}_{\text{nom}} + \hat{\mathbf{d}}(\mathbf{x}) \), with
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\tau}_{\text{nom}} = \mathbf{M}_0 \big(
+        \ddot{\mathbf{q}}_d + \mathbf{K}_d \dot{\mathbf{e}} + \mathbf{K}_p
+        \mathbf{e} \big) + \mathbf{C}_0\dot{\mathbf{q}} + \mathbf{g}_0. \]
+      </h4>
+      <p>
+        After adding and subtracting the true model terms and rearranging, one
+        finds
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}\big( \ddot{\mathbf{q}}_d + \mathbf{K}_d \dot{\mathbf{e}} +
+        \mathbf{K}_p \mathbf{e} - \ddot{\mathbf{q}} \big) =
+        \mathbf{d}(\mathbf{x}) - \hat{\mathbf{d}}(\mathbf{x}), \]
+      </h4>
+      <p>
+        where \( \mathbf{d}(\mathbf{x}) \) collects modeling errors. Using \(
+        \ddot{\mathbf{e}} = \ddot{\mathbf{q}}_d - \ddot{\mathbf{q}} \) and left
+        multiplying by \( \mathbf{M}^{-1} \) yields the desired equation.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Predictive variance at a point):</strong>
+        Consider a scalar GP with RBF kernel and noise variance \( \sigma_n^2
+        \). Suppose we have two training points \( x_1, x_2 \in \mathbb{R} \)
+        with outputs \( y_1, y_2 \), and we predict at \( x_\ast = x_1 \). Show
+        that the predictive variance satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ \sigma_\ast^2 = k(x_1,x_1) - \mathbf{k}_\ast^\top \mathbf{K}_y^{-1}
+        \mathbf{k}_\ast \leq \sigma_n^2, \]
+      </h4>
+      <p>
+        where equality holds only if \( x_2 \) is sufficiently far from \( x_1
+        \) (so that \( k(x_1,x_2) \approx 0 \)).
+      </p>
+      <p>
+        <strong>Solution:</strong> At \( x_\ast = x_1 \), the prior variance is
+        \( k(x_1,x_1) \). Observing \( y_1 \) at the same location reduces
+        uncertainty to at most the noise variance \( \sigma_n^2 \) because the
+        GP must explain the noisy observation. The RBF kernel decays with
+        distance, so as \( |x_2 - x_1| \) grows, the off-diagonal term \(
+        k(x_1,x_2) \) becomes negligible, and the information from \( x_2 \)
+        does not further reduce variance at \( x_1 \). A direct computation of
+        \( \mathbf{K}_y^{-1} \) for the \( 2 \times 2 \) case confirms that the
+        variance is bounded above by \( \sigma_n^2 \).
+      </p>
+
+      <p>
+        <strong>Problem 5 (Real-time complexity):</strong>
+        Suppose you have \( N \) training points and a GP with exact inference.
+        The controller runs at \( 1 \,\text{kHz} \), and each GP prediction
+        costs \( \mathcal{O}(N) \) after precomputing \( \mathbf{K}_y^{-1} \),
+        but updating the model with new data requires \( \mathcal{O}(N^3) \).
+        Discuss a strategy for using GP error compensation in real time without
+        violating the control rate.
+      </p>
+      <p><strong>Solution:</strong> A typical strategy is:</p>
+      <ul>
+        <li>
+          Perform heavy computations offline or at a slow rate: periodically
+          collect batches of data, retrain the GP (including matrix inversions)
+          at \( \mathcal{O}(N^3) \), and then freeze the parameters for online
+          use.
+        </li>
+        <li>
+          During the high-rate control loop, use only the precomputed \(
+          \mathbf{K}_y^{-1} \) to evaluate posterior means in \( \mathcal{O}(N)
+          \) time per cycle.
+        </li>
+        <li>
+          Constrain \( N \) (e.g., via a fixed-size buffer or inducing points)
+          so that GP prediction time remains well below the sampling period.
+        </li>
+      </ul>
+      <p>
+        This separation between slow model updates and fast prediction keeps the
+        learning component compatible with real-time constraints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we introduced Gaussian processes as a probabilistic
+        function approximator for residual robot dynamics. We derived the GP
+        posterior mean and variance from the joint Gaussian prior, related them
+        to kernel ridge regression, and embedded a GP residual model into
+        computed-torque control to compensate unmodeled torques. A
+        Lyapunov-based argument shows that as the GP residual prediction error
+        becomes small and bounded, the closed-loop error dynamics approach those
+        of the nominal controller, yielding practically exponential tracking.
+        Finally, we explored concrete implementations in Python, C++, Java,
+        MATLAB/Simulink, and Wolfram Mathematica, highlighting real-time
+        considerations for deploying GP-based error compensation in robot
+        controllers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Rasmussen, C.E., &amp; Williams, C.K.I. (2006).
+        <em>Gaussian Processes for Machine Learning</em>. MIT Press.
+      </li>
+      <li>
+        Solak, E., Murray-Smith, R., Leithead, W.E., Leith, D.J., &amp;
+        Rasmussen, C.E. (2003). Derivative observations in Gaussian process
+        models of dynamic systems.
+        <em>Advances in Neural Information Processing Systems</em>, 15,
+        1057&ndash;1064.
+      </li>
+      <li>
+        Kocijan, J., Murray-Smith, R., Rasmussen, C.E., &amp; Girard, A. (2004).
+        Gaussian process model based predictive control.
+        <em>Proceedings of the American Control Conference</em>,
+        2214&ndash;2219.
+      </li>
+      <li>
+        Umlauft, J., Beckers, T., &amp; Hirche, S. (2018). Uncertainty
+        propagation in Gaussian process dynamics for control.
+        <em>Proceedings of the IEEE Conference on Decision and Control</em>,
+        6449&ndash;6456.
+      </li>
+      <li>
+        Berkenkamp, F., Schoellig, A.P., &amp; Krause, A. (2016). Safe
+        controller optimization for quadrotors with Gaussian processes.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation</em
+        >, 491&ndash;496.
+      </li>
+      <li>
+        Marco, A., Hennig, P., Bohg, J., Schaal, S., &amp; Trimpe, S. (2016).
+        Automatic LQR tuning based on Gaussian process global optimization.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation</em
+        >, 270&ndash;277.
+      </li>
+      <li>
+        López-López, E., Camacho, E.F., &amp; Alamo, T. (2018). Robust adaptive
+        model predictive control based on Gaussian process models.
+        <em>Automatica</em>, 93, 222&ndash;229.
+      </li>
+      <li>
+        Kappler, D., Pastor, P., Kalakrishnan, M., Kohl, N., &amp; Asfour, T.
+        (2015). Data-driven online learning of kinematic and dynamic models for
+        reach and grasp. <em>Advanced Robotics</em>, 29(5), 329&ndash;343.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter15/Lesson2.html">
+          Lesson 2: Residual / Delta-Model Learning
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson4.html">
+          Lesson 4: Stability-Preserving Learning Wrappers
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="active-lesson" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,2343 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 15: Local Motion Generation (Mobile-Specific) - Lesson 1: Pure Pursuit and Geometric Path Tracking | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 15: Local Motion Generation (Mobile-Specific)</h1>
+    <h3><strong>Lesson 1: Pure Pursuit and Geometric Path Tracking</strong></h3>
+    <p>
+      This lesson develops the pure pursuit controller as a geometric
+      path-tracking law for mobile robots and ground vehicles. We derive the
+      curvature command from first principles, connect it to unicycle and
+      Ackermann command interfaces, and analyze local stability for small
+      tracking errors. The emphasis is on implementable geometry: selecting a
+      lookahead point on a discrete waypoint path, handling
+      saturation/constraints, and tuning lookahead distance as a function of
+      speed and curvature.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In the navigation stack (Chapter 14), the global planner outputs a
+        reference path (often a polyline of waypoints), and the local motion
+        generator must produce feasible commands that track that path while
+        respecting the mobile base. Pure pursuit is a
+        <em>geometric</em> tracking method: it “chases” a point ahead on the
+        path and computes a curvature command that would bring the robot to that
+        point along a circular arc.
+      </p>
+
+      <p>
+        We assume planar motion with pose
+        <strong> \( (x, y, \theta) \)</strong>, where
+        <strong>\(\theta\)</strong> is the heading (yaw). The controller uses:
+        <strong> \( \mathcal{P} = \{\mathbf{p}(s)\} \)</strong> (a path
+        parameterized by arclength <strong>\(s\)</strong>), a lookahead distance
+        <strong> \( L_d \)</strong>, and a selected lookahead point
+        <strong> \( \mathbf{p}_L = \mathbf{p}(s_L) \)</strong> with
+        <strong> \( s_L = s_c + L_d \)</strong>, where
+        <strong> \(s_c\)</strong> corresponds to the closest point on the path
+        to the current robot position.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  IN["Inputs: pose (x,y,theta), path waypoints, speed v"] --> CP["Find closest point on path (progress s_c)"]
+  CP --> LA["Select lookahead point p_L at s_L = s_c + Ld"]
+  LA --> TF["Transform p_L into robot frame: (x_r, y_r)"]
+  TF --> CURV["Compute curvature kappa = 2*y_r / (x_r^2 + y_r^2)"]
+  CURV --> LIM["Apply limits: |kappa|<=kappa_max, |delta|<=delta_max, |omega|<=omega_max"]
+  LIM --> OUT["Output command: (v, omega) or (v, delta)"]
+  OUT --> UPD["Robot executes; repeat at control rate"]
+        </pre>
+      </div>
+
+      <p>
+        Two common command interfaces: (i) <strong> \(v\)</strong> and
+        <strong>\(\omega\)</strong> for a unicycle/differential-drive interface;
+        (ii) <strong>\(v\)</strong> and steering angle
+        <strong>\(\delta\)</strong> for an Ackermann/bicycle interface. Pure
+        pursuit is often used as the lateral controller; longitudinal speed
+        control is typically handled separately (e.g., speed schedule vs
+        curvature, or a PID on speed).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Geometry Setup in Robot Coordinates -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Geometry Setup in Robot Coordinates</h2>
+    <div class="down-content">
+      <p>
+        Let the robot pose in the world frame be
+        <strong> \( (x, y, \theta) \)</strong>. Define the rotation matrix
+        <strong> \( \mathbf{R}(\theta) \in \mathbb{R}^{2\times 2} \)</strong> as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{R}(\theta) = \begin{bmatrix} \cos\theta &amp; -\sin\theta\\
+        \sin\theta &amp; \cos\theta \end{bmatrix}. \]
+      </h4>
+      <p>
+        For any point <strong> \(\mathbf{p}\)</strong> in world coordinates, its
+        coordinates in the robot body frame (x forward, y left) are
+        <strong>
+          \(\mathbf{p}^b = \mathbf{R}(\theta)^\top (\mathbf{p} -
+          \mathbf{t})\)</strong
+        >, where <strong> \(\mathbf{t} = [x, y]^\top\)</strong>. For the
+        lookahead point <strong> \(\mathbf{p}_L\)</strong>, write
+        <strong> \(\mathbf{p}_L^b = [x_r, y_r]^\top\)</strong>.
+      </p>
+
+      <p>
+        Pure pursuit constructs the unique circle that: (i) passes through the
+        robot origin in body frame; (ii) passes through the lookahead point
+        <strong> \( (x_r, y_r) \)</strong>; and (iii) has tangent aligned with
+        the robot heading at the origin. The circle’s curvature
+        <strong> \( \kappa \)</strong> determines the commanded yaw rate for a
+        unicycle model (Section 4).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Derivation of the Pure Pursuit Curvature -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Derivation of the Pure Pursuit Curvature</h2>
+    <div class="down-content">
+      <p>
+        In the robot body frame, place the robot at the origin with heading
+        along the +x axis. Consider a circle of radius
+        <strong> \(R \)</strong> whose center lies on the y-axis at
+        <strong>\((0, R)\)</strong>. This choice enforces that the tangent at
+        the origin is horizontal (aligned with +x).
+      </p>
+
+      <p>
+        The circle equation is <strong> \( x^2 + (y - R)^2 = R^2 \)</strong>.
+        Since <strong> \((x_r, y_r)\)</strong> lies on the circle, we have:
+      </p>
+      <h4 class="mathJax">
+        \[ x_r^2 + (y_r - R)^2 = R^2 \;\Rightarrow\; x_r^2 + y_r^2 - 2 R y_r = 0
+        \;\Rightarrow\; R = \frac{x_r^2 + y_r^2}{2 y_r}. \]
+      </h4>
+
+      <p>
+        The curvature is <strong> \( \kappa = 1/R \)</strong>. Therefore the
+        pure pursuit curvature command is:
+      </p>
+      <h4 class="mathJax">
+        \[ \boxed{\;\kappa = \frac{2 y_r}{x_r^2 + y_r^2}\;} \quad \text{(pure
+        pursuit curvature)}. \]
+      </h4>
+
+      <p>
+        If you define <strong> \(L = \sqrt{x_r^2 + y_r^2}\)</strong>, then
+        <strong> \( \kappa = 2 y_r / L^2 \)</strong>. Note the essential
+        qualitative properties:
+      </p>
+      <ul>
+        <li>
+          If the lookahead is directly ahead (<strong> \(y_r = 0\)</strong>),
+          then <strong> \(\kappa = 0\)</strong>
+          and the controller commands straight motion.
+        </li>
+        <li>
+          If the lookahead is left (<strong> \(y_r &gt; 0\)</strong>), then
+          <strong> \(\kappa &gt; 0\)</strong>
+          and the robot turns left; similarly for right turns.
+        </li>
+        <li>
+          Larger lookahead magnitude <strong> \(L\)</strong> reduces
+          <strong> \(|\kappa|\)</strong>, producing smoother but less aggressive
+          tracking.
+        </li>
+      </ul>
+
+      <p>
+        <strong>Implementation note.</strong> The derivation requires
+        <strong> \(y_r \neq 0\)</strong> to compute <strong>\(R\)</strong>.
+        Numerically, you handle <strong> \(|y_r|\)</strong> small by computing
+        <strong>\(\kappa\)</strong> via the formula above and clamping to a
+        maximum curvature <strong>\(\kappa_{\max}\)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Command Mapping for Common Mobile Bases -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Command Mapping for Common Mobile Bases</h2>
+    <div class="down-content">
+      <p>
+        Pure pursuit outputs a curvature command <strong> \(\kappa\)</strong>.
+        To drive the base, map curvature into the command interface used by the
+        robot.
+      </p>
+
+      <p>
+        <strong>Unicycle / differential-drive interface.</strong> The kinematic
+        model is:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot x = v\cos\theta,\quad \dot y = v\sin\theta,\quad \dot\theta =
+        \omega. \]
+      </h4>
+      <p>
+        Curvature is <strong> \(\kappa = \omega / v\)</strong> (for
+        <strong> \(v \neq 0\)</strong>), so:
+        <strong> \( \omega = v\kappa \)</strong>. Saturate
+        <strong>\(\omega\)</strong> to match actuator limits.
+      </p>
+
+      <p>
+        <strong>Ackermann / bicycle interface.</strong> For the kinematic
+        bicycle model:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot\theta = \frac{v}{L}\tan\delta, \quad \text{so}\quad \kappa =
+        \frac{\tan\delta}{L}, \quad \delta = \arctan(L\kappa), \]
+      </h4>
+      <p>
+        where <strong> \(L\)</strong> is the wheelbase. Again, saturate
+        <strong>\(\delta\)</strong> to steering limits.
+      </p>
+
+      <p>
+        <strong>Speed scheduling.</strong> A practical coupling is to increase
+        lookahead with speed:
+        <strong>
+          \( L_d(v) = \operatorname{clip}(L_{d,\min} + k_v |v|,\; L_{d,\min},\;
+          L_{d,\max}) \)</strong
+        >. This reduces oscillations at high speed and improves comfort.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Selecting the Lookahead Point on a Discrete Path -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Selecting the Lookahead Point on a Discrete Path</h2>
+    <div class="down-content">
+      <p>
+        Real navigation stacks represent the path as waypoints
+        <strong> \(\{\mathbf{w}_0,\dots,\mathbf{w}_{N-1}\}\)</strong>. Pure
+        pursuit requires a lookahead point on the <em>continuous</em> polyline.
+        Two standard strategies:
+      </p>
+      <ol>
+        <li>
+          <strong>Arclength lookahead:</strong> Find the closest point on the
+          polyline, compute its arclength coordinate <strong> \(s_c\)</strong>,
+          and take <strong> \(s_L = s_c + L_d\)</strong> to interpolate on the
+          polyline.
+        </li>
+        <li>
+          <strong>Circle intersection:</strong> Intersect the circle of radius
+          <strong> \(L_d\)</strong> around the robot with path segments and pick
+          the intersection that lies “ahead” along the path.
+        </li>
+      </ol>
+
+      <p>
+        The arclength method is robust and easy when you can compute segment
+        lengths and interpolate. The circle method matches the original
+        “pursuit” intuition and can behave better when the path is sparse, but
+        requires careful disambiguation when multiple intersections exist.
+      </p>
+
+      <p>
+        In the provided implementations, the main code uses the arclength
+        method; an exercise file implements the circle intersection method.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Local Stability for Straight-Line Tracking (Small-Error Analysis) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      6. Local Stability for Straight-Line Tracking (Small-Error Analysis)
+    </h2>
+    <div class="down-content">
+      <p>
+        Pure pursuit is geometric, but we can still analyze local stability for
+        a straight reference path. Consider a straight path along the world
+        x-axis, and define:
+        <strong> \(e_y\)</strong> = lateral (cross-track) error and
+        <strong> \(e_\theta\)</strong> = heading error relative to the path
+        tangent. For a unicycle with forward speed
+        <strong> \(v &gt; 0\)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot e_y = v\sin(e_\theta),\quad \dot e_\theta = -\omega. \]
+      </h4>
+
+      <p>
+        For small errors, <strong> \(\sin(e_\theta) \approx e_\theta\)</strong>.
+        The pure pursuit lookahead point in body coordinates satisfies, to first
+        order, <strong> \(y_r \approx e_y + L_d e_\theta\)</strong> (lateral
+        error plus the lateral offset caused by heading error over the
+        lookahead). Substituting <strong> \(\omega = v\kappa\)</strong> and
+        <strong> \(\kappa \approx 2y_r/L_d^2\)</strong> yields:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \dot e_y \approx v e_\theta,\quad \dot e_\theta \approx
+        -\frac{2v}{L_d^2}\,(e_y + L_d e_\theta). \]
+      </h4>
+
+      <p>
+        Differentiate the first equation and eliminate
+        <strong>\(e_\theta\)</strong> to obtain a second-order linear ODE:
+      </p>
+      <h4 class="mathJax">
+        \[ \ddot e_y + \frac{2v}{L_d}\dot e_y + \frac{2v^2}{L_d^2} e_y = 0. \]
+      </h4>
+
+      <p>
+        The characteristic polynomial is
+        <strong> \( \lambda^2 + (2v/L_d)\lambda + 2(v^2/L_d^2) \)</strong>,
+        whose coefficients are positive for <strong> \(v &gt; 0\)</strong>,
+        <strong> \(L_d &gt; 0\)</strong>. Hence both eigenvalues have negative
+        real parts, so the origin <strong>\((e_y,e_\theta)=(0,0)\)</strong> is
+        exponentially stable in the linearized model. This explains why
+        too-small <strong>\(L_d\)</strong> can create oscillatory behavior
+        (larger natural frequency), while larger <strong>\(L_d\)</strong> slows
+        convergence but improves smoothness.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Practical Tuning and Constraint Handling -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Practical Tuning and Constraint Handling</h2>
+    <div class="down-content">
+      <p>
+        In mobile systems, actuator limits and discretization matter. Common
+        guardrails:
+      </p>
+      <ul>
+        <li>
+          <strong>Curvature saturation:</strong>
+          <strong>
+            \( \kappa \leftarrow \operatorname{clip}(\kappa, -\kappa_{\max},
+            \kappa_{\max}) \)</strong
+          >.
+        </li>
+        <li>
+          <strong>Steering/yaw-rate saturation:</strong> map to
+          <strong>\(\delta\)</strong> or <strong>\(\omega\)</strong> and clip.
+        </li>
+        <li>
+          <strong>Minimum speed handling:</strong> if
+          <strong> \(|v|\)</strong> is near zero, reduce gains or hold steering
+          to avoid numerical issues.
+        </li>
+        <li>
+          <strong>Waypoint sparsity:</strong> if the path has large gaps,
+          increase <strong>\(L_d\)</strong> or interpolate a denser polyline.
+        </li>
+        <li>
+          <strong>Goal handling:</strong> when <strong>\(s_L\)</strong> goes
+          beyond the end of the path, use the final waypoint and reduce speed.
+        </li>
+      </ul>
+
+      <p>A speed-dependent lookahead is widely used:</p>
+      <h4 class="mathJax">
+        \[ L_d(v) = \operatorname{clip}\big(L_{d,\min} + k_v |v|,\;
+        L_{d,\min},\; L_{d,\max}\big). \]
+      </h4>
+      <p>
+        For tighter curves (high path curvature), additional heuristics reduce
+        <strong>\(L_d\)</strong> to increase responsiveness. In later lessons
+        (DWA/TEB), the local planner may output short-horizon trajectories; pure
+        pursuit can then track the trajectory’s centerline similarly.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Python Implementation (From Scratch) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Python Implementation (From Scratch)</h2>
+    <div class="down-content">
+      <p>
+        This implementation computes the closest point on a polyline, selects a
+        lookahead point by arclength interpolation, computes curvature
+        <strong>\(\kappa\)</strong>, and simulates a kinematic bicycle model. It
+        is intentionally minimal so you can port the geometry to your own stack.
+      </p>
+
+      <p><strong>Code file:</strong> Chapter15_Lesson1.py</p>
+      <pre><code class="language-python">
+"""
+Chapter15_Lesson1.py
+Pure Pursuit and Geometric Path Tracking — minimal, from-scratch reference implementation.
+
+Dependencies:
+  numpy
+  matplotlib (optional for plotting)
+
+This file focuses on geometry + kinematic simulation (bicycle model).
+For a ROS2 integration sketch, see Chapter15_Lesson1.cpp (USE_ROS2 section).
+"""
+
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import Tuple
+
+import numpy as np
+
+
+@dataclass
+class Pose2D:
+    x: float
+    y: float
+    theta: float  # heading [rad]
+
+
+def wrap_angle(a: float) -&gt; float:
+    """Map angle to (-pi, pi]."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def rot2(theta: float) -&gt; np.ndarray:
+    c, s = math.cos(theta), math.sin(theta)
+    return np.array([[c, -s], [s, c]], dtype=float)
+
+
+def world_to_body(pose: Pose2D, p_world: np.ndarray) -&gt; np.ndarray:
+    """
+    Transform a world point to robot body frame:
+      x forward, y left.
+    """
+    R = rot2(pose.theta).T
+    t = np.array([pose.x, pose.y], dtype=float)
+    return R @ (p_world - t)
+
+
+def polyline_arclength(path: np.ndarray) -&gt; Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute cumulative arclength s[k] and segment lengths seg[k] for polyline points.
+    path: (N,2)
+    """
+    dif = np.diff(path, axis=0)
+    seg = np.linalg.norm(dif, axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    return s, seg
+
+
+def closest_point_on_segment(p: np.ndarray, a: np.ndarray, b: np.ndarray) -&gt; Tuple[np.ndarray, float]:
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom &lt;= 1e-12:
+        return a.copy(), 0.0
+    t = float(np.dot(p - a, ab) / denom)
+    t_clamped = max(0.0, min(1.0, t))
+    q = a + t_clamped * ab
+    return q, t_clamped
+
+
+def closest_point_on_polyline(p: np.ndarray, path: np.ndarray) -&gt; Tuple[np.ndarray, int, float, float]:
+    """
+    Return:
+      q: closest point in R^2
+      i: segment index (between i and i+1)
+      t: segment parameter in [0,1]
+      d: distance ||p-q||
+    """
+    best_d = float("inf")
+    best_q, best_i, best_t = path[0].copy(), 0, 0.0
+    for i in range(len(path) - 1):
+        q, t = closest_point_on_segment(p, path[i], path[i + 1])
+        d = float(np.linalg.norm(p - q))
+        if d &lt; best_d:
+            best_d = d
+            best_q, best_i, best_t = q, i, t
+    return best_q, best_i, best_t, best_d
+
+
+def point_at_arclength(path: np.ndarray, s: np.ndarray, seg: np.ndarray, s_query: float) -&gt; np.ndarray:
+    """Return point at arclength s_query along polyline (clamped)."""
+    if s_query &lt;= 0.0:
+        return path[0].copy()
+    if s_query &gt;= s[-1]:
+        return path[-1].copy()
+
+    j = int(np.searchsorted(s, s_query, side="right") - 1)  # j in [0, N-2]
+    ds = s_query - s[j]
+    t = ds / max(seg[j], 1e-12)
+    return (1.0 - t) * path[j] + t * path[j + 1]
+
+
+def pure_pursuit_curvature(pose: Pose2D, path: np.ndarray, Ld: float) -&gt; Tuple[float, np.ndarray, np.ndarray]:
+    """
+    Classic pure pursuit curvature:
+      - Find closest point on path (for progress)
+      - Choose lookahead point Ld ahead in arclength
+      - Transform lookahead to body frame (x_r, y_r)
+      - Command curvature kappa = 2*y_r / (x_r^2 + y_r^2)
+
+    Returns:
+      kappa: curvature command [1/m]
+      p_closest: closest point (world)
+      p_look: lookahead point (world)
+    """
+    Ld = max(float(Ld), 1e-3)
+
+    p = np.array([pose.x, pose.y], dtype=float)
+    s, seg = polyline_arclength(path)
+    q, i, t, _ = closest_point_on_polyline(p, path)
+
+    s_closest = float(s[i] + t * seg[i])
+    p_look = point_at_arclength(path, s, seg, s_closest + Ld)
+
+    look_b = world_to_body(pose, p_look)
+    x_r, y_r = float(look_b[0]), float(look_b[1])
+
+    L = math.hypot(x_r, y_r)
+    if L &lt;= 1e-9:
+        return 0.0, q, p_look
+
+    kappa = 2.0 * y_r / (L * L)
+    return float(kappa), q, p_look
+
+
+def bicycle_step(pose: Pose2D, v: float, delta: float, wheelbase: float, dt: float) -&gt; Pose2D:
+    """Kinematic bicycle (no slip)."""
+    x = pose.x + v * math.cos(pose.theta) * dt
+    y = pose.y + v * math.sin(pose.theta) * dt
+    theta = wrap_angle(pose.theta + (v / wheelbase) * math.tan(delta) * dt)
+    return Pose2D(x, y, theta)
+
+
+def speed_dependent_lookahead(v: float, Ld_min: float, Ld_max: float, k_v: float) -&gt; float:
+    """
+    Simple heuristic: Ld = clamp(Ld_min + k_v * |v|, Ld_min, Ld_max).
+    """
+    return float(min(Ld_max, max(Ld_min, Ld_min + k_v * abs(v))))
+
+
+def demo():
+    # Path: gentle sinusoid
+    xs = np.linspace(0.0, 25.0, 500)
+    ys = 1.8 * np.sin(0.22 * xs)
+    path = np.column_stack([xs, ys])
+
+    pose = Pose2D(x=-2.0, y=-2.0, theta=0.2)
+    dt = 0.02
+    wheelbase = 0.33  # [m] small AGV-like
+
+    v = 1.5  # [m/s]
+    Ld_min, Ld_max, k_v = 0.8, 3.5, 0.8
+    kappa_max = 1.6  # [1/m]
+    delta_max = math.radians(32.0)
+
+    traj = []
+    look_pts = []
+
+    for _ in range(int(25.0 / dt)):
+        Ld = speed_dependent_lookahead(v, Ld_min, Ld_max, k_v)
+        kappa, _, pL = pure_pursuit_curvature(pose, path, Ld)
+        kappa = float(np.clip(kappa, -kappa_max, kappa_max))
+
+        delta = math.atan(wheelbase * kappa)
+        delta = float(np.clip(delta, -delta_max, delta_max))
+
+        pose = bicycle_step(pose, v, delta, wheelbase, dt)
+        traj.append((pose.x, pose.y))
+        look_pts.append((float(pL[0]), float(pL[1])))
+
+    traj = np.array(traj)
+    look_pts = np.array(look_pts)
+
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.figure()
+        plt.plot(path[:, 0], path[:, 1], label="path")
+        plt.plot(traj[:, 0], traj[:, 1], label="robot")
+        plt.plot(look_pts[::60, 0], look_pts[::60, 1], ".", label="lookahead (every 60)")
+        plt.axis("equal")
+        plt.xlabel("x [m]")
+        plt.ylabel("y [m]")
+        plt.title("Pure Pursuit (kinematic bicycle)")
+        plt.legend()
+        plt.show()
+    except Exception as e:
+        print("Plot skipped:", e)
+
+
+if __name__ == "__main__":
+    demo()
+      </code></pre>
+
+      <p>
+        The exercise implementation below uses the “circle intersection”
+        lookahead selection:
+      </p>
+
+      <p><strong>Code file:</strong> Chapter15_Lesson1_Ex1.py</p>
+      <pre><code class="language-python">
+"""
+Chapter15_Lesson1_Ex1.py
+Exercise: Compute the lookahead point by intersecting a circle (radius Ld around robot)
+with each path segment and selecting the "forward-most" intersection along the path.
+
+This mirrors a common "circle intersection" implementation of pure pursuit.
+
+Dependencies: numpy
+"""
+
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+
+@dataclass
+class Pose2D:
+    x: float
+    y: float
+    theta: float
+
+
+def circle_segment_intersections(c: np.ndarray, r: float, a: np.ndarray, b: np.ndarray) -&gt; List[np.ndarray]:
+    """
+    Intersections of circle (center c, radius r) with segment [a,b].
+    Return list of points (0,1,2 solutions) that lie on the segment.
+    """
+    d = b - a
+    f = a - c
+    A = float(np.dot(d, d))
+    B = 2.0 * float(np.dot(f, d))
+    C = float(np.dot(f, f) - r * r)
+
+    disc = B * B - 4.0 * A * C
+    if disc &lt; 0.0 or A &lt; 1e-12:
+        return []
+    disc_sqrt = math.sqrt(max(0.0, disc))
+
+    t1 = (-B - disc_sqrt) / (2.0 * A)
+    t2 = (-B + disc_sqrt) / (2.0 * A)
+
+    pts = []
+    for t in (t1, t2):
+        if 0.0 &lt;= t &lt;= 1.0:
+            pts.append(a + t * d)
+    return pts
+
+
+def lookahead_by_circle(path: np.ndarray, progress_idx: int, pose: Pose2D, Ld: float) -&gt; Optional[Tuple[np.ndarray, int]]:
+    """
+    Starting from progress_idx, find the first segment intersection with the lookahead circle.
+    Return (p_look, seg_index) or None if no intersection (e.g., near end).
+    """
+    c = np.array([pose.x, pose.y], dtype=float)
+    for i in range(progress_idx, len(path) - 1):
+        pts = circle_segment_intersections(c, Ld, path[i], path[i + 1])
+        if pts:
+            # choose the intersection closer to the end of the segment (more "forward")
+            if len(pts) == 1:
+                return pts[0], i
+            # pick point with larger projection along segment direction
+            d = path[i + 1] - path[i]
+            scores = [float(np.dot(p - path[i], d)) for p in pts]
+            return pts[int(np.argmax(scores))], i
+    return None
+
+
+def demo():
+    # Simple path: straight then turn
+    path = np.array([[0.0, 0.0],
+                     [5.0, 0.0],
+                     [8.0, 2.0],
+                     [10.0, 5.0]], dtype=float)
+
+    pose = Pose2D(x=1.0, y=-1.0, theta=0.0)
+    Ld = 2.5
+
+    out = lookahead_by_circle(path, progress_idx=0, pose=pose, Ld=Ld)
+    print("Lookahead:", out)
+
+
+if __name__ == "__main__":
+    demo()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: C++ Implementation (Core + Optional ROS2 Sketch) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. C++ Implementation (Core + Optional ROS2 Sketch)</h2>
+    <div class="down-content">
+      <p>
+        The C++ file contains the same geometry (closest point, arclength
+        lookahead, curvature), a simple simulation demo, and an optional ROS2
+        skeleton showing how you would connect to <code>nav_msgs/Path</code> and
+        publish <code>cmd_vel</code>.
+      </p>
+
+      <p><strong>Code file:</strong> Chapter15_Lesson1.cpp</p>
+      <pre><code class="language-cpp">
+// Chapter15_Lesson1.cpp
+// Pure Pursuit and Geometric Path Tracking (C++17)
+// - Core geometry is library-free.
+// - Optional ROS2 integration sketch is provided under USE_ROS2.
+//
+// Build (core demo only):
+//   g++ -std=c++17 -O2 Chapter15_Lesson1.cpp -o pp_demo
+//
+// If you want ROS2:
+//   - Define USE_ROS2 and link against rclcpp, nav_msgs, geometry_msgs, etc.
+//   - The ROS2 block is a minimal sketch (not a full package).
+
+#include &lt;cmath&gt;
+#include &lt;cstddef&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+
+struct Vec2 {
+  double x{0.0}, y{0.0};
+};
+
+struct Pose2D {
+  double x{0.0}, y{0.0}, theta{0.0};
+};
+
+static inline double wrapAngle(double a) {
+  while (a &lt;= -M_PI) a += 2.0 * M_PI;
+  while (a &gt;   M_PI) a -= 2.0 * M_PI;
+  return a;
+}
+
+static inline Vec2 operator+(const Vec2&amp; a, const Vec2&amp; b) { return {a.x + b.x, a.y + b.y}; }
+static inline Vec2 operator-(const Vec2&amp; a, const Vec2&amp; b) { return {a.x - b.x, a.y - b.y}; }
+static inline Vec2 operator*(double s, const Vec2&amp; a) { return {s * a.x, s * a.y}; }
+
+static inline double dot(const Vec2&amp; a, const Vec2&amp; b) { return a.x * b.x + a.y * b.y; }
+static inline double norm(const Vec2&amp; a) { return std::sqrt(dot(a, a)); }
+
+static inline Vec2 worldToBody(const Pose2D&amp; pose, const Vec2&amp; p_world) {
+  // body frame: x forward, y left
+  const double c = std::cos(pose.theta);
+  const double s = std::sin(pose.theta);
+  const Vec2 d{p_world.x - pose.x, p_world.y - pose.y};
+  // R^T * d
+  return { c * d.x + s * d.y, -s * d.x + c * d.y };
+}
+
+static inline Vec2 closestPointOnSegment(const Vec2&amp; p, const Vec2&amp; a, const Vec2&amp; b, double&amp; t_out) {
+  const Vec2 ab = b - a;
+  const double denom = dot(ab, ab);
+  if (denom &lt;= 1e-12) { t_out = 0.0; return a; }
+  const double t = dot(p - a, ab) / denom;
+  const double tc = std::max(0.0, std::min(1.0, t));
+  t_out = tc;
+  return a + tc * ab;
+}
+
+static inline void polylineArcLength(const std::vector&lt;Vec2&gt;&amp; path, std::vector&lt;double&gt;&amp; s, std::vector&lt;double&gt;&amp; seg) {
+  const std::size_t N = path.size();
+  s.assign(N, 0.0);
+  seg.assign((N &gt;= 2) ? (N - 1) : 0, 0.0);
+  for (std::size_t i = 0; i + 1 &lt; N; ++i) {
+    seg[i] = norm(path[i + 1] - path[i]);
+    s[i + 1] = s[i] + seg[i];
+  }
+}
+
+static inline Vec2 pointAtArcLength(const std::vector&lt;Vec2&gt;&amp; path,
+                                    const std::vector&lt;double&gt;&amp; s,
+                                    const std::vector&lt;double&gt;&amp; seg,
+                                    double s_query) {
+  if (path.empty()) return {0.0, 0.0};
+  if (s_query &lt;= 0.0) return path.front();
+  if (s_query &gt;= s.back()) return path.back();
+
+  // find j s.t. s[j] &lt;= s_query &lt; s[j+1]
+  std::size_t j = 0;
+  while (j + 1 &lt; s.size() &amp;&amp; s[j + 1] &lt;= s_query) ++j;
+  if (j + 1 &gt;= path.size()) return path.back();
+
+  const double ds = s_query - s[j];
+  const double t = ds / std::max(seg[j], 1e-12);
+  return (1.0 - t) * path[j] + t * path[j + 1];
+}
+
+static inline void closestPointOnPolyline(const Vec2&amp; p, const std::vector&lt;Vec2&gt;&amp; path,
+                                          Vec2&amp; q_out, std::size_t&amp; i_out, double&amp; t_out, double&amp; d_out) {
+  double best_d = std::numeric_limits&lt;double&gt;::infinity();
+  Vec2 best_q = path.front();
+  std::size_t best_i = 0;
+  double best_t = 0.0;
+
+  for (std::size_t i = 0; i + 1 &lt; path.size(); ++i) {
+    double t = 0.0;
+    Vec2 q = closestPointOnSegment(p, path[i], path[i + 1], t);
+    const double d = norm(p - q);
+    if (d &lt; best_d) {
+      best_d = d; best_q = q; best_i = i; best_t = t;
+    }
+  }
+  q_out = best_q; i_out = best_i; t_out = best_t; d_out = best_d;
+}
+
+static inline double purePursuitCurvature(const Pose2D&amp; pose, const std::vector&lt;Vec2&gt;&amp; path,
+                                         double Ld, Vec2&amp; closest_world, Vec2&amp; look_world) {
+  Ld = std::max(Ld, 1e-3);
+  const Vec2 p{pose.x, pose.y};
+
+  std::vector&lt;double&gt; s, seg;
+  polylineArcLength(path, s, seg);
+
+  std::size_t i = 0;
+  double t = 0.0, d = 0.0;
+  Vec2 q;
+  closestPointOnPolyline(p, path, q, i, t, d);
+  closest_world = q;
+
+  const double s_closest = s[i] + t * seg[i];
+  look_world = pointAtArcLength(path, s, seg, s_closest + Ld);
+
+  const Vec2 look_b = worldToBody(pose, look_world);
+  const double L = std::sqrt(look_b.x * look_b.x + look_b.y * look_b.y);
+  if (L &lt;= 1e-9) return 0.0;
+
+  // kappa = 2*y_r / L^2
+  return 2.0 * look_b.y / (L * L);
+}
+
+static inline Pose2D bicycleStep(const Pose2D&amp; pose, double v, double delta, double wheelbase, double dt) {
+  Pose2D nxt = pose;
+  nxt.x += v * std::cos(pose.theta) * dt;
+  nxt.y += v * std::sin(pose.theta) * dt;
+  nxt.theta = wrapAngle(pose.theta + (v / wheelbase) * std::tan(delta) * dt);
+  return nxt;
+}
+
+int main() {
+  // Demo path: simple sinusoid
+  std::vector&lt;Vec2&gt; path;
+  path.reserve(500);
+  for (int i = 0; i &lt; 500; ++i) {
+    const double x = 0.05 * i * 25.0; // 0..25
+    const double y = 1.8 * std::sin(0.22 * x);
+    path.push_back({x, y});
+  }
+
+  Pose2D pose{-2.0, -2.0, 0.2};
+  const double dt = 0.02;
+  const double wheelbase = 0.33;
+  const double v = 1.5;
+
+  const double Ld_min = 0.8, Ld_max = 3.5, k_v = 0.8;
+  const double kappa_max = 1.6;
+  const double delta_max = 32.0 * M_PI / 180.0;
+
+  for (int k = 0; k &lt; static_cast&lt;int&gt;(25.0 / dt); ++k) {
+    const double Ld = std::min(Ld_max, std::max(Ld_min, Ld_min + k_v * std::fabs(v)));
+
+    Vec2 q, pL;
+    double kappa = purePursuitCurvature(pose, path, Ld, q, pL);
+    if (kappa &gt;  kappa_max) kappa =  kappa_max;
+    if (kappa &lt; -kappa_max) kappa = -kappa_max;
+
+    double delta = std::atan(wheelbase * kappa);
+    if (delta &gt;  delta_max) delta =  delta_max;
+    if (delta &lt; -delta_max) delta = -delta_max;
+
+    pose = bicycleStep(pose, v, delta, wheelbase, dt);
+
+    if (k % 50 == 0) {
+      std::cout &lt;&lt; "k=" &lt;&lt; k
+                &lt;&lt; " pose=(" &lt;&lt; pose.x &lt;&lt; "," &lt;&lt; pose.y &lt;&lt; "," &lt;&lt; pose.theta &lt;&lt; ")"
+                &lt;&lt; " look=(" &lt;&lt; pL.x &lt;&lt; "," &lt;&lt; pL.y &lt;&lt; ")"
+                &lt;&lt; " kappa=" &lt;&lt; kappa &lt;&lt; " delta=" &lt;&lt; delta
+                &lt;&lt; "\n";
+    }
+  }
+
+  std::cout &lt;&lt; "Done.\n";
+  return 0;
+}
+
+
+/*
+==================== OPTIONAL ROS2 SKETCH (NOT BUILT BY DEFAULT) ====================
+
+#define USE_ROS2
+
+#ifdef USE_ROS2
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;nav_msgs/msg/path.hpp&gt;
+#include &lt;geometry_msgs/msg/twist.hpp&gt;
+#include &lt;geometry_msgs/msg/pose_stamped.hpp&gt;
+
+class PurePursuitNode : public rclcpp::Node {
+public:
+  PurePursuitNode() : Node("pure_pursuit_node") {
+    path_sub_ = create_subscription&lt;nav_msgs::msg::Path&gt;(
+      "/plan", 10, [this](const nav_msgs::msg::Path::SharedPtr msg) {
+        path_.clear();
+        for (const auto&amp; ps : msg-&gt;poses) path_.push_back({ps.pose.position.x, ps.pose.position.y});
+      });
+
+    cmd_pub_ = create_publisher&lt;geometry_msgs::msg::Twist&gt;("/cmd_vel", 10);
+    timer_ = create_wall_timer(std::chrono::milliseconds(20), [this]() { onTimer(); });
+  }
+
+  void setPose(const Pose2D&amp; pose) { pose_ = pose; } // supply from TF/odometry in real system
+
+private:
+  void onTimer() {
+    if (path_.size() &lt; 2) return;
+    Vec2 q, pL;
+    const double Ld = 1.5;
+    double kappa = purePursuitCurvature(pose_, path_, Ld, q, pL);
+
+    geometry_msgs::msg::Twist cmd;
+    cmd.linear.x = 0.7;
+    cmd.angular.z = cmd.linear.x * kappa; // unicycle/diff-drive mapping
+    cmd_pub_-&gt;publish(cmd);
+  }
+
+  Pose2D pose_;
+  std::vector&lt;Vec2&gt; path_;
+  rclcpp::Subscription&lt;nav_msgs::msg::Path&gt;::SharedPtr path_sub_;
+  rclcpp::Publisher&lt;geometry_msgs::msg::Twist&gt;::SharedPtr cmd_pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
+#endif
+
+=====================================================================================
+*/
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Java Implementation</h2>
+    <div class="down-content">
+      <p>
+        Java is common in some robotics stacks (education, Android-based robots,
+        or FRC-style tooling). The code below is library-free and can be
+        integrated with ROS (rosjava) or any messaging system by wiring pose and
+        path inputs and publishing <strong>\(\omega = v\kappa\)</strong>.
+      </p>
+
+      <p><strong>Code file:</strong> Chapter15_Lesson1.java</p>
+      <pre><code class="language-java">
+// Chapter15_Lesson1.java
+// Pure Pursuit and Geometric Path Tracking (Java 17+)
+// Core geometry is library-free; integrate with your robotics stack by wiring pose + path IO.
+// (If you use ROS via rosjava, publish Twist commands computed as omega = v * kappa.)
+
+import java.util.ArrayList;
+import java.util.List;
+
+final class Vec2 {
+    public final double x, y;
+    public Vec2(double x, double y) { this.x = x; this.y = y; }
+    public Vec2 add(Vec2 b) { return new Vec2(this.x + b.x, this.y + b.y); }
+    public Vec2 sub(Vec2 b) { return new Vec2(this.x - b.x, this.y - b.y); }
+    public Vec2 mul(double s) { return new Vec2(s * this.x, s * this.y); }
+    public double dot(Vec2 b) { return this.x * b.x + this.y * b.y; }
+    public double norm() { return Math.hypot(this.x, this.y); }
+}
+
+final class Pose2D {
+    public final double x, y, theta;
+    public Pose2D(double x, double y, double theta) { this.x = x; this.y = y; this.theta = theta; }
+}
+
+final class PurePursuit {
+
+    public static double wrapAngle(double a) {
+        while (a &lt;= -Math.PI) a += 2.0 * Math.PI;
+        while (a &gt;   Math.PI) a -= 2.0 * Math.PI;
+        return a;
+    }
+
+    public static Vec2 worldToBody(Pose2D pose, Vec2 pWorld) {
+        // body frame: x forward, y left
+        double c = Math.cos(pose.theta);
+        double s = Math.sin(pose.theta);
+        Vec2 d = new Vec2(pWorld.x - pose.x, pWorld.y - pose.y);
+        return new Vec2(c * d.x + s * d.y, -s * d.x + c * d.y);
+    }
+
+    public static double[] polylineArcLength(List&lt;Vec2&gt; path, double[] segOut) {
+        double[] s = new double[path.size()];
+        s[0] = 0.0;
+        for (int i = 0; i &lt; path.size() - 1; i++) {
+            Vec2 d = path.get(i + 1).sub(path.get(i));
+            segOut[i] = d.norm();
+            s[i + 1] = s[i] + segOut[i];
+        }
+        return s;
+    }
+
+    public static Vec2 closestPointOnSegment(Vec2 p, Vec2 a, Vec2 b, double[] tOut) {
+        Vec2 ab = b.sub(a);
+        double denom = ab.dot(ab);
+        if (denom &lt;= 1e-12) { tOut[0] = 0.0; return a; }
+        double t = (p.sub(a)).dot(ab) / denom;
+        double tc = Math.max(0.0, Math.min(1.0, t));
+        tOut[0] = tc;
+        return a.add(ab.mul(tc));
+    }
+
+    public static class ClosestResult {
+        public final Vec2 q; public final int i; public final double t; public final double d;
+        public ClosestResult(Vec2 q, int i, double t, double d) { this.q=q; this.i=i; this.t=t; this.d=d; }
+    }
+
+    public static ClosestResult closestPointOnPolyline(Vec2 p, List&lt;Vec2&gt; path) {
+        double bestD = Double.POSITIVE_INFINITY;
+        Vec2 bestQ = path.get(0);
+        int bestI = 0;
+        double bestT = 0.0;
+
+        for (int i = 0; i &lt; path.size() - 1; i++) {
+            double[] tOut = new double[1];
+            Vec2 q = closestPointOnSegment(p, path.get(i), path.get(i + 1), tOut);
+            double d = p.sub(q).norm();
+            if (d &lt; bestD) {
+                bestD = d; bestQ = q; bestI = i; bestT = tOut[0];
+            }
+        }
+        return new ClosestResult(bestQ, bestI, bestT, bestD);
+    }
+
+    public static Vec2 pointAtArcLength(List&lt;Vec2&gt; path, double[] s, double[] seg, double sQuery) {
+        if (sQuery &lt;= 0.0) return path.get(0);
+        if (sQuery &gt;= s[s.length - 1]) return path.get(path.size() - 1);
+
+        int j = 0;
+        while (j + 1 &lt; s.length &amp;&amp; s[j + 1] &lt;= sQuery) j++;
+        double ds = sQuery - s[j];
+        double t = ds / Math.max(seg[j], 1e-12);
+        Vec2 a = path.get(j);
+        Vec2 b = path.get(j + 1);
+        return a.mul(1.0 - t).add(b.mul(t));
+    }
+
+    public static class Output {
+        public final double kappa;
+        public final Vec2 closest;
+        public final Vec2 lookahead;
+        public Output(double kappa, Vec2 closest, Vec2 lookahead) { this.kappa=kappa; this.closest=closest; this.lookahead=lookahead; }
+    }
+
+    public static Output curvature(Pose2D pose, List&lt;Vec2&gt; path, double Ld) {
+        Ld = Math.max(Ld, 1e-3);
+        Vec2 p = new Vec2(pose.x, pose.y);
+
+        double[] seg = new double[path.size() - 1];
+        double[] s = polylineArcLength(path, seg);
+
+        ClosestResult cr = closestPointOnPolyline(p, path);
+        double sClosest = s[cr.i] + cr.t * seg[cr.i];
+
+        Vec2 pLook = pointAtArcLength(path, s, seg, sClosest + Ld);
+        Vec2 lookB = worldToBody(pose, pLook);
+        double L = Math.hypot(lookB.x, lookB.y);
+        double kappa = (L &lt;= 1e-9) ? 0.0 : (2.0 * lookB.y / (L * L));
+        return new Output(kappa, cr.q, pLook);
+    }
+
+    public static Pose2D bicycleStep(Pose2D pose, double v, double delta, double wheelbase, double dt) {
+        double x = pose.x + v * Math.cos(pose.theta) * dt;
+        double y = pose.y + v * Math.sin(pose.theta) * dt;
+        double th = wrapAngle(pose.theta + (v / wheelbase) * Math.tan(delta) * dt);
+        return new Pose2D(x, y, th);
+    }
+}
+
+public class Chapter15_Lesson1 {
+    public static void main(String[] args) {
+        // demo path: sinusoid
+        List&lt;Vec2&gt; path = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 500; i++) {
+            double x = 25.0 * i / 499.0;
+            double y = 1.8 * Math.sin(0.22 * x);
+            path.add(new Vec2(x, y));
+        }
+
+        Pose2D pose = new Pose2D(-2.0, -2.0, 0.2);
+        double dt = 0.02, wheelbase = 0.33, v = 1.5;
+        double LdMin = 0.8, LdMax = 3.5, kV = 0.8;
+        double kappaMax = 1.6;
+        double deltaMax = Math.toRadians(32.0);
+
+        for (int k = 0; k &lt; (int)(25.0 / dt); k++) {
+            double Ld = Math.min(LdMax, Math.max(LdMin, LdMin + kV * Math.abs(v)));
+            PurePursuit.Output out = PurePursuit.curvature(pose, path, Ld);
+
+            double kappa = Math.max(-kappaMax, Math.min(kappaMax, out.kappa));
+            double delta = Math.atan(wheelbase * kappa);
+            delta = Math.max(-deltaMax, Math.min(deltaMax, delta));
+
+            pose = PurePursuit.bicycleStep(pose, v, delta, wheelbase, dt);
+
+            if (k % 50 == 0) {
+                System.out.printf("k=%d pose=(%.3f, %.3f, %.3f) kappa=%.4f delta=%.4f%n",
+                        k, pose.x, pose.y, pose.theta, kappa, delta);
+            }
+        }
+        System.out.println("Done.");
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        The MATLAB file is a single script with local functions, suitable for:
+        (i) direct MATLAB simulation, and (ii) reuse of the
+        <code>purePursuitCurvature</code> function inside a MATLAB Function
+        block in Simulink (inputs: pose, path, Ld; output: kappa; then map to
+        omega or delta).
+      </p>
+
+      <p><strong>Code file:</strong> Chapter15_Lesson1.m</p>
+      <pre><code class="language-matlab">
+% Chapter15_Lesson1.m
+% Pure Pursuit and Geometric Path Tracking (MATLAB)
+%
+% This file contains:
+%   1) A demo script (top-level) that simulates a kinematic bicycle model
+%   2) Local functions for pure pursuit geometry
+%
+% Run:
+%   Chapter15_Lesson1
+
+clear; clc;
+
+% Path: gentle sinusoid
+xs = linspace(0, 25, 500)';
+ys = 1.8 * sin(0.22 * xs);
+path = [xs, ys];
+
+pose = [-2.0; -2.0; 0.2]; % [x;y;theta]
+dt = 0.02;
+wheelbase = 0.33;
+v = 1.5;
+
+Ld_min = 0.8; Ld_max = 3.5; k_v = 0.8;
+kappa_max = 1.6;
+delta_max = deg2rad(32);
+
+traj = zeros(round(25/dt), 2);
+lookPts = zeros(round(25/dt), 2);
+
+for k = 1:size(traj,1)
+    Ld = min(Ld_max, max(Ld_min, Ld_min + k_v * abs(v)));
+    [kappa, pClosest, pLook] = purePursuitCurvature(pose, path, Ld);
+    kappa = min(kappa_max, max(-kappa_max, kappa));
+    delta = atan(wheelbase * kappa);
+    delta = min(delta_max, max(-delta_max, delta));
+
+    pose = bicycleStep(pose, v, delta, wheelbase, dt);
+    traj(k,:) = pose(1:2)';
+    lookPts(k,:) = pLook';
+end
+
+figure;
+plot(path(:,1), path(:,2)); hold on;
+plot(traj(:,1), traj(:,2));
+plot(lookPts(1:60:end,1), lookPts(1:60:end,2), '.');
+axis equal; grid on;
+xlabel('x [m]'); ylabel('y [m]');
+title('Pure Pursuit (kinematic bicycle)');
+legend('path','robot','lookahead (every 60)');
+
+% -------------------------- Local functions --------------------------
+
+function a = wrapAngle(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+
+function R = rot2(th)
+    R = [cos(th) -sin(th); sin(th) cos(th)];
+end
+
+function pBody = worldToBody(pose, pWorld)
+    th = pose(3);
+    R = rot2(th)';
+    t = pose(1:2);
+    pBody = R * (pWorld - t);
+end
+
+function [s, seg] = polylineArcLength(path)
+    d = diff(path,1,1);
+    seg = sqrt(sum(d.^2,2));
+    s = [0; cumsum(seg)];
+end
+
+function [q, t] = closestPointOnSegment(p, a, b)
+    ab = b - a;
+    denom = ab' * ab;
+    if denom &lt;= 1e-12
+        q = a; t = 0;
+        return;
+    end
+    t0 = ((p - a)' * ab) / denom;
+    t = min(1, max(0, t0));
+    q = a + t * ab;
+end
+
+function [qBest, iBest, tBest, dBest] = closestPointOnPolyline(p, path)
+    dBest = inf;
+    qBest = path(1,:)'; iBest = 1; tBest = 0;
+    for i = 1:size(path,1)-1
+        [q, t] = closestPointOnSegment(p, path(i,:)', path(i+1,:)');
+        d = norm(p - q);
+        if d &lt; dBest
+            dBest = d; qBest = q; iBest = i; tBest = t;
+        end
+    end
+end
+
+function p = pointAtArcLength(path, s, seg, sQuery)
+    if sQuery &lt;= 0
+        p = path(1,:)'; return;
+    end
+    if sQuery &gt;= s(end)
+        p = path(end,:)'; return;
+    end
+    j = find(s &lt;= sQuery, 1, 'last');
+    ds = sQuery - s(j);
+    t = ds / max(seg(j), 1e-12);
+    p = (1-t) * path(j,:)' + t * path(j+1,:)';
+end
+
+function [kappa, pClosest, pLook] = purePursuitCurvature(pose, path, Ld)
+    Ld = max(Ld, 1e-3);
+    p = pose(1:2);
+    [s, seg] = polylineArcLength(path);
+    [q, i, t, ~] = closestPointOnPolyline(p, path);
+    sClosest = s(i) + t * seg(i);
+    pLook = pointAtArcLength(path, s, seg, sClosest + Ld);
+
+    lookB = worldToBody(pose, pLook);
+    L = norm(lookB);
+    if L &lt;= 1e-9
+        kappa = 0.0;
+    else
+        kappa = 2.0 * lookB(2) / (L * L);
+    end
+    pClosest = q;
+end
+
+function poseN = bicycleStep(pose, v, delta, wheelbase, dt)
+    x = pose(1) + v * cos(pose(3)) * dt;
+    y = pose(2) + v * sin(pose(3)) * dt;
+    th = wrapAngle(pose(3) + (v / wheelbase) * tan(delta) * dt);
+    poseN = [x; y; th];
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Wolfram Mathematica (Symbolic Derivation + Demo) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Wolfram Mathematica (Symbolic Derivation + Demo)</h2>
+    <div class="down-content">
+      <p>
+        This script symbolically derives <strong>\(\kappa\)</strong> and the
+        straight-line linearized error dynamics, then runs a lightweight
+        numerical demo (with a coarse discretized lookahead) to visualize
+        tracking.
+      </p>
+      <p>
+        For Mathematica code blocks, we use
+        <code class="language-mathematica"></code>.
+      </p>
+      <p><strong>Code file:</strong> Chapter15_Lesson1.nb</p>
+      <pre><code class="language-mathematica">
+(* Chapter15_Lesson1.nb
+   Pure Pursuit and Geometric Path Tracking (Wolfram Language)
+
+   Note: This is a plain-text Wolfram Language script saved with .nb extension for convenience.
+   You can paste it into a Mathematica notebook and evaluate.
+*)
+
+ClearAll["Global`*"];
+
+(* Geometry: derive curvature kappa for a circle passing through origin and a lookahead point (xL,yL),
+   with tangent aligned with +x at the origin. The circle center is (0,R) so that tangent is horizontal.
+   Then (xL)^2 + (yL - R)^2 == R^2  =&gt;  xL^2 + yL^2 - 2 R yL == 0  =&gt;  R == (xL^2 + yL^2)/(2 yL).
+   Curvature kappa == 1/R == 2 yL/(xL^2 + yL^2).
+*)
+
+xL =.; yL =.;
+kappaExpr = FullSimplify[2 yL/(xL^2 + yL^2)];
+Print["kappa(xL,yL) = ", kappaExpr];
+
+(* Linearized straight-line error dynamics (small errors):
+   e_y' = v e_theta
+   e_theta' = - v kappa = - v * (2 (e_y + Ld e_theta)/Ld^2)  (approx yL ~ e_y + Ld e_theta)
+   =&gt; e_y'' + (2 v/Ld) e_y' + (2 v^2/Ld^2) e_y = 0.
+*)
+v = Symbol["v", Positive -&gt; True];
+Ld = Symbol["Ld", Positive -&gt; True];
+ey[t_] := ey[t];
+etheta[t_] := etheta[t];
+
+(* characteristic polynomial for e_y: s^2 + (2 v/Ld) s + 2 (v^2/Ld^2) *)
+poly[s_] := s^2 + (2 v/Ld) s + 2 (v^2/Ld^2);
+Print["Characteristic polynomial: ", poly[s]];
+Print["Roots: ", Solve[poly[s] == 0, s] // FullSimplify];
+
+(* Simple numerical simulation of kinematic bicycle with pure pursuit on a sinusoid path *)
+wrap[ang_] := Mod[ang + Pi, 2 Pi] - Pi;
+
+path = Table[{x, 1.8 Sin[0.22 x]}, {x, 0, 25, 25/499.}];
+(* helper: nearest index by Euclidean distance (coarse, for demo) *)
+nearestIndex[p_] := Ordering[Norm /@ (path - p), 1][[1]];
+
+pointAtIndex[i_] := path[[Min[Max[i, 1], Length[path]]]];
+
+(* lookahead by index advance (coarse: converts Ld to a fixed index step) *)
+lookaheadPoint[p_, LdMeters_] := Module[{i = nearestIndex[p], step},
+  step = Round[20 LdMeters]; (* heuristic: depends on discretization *)
+  pointAtIndex[i + step]
+];
+
+(* body-frame transform *)
+worldToBody[{x_, y_, th_}, {px_, py_}] := Module[{c = Cos[th], s = Sin[th], dx, dy},
+  dx = px - x; dy = py - y;
+  {c dx + s dy, -s dx + c dy}
+];
+
+purePursuitKappa[state_, LdMeters_] := Module[{p = state[[1 ;; 2]], lookW, lookB, xR, yR, L},
+  lookW = lookaheadPoint[p, LdMeters];
+  lookB = worldToBody[state, lookW];
+  xR = lookB[[1]]; yR = lookB[[2]];
+  L = Sqrt[xR^2 + yR^2];
+  If[L &lt; 10^-9, 0, 2 yR/(L^2)]
+];
+
+bicycleStep[state_, v_, wheelbase_, delta_, dt_] := Module[{x = state[[1]], y = state[[2]], th = state[[3]]},
+  {
+    x + v Cos[th] dt,
+    y + v Sin[th] dt,
+    wrap[th + (v/wheelbase) Tan[delta] dt]
+  }
+];
+
+dt = 0.02; wheelbase = 0.33; v0 = 1.5;
+Ld0 = 1.2;
+kappaMax = 1.6;
+deltaMax = 32 Degree;
+
+state = {-2.0, -2.0, 0.2};
+traj = Reap[
+  Do[
+    kappa = Clip[purePursuitKappa[state, Ld0], {-kappaMax, kappaMax}];
+    delta = Clip[ArcTan[wheelbase kappa], {-deltaMax, deltaMax}];
+    state = bicycleStep[state, v0, wheelbase, delta, dt];
+    Sow[state[[1 ;; 2]]];
+  , {Round[25/dt]}]
+][[2, 1]];
+
+ListLinePlot[{path, traj}, AspectRatio -&gt; Automatic, PlotLegends -&gt; {"path", "robot"}]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Curvature Derivation):</strong>
+        Starting from a circle centered at <strong>\((0,R)\)</strong> in the
+        robot frame, show that the curvature command for a lookahead point
+        <strong>\((x_r,y_r)\)</strong> is
+        <strong>\(\kappa = 2y_r/(x_r^2+y_r^2)\)</strong>. State clearly what
+        geometric condition enforces the tangent at the origin.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The tangent at the origin is aligned with the +x axis if the circle
+        center lies on the y-axis (no x-offset), so the radius at the origin is
+        vertical. Using <strong>\(x^2+(y-R)^2=R^2\)</strong> and substituting
+        <strong>\((x_r,y_r)\)</strong> yields
+        <strong>\(R=(x_r^2+y_r^2)/(2y_r)\)</strong> and hence
+        <strong>\(\kappa=1/R=2y_r/(x_r^2+y_r^2)\)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Mapping to Commands):</strong>
+        For a unicycle, prove that <strong>\(\omega=v\kappa\)</strong>. For a
+        bicycle model with wheelbase <strong>\(L\)</strong>, derive
+        <strong>\(\delta=\arctan(L\kappa)\)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A planar curve parameterized by arclength has curvature
+        <strong>\(\kappa = d\theta/ds\)</strong>. With forward speed
+        <strong>\(v=ds/dt\)</strong>, we get
+        <strong>\(\omega=\dot\theta=(d\theta/ds)(ds/dt)=\kappa v\)</strong>. For
+        the kinematic bicycle, <strong>\(\dot\theta=(v/L)\tan\delta\)</strong>,
+        so <strong>\(\kappa=\dot\theta/v=\tan\delta/L\)</strong> and thus
+        <strong>\(\delta=\arctan(L\kappa)\)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Linearized Stability):</strong>
+        Using the small-error approximation
+        <strong>\(y_r \approx e_y + L_d e_\theta\)</strong>, show that the
+        lateral error satisfies
+        <strong>\(\ddot e_y + (2v/L_d)\dot e_y + 2(v^2/L_d^2)e_y = 0\)</strong>
+        for straight-line tracking. Conclude exponential stability for
+        <strong>\(v &gt; 0\)</strong>, <strong>\(L_d &gt; 0\)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        From <strong>\(\dot e_y \approx v e_\theta\)</strong> and
+        <strong
+          >\(\dot e_\theta \approx -(2v/L_d^2)(e_y + L_d e_\theta)\)</strong
+        >, differentiate the first:
+        <strong>\(\ddot e_y \approx v\dot e_\theta\)</strong>, substitute
+        <strong>\(\dot e_\theta\)</strong>, and eliminate
+        <strong>\(e_\theta = \dot e_y/v\)</strong> to obtain the stated ODE. The
+        characteristic polynomial has positive coefficients, so its roots have
+        negative real parts.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Lookahead Tuning):</strong>
+        Assume fixed speed <strong>\(v\)</strong> and straight-line tracking.
+        Using the ODE in Problem 3, identify the natural frequency and damping
+        ratio as functions of <strong>\(L_d\)</strong>. Discuss how increasing
+        <strong>\(L_d\)</strong>
+        changes (i) convergence speed and (ii) smoothness.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Write the ODE as
+        <strong
+          >\(\ddot e_y + 2\zeta\omega_n \dot e_y + \omega_n^2 e_y = 0\)</strong
+        >. Matching coefficients gives
+        <strong>\(\omega_n = \sqrt{2}\,v/L_d\)</strong> and
+        <strong>\(\zeta = 1/\sqrt{2}\)</strong> (constant). Increasing
+        <strong>\(L_d\)</strong> decreases <strong>\(\omega_n\)</strong>, so
+        convergence is slower but oscillations are reduced and commands are
+        smoother.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Circle-Intersection Lookahead):</strong>
+        Design an algorithm to compute the lookahead point by intersecting the
+        circle of radius <strong>\(L_d\)</strong> centered at the robot position
+        with each polyline segment ahead of the current progress index. If two
+        intersections exist on a segment, which one should be chosen?
+      </p>
+      <p><strong>Solution (algorithm sketch):</strong></p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  ST["Start with segment index i = progress"] --> SEG["For segment [w_i, w_i+1]"]
+  SEG --> INT["Solve circle-segment intersection (0/1/2 points)"]
+  INT -->|0| NEXT["i <- i + 1 \n(next segment)"]
+  NEXT --> SEG
+  INT -->|1| RET1["Return that point \nas lookahead"]
+  INT -->|2| PICK["Choose 'forward' point \n(larger projection \nalong segment)"]
+  PICK --> RET2["Return chosen point \nas lookahead"]
+  INT -->|none found| END["If end reached: \nuse final waypoint"]
+        </pre>
+      </div>
+
+      <p>
+        If two intersections lie on the same segment, choose the one that is
+        farther along the segment direction (larger projection onto the segment
+        vector), because it corresponds to a point “ahead” on the path. See
+        <strong>Chapter15_Lesson1_Ex1.py</strong> for a concrete implementation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. Summary</h2>
+    <div class="down-content">
+      <p>
+        Pure pursuit converts a discrete path into a curvature command by (i)
+        selecting a lookahead point and (ii) fitting a circle arc from the robot
+        to that point in the robot frame. We derived the closed-form curvature
+        <strong>\(\kappa = 2y_r/(x_r^2+y_r^2)\)</strong>, showed how to map it
+        to unicycle and Ackermann command interfaces, and proved local
+        exponential stability for straight-line tracking under small-error
+        linearization. The provided implementations illustrate two common
+        lookahead selection strategies (arclength and circle intersection) and
+        show how to incorporate saturation and speed-dependent lookahead.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 15: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>15. References</h2>
+    <ol>
+      <li>
+        Coulter, R.C. (1992).
+        <em>Implementation of the Pure Pursuit Path Tracking Algorithm</em>.
+        Technical Report, Carnegie Mellon University, Robotics Institute.
+      </li>
+      <li>
+        Rajamani, R. (2012). <em>Vehicle Dynamics and Control</em> (2nd ed.).
+        Springer. (Path tracking background; bicycle model relations.)
+      </li>
+      <li>
+        Ahn, J., et al. (2021). Accurate path tracking by adjusting look-ahead
+        point in pure pursuit method.
+        <em>International Journal of Automotive Technology</em>, 22, 119–129.
+      </li>
+      <li>
+        Sukhil, V., &amp; Behl, M. (2021). Adaptive Lookahead Pure-Pursuit for
+        Autonomous Racing. <em>arXiv preprint</em>, arXiv:2111.08873.
+      </li>
+      <li>
+        Kapitanyuk, Y.A., Proskurnikov, A.V., &amp; Cao, M. (2018). A Guiding
+        Vector-Field Algorithm for Path-Following Control of Nonholonomic Mobile
+        Robots. <em>IEEE Transactions on Control Systems Technology</em>, 26(4),
+        1372–1385.
+      </li>
+      <li>
+        Jiang, R., et al. (2025). Enhanced Pure Pursuit Path Tracking Algorithm
+        for Mobile Robots. <em>Sensors</em>, 25(3), 745.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter14/Lesson5.html">
+          <small>(previous chapter)</small> Lesson 5: Lab: Assemble a Full Navigation Stack
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson2.html">
+          Lesson 2: Stanley Controller for Ground Vehicles
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="active-lesson" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation) - Lesson 1: Coordinating Many DOFs with Multiple Tasks | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>
+      Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)
+    </h1>
+    <h3>
+      <strong>Lesson 1: Coordinating Many DOFs with Multiple Tasks</strong>
+    </h3>
+    <p>
+      This lesson introduces the mathematical structure of whole-body control
+      (WBC) for robots with many degrees of freedom (DOFs) executing several
+      tasks simultaneously. Building on previous chapters on joint-space
+      control, task-space (operational-space) control, and
+      constrained/contact-aware control, we formalize how multiple task
+      objectives are combined hierarchically using Jacobians, pseudoinverses,
+      and null-space projectors, at both velocity and torque levels, without
+      re-deriving the robot dynamics from scratch.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Motivation and Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Motivation and Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        Complex robots such as humanoids, legged and dual-arm systems often have
+        <strong>redundant DOFs</strong>: the number of actuated joints
+        <strong>\( n \)</strong> exceeds the dimension of any single task.
+        Typical concurrent objectives include:
+      </p>
+      <ul>
+        <li>
+          Maintaining balance (center-of-mass or support polygon constraints).
+        </li>
+        <li>
+          Tracking hand or foot trajectories for manipulation or locomotion.
+        </li>
+        <li>
+          Regulating posture and joint configurations (e.g., keeping elbows
+          close to the body).
+        </li>
+        <li>
+          Respecting joint limits, self-collision avoidance, and contact
+          constraints.
+        </li>
+      </ul>
+      <p>
+        Whole-body control organizes these objectives as <em>tasks</em> with
+        possibly different dimensions and priorities. A canonical information
+        flow is:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  T0["High-level goals \n(walk, reach, balance)"]
+  T1["Task 1: e.g. \ncenter-of-mass regulation"]
+  T2["Task 2: e.g. \nhand trajectory"]
+  T3["Task 3: posture / joint \nregularization"]
+  M["Kinematic and \ndynamic model \n(q, J_i, constraints)"]
+  S["Whole-body solver \n(hierarchical)"]
+  CMD["Low-level joint commands \n(q_dot or tau)"]
+
+  T0 --> T1
+  T0 --> T2
+  T0 --> T3
+  T1 --> S
+  T2 --> S
+  T3 --> S
+  M --> S
+  S --> CMD
+        </pre>
+      </div>
+      <p>
+        Our goal in this lesson is to define the
+        <em>mathematical structure</em> of this solver at the kinematic
+        (velocity) and torque levels:
+      </p>
+      <ul>
+        <li>
+          How to represent tasks as functions of joint configuration and
+          velocity.
+        </li>
+        <li>
+          How to combine tasks using <strong>null-space projections</strong>.
+        </li>
+        <li>
+          How to preserve high-priority tasks while adding lower-priority ones.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Mathematical Setting for Whole-Body Tasks -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Mathematical Setting for Whole-Body Tasks</h2>
+    <div class="down-content">
+      <p>
+        Consider an \(n\)-DOF robot with joint configuration
+        <strong>\( \mathbf{q} \in \mathbb{R}^n \)</strong> and joint velocity
+        <strong>\( \dot{\mathbf{q}} \in \mathbb{R}^n \)</strong>. Previous
+        chapters have already introduced its kinematics and dynamics, so we
+        assume:
+      </p>
+      <ul>
+        <li>
+          A known forward kinematics map for each task \(i\): \( \mathbf{x}_i =
+          f_i(\mathbf{q}) \).
+        </li>
+        <li>Corresponding task Jacobians \( \mathbf{J}_i(\mathbf{q}) \).</li>
+        <li>
+          Optionally, constraint Jacobians \( \mathbf{J}_c(\mathbf{q}) \)
+          encoding holonomic or contact constraints.
+        </li>
+      </ul>
+      <p>A task \(i\) of dimension \(m_i\) is specified by:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_i = f_i(\mathbf{q}) \in \mathbb{R}^{m_i}, \quad
+        \dot{\mathbf{x}}_i = \mathbf{J}_i(\mathbf{q})\,\dot{\mathbf{q}}, \quad
+        \mathbf{J}_i(\mathbf{q}) \in \mathbb{R}^{m_i \times n}. \]
+      </h4>
+      <p>
+        A desired task velocity command is denoted
+        <strong>\( \dot{\mathbf{x}}_i^\star \)</strong>. The instantaneous
+        (kinematic) task control problem for a <em>single</em> task is:
+      </p>
+      <h4 class="mathJax">
+        \[ \text{Find } \dot{\mathbf{q}} \in \mathbb{R}^n \text{ such that }
+        \mathbf{J}_i(\mathbf{q})\,\dot{\mathbf{q}} = \dot{\mathbf{x}}_i^\star,
+        \]
+      </h4>
+      <p>
+        which we already encountered in task-space control. Whole-body control
+        generalizes this to <em>multiple</em> tasks:
+      </p>
+      <h4 class="mathJax">
+        \[ \text{Tasks } i = 1,\dots,N, \quad
+        \mathbf{J}_i(\mathbf{q})\,\dot{\mathbf{q}} \approx
+        \dot{\mathbf{x}}_i^\star \quad \text{with a priority ordering.} \]
+      </h4>
+      <p>If we stack the first \(k\) tasks row-wise:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}^{(k)}(\mathbf{q}) = \begin{bmatrix}
+        \mathbf{J}_1(\mathbf{q}) \\ \vdots \\ \mathbf{J}_k(\mathbf{q})
+        \end{bmatrix} \in \mathbb{R}^{m^{(k)} \times n}, \quad m^{(k)} =
+        \sum_{i=1}^k m_i, \]
+      </h4>
+      <p>
+        then the <em>instantaneous feasibility</em> condition (ignoring
+        inequalities and nonholonomic constraints) is roughly:
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{rank}\!\big(\mathbf{J}^{(k)}(\mathbf{q})\big) \le n,
+        \quad \text{and typically } m^{(k)} \le n. \]
+      </h4>
+      <p>
+        The <strong>null-space dimension</strong> of stacked tasks is
+        <strong>\( n - \operatorname{rank}(\mathbf{J}^{(k)}) \)</strong> and
+        determines how much freedom remains to accommodate further tasks or
+        optimization criteria.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Single-Task Kinematic Control via Pseudoinverse -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Single-Task Kinematic Control via Pseudoinverse</h2>
+    <div class="down-content">
+      <p>
+        For a single task (dropping subscript \(i\) for clarity), the
+        least-squares solution minimizing task error
+        <strong
+          >\( \|\mathbf{J}\dot{\mathbf{q}} - \dot{\mathbf{x}}^\star\|_2
+          \)</strong
+        >
+        is given by the Moore&ndash;Penrose pseudoinverse:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}^\star = \mathbf{J}^\#(\mathbf{q})
+        \,\dot{\mathbf{x}}^\star + \big(\mathbf{I}_n - \mathbf{J}^\#(\mathbf{q})
+        \mathbf{J}(\mathbf{q})\big)\,\mathbf{z}, \]
+      </h4>
+      <p>
+        where
+        <strong>\( \mathbf{J}^\# \)</strong> is the pseudoinverse and
+        <strong>\( \mathbf{z} \in \mathbb{R}^n \)</strong> is an arbitrary
+        vector. The matrix
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{N}(\mathbf{q}) = \mathbf{I}_n - \mathbf{J}^\#(\mathbf{q})
+        \mathbf{J}(\mathbf{q}) \]
+      </h4>
+      <p>
+        is the <strong>null-space projector</strong> of \( \mathbf{J} \) (in the
+        least-squares sense). When we set \( \mathbf{z} = \mathbf{0} \), we
+        obtain the <em>minimum-norm</em> solution. When \( n &gt; m \), we can
+        choose \( \mathbf{z} \) to realize secondary objectives without
+        affecting the primary task.
+      </p>
+      <p>
+        A numerically robust variant is the
+        <strong>damped pseudoinverse</strong> with regularization parameter \(
+        \lambda &gt; 0 \):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}^\#_\lambda = \begin{cases}
+        \mathbf{J}^\top\big(\mathbf{J}\mathbf{J}^\top +
+        \lambda^2\mathbf{I}_{m}\big)^{-1}, & m \le n, \\[4pt]
+        \big(\mathbf{J}^\top\mathbf{J} +
+        \lambda^2\mathbf{I}_{n}\big)^{-1}\mathbf{J}^\top, & m \ge n, \end{cases}
+        \]
+      </h4>
+      <p>which avoids numerical issues near singular configurations.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Coordinating Two Tasks via Null-Space Projection -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Coordinating Two Tasks via Null-Space Projection</h2>
+    <div class="down-content">
+      <p>Let us now consider two tasks with different priorities:</p>
+      <ul>
+        <li>
+          Task 1 (highest priority): \( \mathbf{J}_1 \dot{\mathbf{q}} =
+          \dot{\mathbf{x}}_1^\star \).
+        </li>
+        <li>
+          Task 2 (lower priority): \( \mathbf{J}_2 \dot{\mathbf{q}} =
+          \dot{\mathbf{x}}_2^\star \).
+        </li>
+      </ul>
+      <p>First, compute a solution for Task 1 alone:</p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}_1 = \mathbf{J}_1^\# \dot{\mathbf{x}}_1^\star. \]
+      </h4>
+      <p>Define the null-space projector of Task 1:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{N}_1 = \mathbf{I}_n - \mathbf{J}_1^\# \mathbf{J}_1. \]
+      </h4>
+      <p>
+        Any velocity of the form
+        <strong
+          >\( \dot{\mathbf{q}} = \dot{\mathbf{q}}_1 + \mathbf{N}_1 \mathbf{w}
+          \)</strong
+        >, with arbitrary \(\mathbf{w}\), keeps Task 1 perfectly satisfied
+        (under rank conditions). We choose \(\mathbf{w}\) to realize Task 2
+        <em>within</em> the null space of Task 1:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}_2 = \dot{\mathbf{q}}_1 +
+        \mathbf{N}_1\,\mathbf{J}_2^\#\big(\dot{\mathbf{x}}_2^\star -
+        \mathbf{J}_2 \dot{\mathbf{q}}_1\big). \]
+      </h4>
+      <p>
+        This is the classical
+        <strong>two-task hierarchical control law</strong>. Let us verify that
+        Task 1 is not disturbed:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{J}_1 \dot{\mathbf{q}}_2 &= \mathbf{J}_1
+        \dot{\mathbf{q}}_1 + \mathbf{J}_1 \mathbf{N}_1\,\mathbf{J}_2^\#
+        \big(\dot{\mathbf{x}}_2^\star - \mathbf{J}_2 \dot{\mathbf{q}}_1\big) \\
+        &= \mathbf{J}_1 \dot{\mathbf{q}}_1 + \big(\mathbf{J}_1 - \mathbf{J}_1
+        \mathbf{J}_1^\# \mathbf{J}_1\big)\, \mathbf{J}_2^\#
+        \big(\dot{\mathbf{x}}_2^\star - \mathbf{J}_2 \dot{\mathbf{q}}_1\big) \\
+        &= \mathbf{J}_1 \dot{\mathbf{q}}_1, \end{aligned} \]
+      </h4>
+      <p>
+        using the pseudoinverse property
+        <strong
+          >\( \mathbf{J}_1 \mathbf{J}_1^\# \mathbf{J}_1 = \mathbf{J}_1
+          \)</strong
+        >. Hence, the additional term lies in the null space of \( \mathbf{J}_1
+        \) and does not affect Task 1.
+      </p>
+      <p>
+        Geometrically, we project the Task 2 velocity command into the subspace
+        of joint velocities that preserve Task 1. This idea extends to an
+        arbitrary number of tasks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Recursive Hierarchical Task Composition -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Recursive Hierarchical Task Composition</h2>
+    <div class="down-content">
+      <p>
+        For \(N\) tasks with priorities \(1 \) (highest) to \( N \) (lowest), a
+        common recursive scheme is:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}_1 = \mathbf{J}_1^\# \dot{\mathbf{x}}_1^\star, \quad
+        \mathbf{N}_1 = \mathbf{I}_n - \mathbf{J}_1^\# \mathbf{J}_1, \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}_k = \dot{\mathbf{q}}_{k-1} +
+        \mathbf{N}_{k-1}\,\mathbf{J}_k^\# \big(\dot{\mathbf{x}}_k^\star -
+        \mathbf{J}_k \dot{\mathbf{q}}_{k-1}\big), \quad k = 2,\dots,N, \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \mathbf{N}_k = \mathbf{N}_{k-1} - \mathbf{N}_{k-1}\,\mathbf{J}_k^\#
+        \mathbf{J}_k \mathbf{N}_{k-1}. \]
+      </h4>
+      <p>
+        <strong>Proposition (Task Consistency):</strong>
+        Assuming each task is locally feasible and the pseudoinverses are
+        well-defined, the above recursion ensures that for any \(k\),
+        <strong
+          >\( \mathbf{J}_i \dot{\mathbf{q}}_k = \dot{\mathbf{x}}_i^\star
+          \)</strong
+        >
+        for all \( i \le k \).
+      </p>
+      <p><strong>Sketch of Proof (Induction over \(k\)):</strong></p>
+      <ul>
+        <li>
+          For \( k = 1 \),
+          <strong
+            >\( \mathbf{J}_1 \dot{\mathbf{q}}_1 = \mathbf{J}_1 \mathbf{J}_1^\#
+            \dot{\mathbf{x}}_1^\star = \dot{\mathbf{x}}_1^\star \)</strong
+          >
+          by the pseudoinverse property.
+        </li>
+        <li>
+          Assume the statement holds for \(k-1\). For task \(i \le k-1\):
+          <h4 class="mathJax">
+            \[ \mathbf{J}_i \dot{\mathbf{q}}_k = \mathbf{J}_i
+            \dot{\mathbf{q}}_{k-1} + \mathbf{J}_i
+            \mathbf{N}_{k-1}\,\mathbf{J}_k^\# \big(\dot{\mathbf{x}}_k^\star -
+            \mathbf{J}_k \dot{\mathbf{q}}_{k-1}\big). \]
+          </h4>
+          By construction of \( \mathbf{N}_{k-1} \), we have
+          <strong>\( \mathbf{J}_i \mathbf{N}_{k-1} = \mathbf{0} \)</strong> for
+          all \( i \le k-1 \), hence the second term vanishes and
+          <strong
+            >\( \mathbf{J}_i \dot{\mathbf{q}}_k = \mathbf{J}_i
+            \dot{\mathbf{q}}_{k-1} = \dot{\mathbf{x}}_i^\star \)</strong
+          >.
+        </li>
+        <li>
+          For task \(k\) itself:
+          <h4 class="mathJax">
+            \[ \mathbf{J}_k \dot{\mathbf{q}}_k = \mathbf{J}_k
+            \dot{\mathbf{q}}_{k-1} + \mathbf{J}_k
+            \mathbf{N}_{k-1}\,\mathbf{J}_k^\# \big(\dot{\mathbf{x}}_k^\star -
+            \mathbf{J}_k \dot{\mathbf{q}}_{k-1}\big). \]
+          </h4>
+          Using \( \mathbf{J}_k \mathbf{N}_{k-1} \mathbf{J}_k^\# \approx
+          \mathbf{J}_k \mathbf{J}_k^\# \approx \mathbf{I}_{m_k} \) (under rank
+          conditions), we obtain
+          <strong
+            >\( \mathbf{J}_k \dot{\mathbf{q}}_k = \dot{\mathbf{x}}_k^\star
+            \)</strong
+          >.
+        </li>
+      </ul>
+      <p>
+        The recursion therefore implements a strict priority hierarchy.
+        Practical implementations often approximate this ideal behavior due to
+        regularization, discretization, and inequality constraints, which will
+        be revisited in later lessons.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start with highest-priority task 1"] --> C1["Compute q_dot1 = J1_pinv * xdot1_star"]
+  C1 --> N1["Compute N1 = I - J1_pinv * J1"]
+  N1 --> K2["For each task k = 2..N"]
+  K2 --> SK["Project residual xdot_k_star - Jk * q_dot_(k-1)"]
+  SK --> QK["Add correction q_dot_k = q_dot_(k-1) + Nk-1 * Jk_pinv * residual"]
+  QK --> UP["Update Nk = Nk-1 - Nk-1 * Jk_pinv * Jk * Nk-1"]
+  UP --> K2
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Torque-Level Whole-Body Control (Outline) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Torque-Level Whole-Body Control (Outline)</h2>
+    <div class="down-content">
+      <p>
+        Previous chapters introduced robot dynamics and operational-space
+        control. We recall the (floating-base or fixed-base) equations of motion
+        in compact form:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q}) \ddot{\mathbf{q}} + \mathbf{h}(\mathbf{q},
+        \dot{\mathbf{q}}) = \mathbf{S}^\top \boldsymbol{&bsol;tau} +
+        \mathbf{J}_c(\mathbf{q})^\top \mathbf{f}_c, \]
+      </h4>
+      <p>
+        where \( \mathbf{M} \) is the mass matrix, \( \mathbf{h} \) collects
+        Coriolis, centrifugal and gravity terms, \( \mathbf{S} \) selects
+        actuated joints, and \( \mathbf{J}_c^\top \mathbf{f}_c \) accounts for
+        contact forces.
+      </p>
+      <p>
+        For a single operational-space task with Jacobian \( \mathbf{J} \),
+        operational-space inertia \( \boldsymbol{\Lambda} \) and task force \(
+        \mathbf{F} \), we may write (schematically)
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{&bsol;tau}_\text{task} = \mathbf{J}^\top \mathbf{F},
+        \quad \mathbf{F} = \boldsymbol{\Lambda}\big(\ddot{\mathbf{x}}^\star +
+        \mathbf{K}_d (\dot{\mathbf{x}}^\star - \dot{\mathbf{x}}) + \mathbf{K}_p
+        (\mathbf{x}^\star - \mathbf{x})\big), \]
+      </h4>
+      <p>
+        using gains \( \mathbf{K}_p, \mathbf{K}_d \) chosen as in previous
+        control chapters. In whole-body control, we generalize this to a
+        hierarchy:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{&bsol;tau} = \boldsymbol{&bsol;tau}_1 + \mathbf{N}_1^\top
+        \boldsymbol{&bsol;tau}_2 + \mathbf{N}_2^\top \boldsymbol{&bsol;tau}_3 +
+        \dots, \]
+      </h4>
+      <p>
+        where \( \boldsymbol{&bsol;tau}_k \) is the torque contribution for Task
+        \(k\) and \( \mathbf{N}_k \) are
+        <em>dynamically consistent</em> null-space projectors based on \(
+        \mathbf{M}(\mathbf{q}) \) (rather than the identity metric). This
+        preserves the accelerations of higher-priority tasks when adding
+        lower-priority ones. The detailed construction of dynamically consistent
+        null spaces was already introduced in the operational-space control
+        chapter and will be revisited in later lessons when we compare
+        projection-based and optimization-based schemes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Numerical Aspects and Regularization -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Numerical Aspects and Regularization</h2>
+    <div class="down-content">
+      <p>
+        Near singular configurations or when tasks are nearly conflicting, the
+        stacked Jacobians may become ill-conditioned. Damping and weighting are
+        standard techniques.
+      </p>
+      <p>
+        For a weighted metric with positive-definite weight
+        <strong>\( \mathbf{W} \in \mathbb{R}^{n \times n} \)</strong>, the
+        <strong>weighted pseudoinverse</strong> can be defined as:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}^{\#}_W = \mathbf{W}^{-1}\mathbf{J}^\top
+        \big(\mathbf{J}\mathbf{W}^{-1}\mathbf{J}^\top\big)^{-1}. \]
+      </h4>
+      <p>
+        Choosing \( \mathbf{W} \) diagonal with larger entries for joints we
+        wish to penalize (e.g., close to joint limits) biases the solution away
+        from those joints. Damped weighted pseudoinverses combine this with a
+        regularization \( \lambda \) in the denominator.
+      </p>
+      <p>
+        These numerical refinements are essential in whole-body control, where
+        many tasks compete over limited actuation, and will remain important
+        when we move to quadratic programming formulations in the next lesson.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Python Implementation — Hierarchical Velocity Control -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Python Implementation &mdash; Hierarchical Velocity Control</h2>
+    <div class="down-content">
+      <p>
+        Below is a minimal Python implementation of a two-task hierarchical
+        controller at the velocity level. It assumes the availability of task
+        Jacobians and desired task velocities from a model (for example, via
+        <code>pinocchio</code> or another rigid-body library).
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+
+def damped_pinv(J: np.ndarray, lam: float = 1e-4) -&gt; np.ndarray:
+    """
+    Compute damped Moore-Penrose pseudoinverse of J.
+    """
+    m, n = J.shape
+    if m &gt;= n:
+        # column-rank scenario
+        return np.linalg.inv(J.T @ J + (lam ** 2) * np.eye(n)) @ J.T
+    else:
+        # row-rank scenario
+        return J.T @ np.linalg.inv(J @ J.T + (lam ** 2) * np.eye(m))
+
+def nullspace_projector(J: np.ndarray, lam: float = 1e-4) -&gt; np.ndarray:
+    """
+    Compute null-space projector N = I - J^# J using damped pseudoinverse.
+    """
+    n = J.shape[1]
+    J_pinv = damped_pinv(J, lam)
+    I = np.eye(n)
+    return I - J_pinv @ J
+
+def two_task_velocity_control(J1: np.ndarray,
+                              xdot1_star: np.ndarray,
+                              J2: np.ndarray,
+                              xdot2_star: np.ndarray,
+                              lam: float = 1e-4) -&gt; np.ndarray:
+    """
+    Compute joint velocities for two hierarchical tasks:
+    Task 1 has higher priority than Task 2.
+    """
+    # Task 1 solution
+    J1_pinv = damped_pinv(J1, lam)
+    qdot1 = J1_pinv @ xdot1_star
+
+    # Null-space projector of Task 1
+    N1 = nullspace_projector(J1, lam)
+
+    # Residual for Task 2, respecting Task 1
+    residual2 = xdot2_star - J2 @ qdot1
+    J2_pinv = damped_pinv(J2 @ N1, lam)  # effective Jacobian in null space
+    qdot2_correction = N1 @ J2_pinv @ residual2
+
+    qdot = qdot1 + qdot2_correction
+    return qdot
+
+# Example usage with dummy Jacobians
+if __name__ == "__main__":
+    n_dof = 7
+    m1 = 3  # task 1: 3D position
+    m2 = 3  # task 2: 3D orientation
+
+    # Random but well-conditioned Jacobians (for illustration)
+    rng = np.random.default_rng(0)
+    J1 = rng.normal(size=(m1, n_dof))
+    J2 = rng.normal(size=(m2, n_dof))
+
+    xdot1_star = np.array([0.1, 0.0, -0.05])
+    xdot2_star = np.array([0.0, 0.05, 0.0])
+
+    qdot = two_task_velocity_control(J1, xdot1_star, J2, xdot2_star, lam=1e-3)
+    print("Joint velocity command:", qdot)
+      </code></pre>
+      <p>
+        In a realistic implementation, <code>J1</code> and <code>J2</code> would
+        be obtained from a robotics library (e.g.,
+        <code>pinocchio.computeFrameJacobian</code> for Cartesian frames, plus a
+        posture task Jacobian equal to the identity matrix on selected joints).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: C++ Implementation — Using Eigen -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. C++ Implementation &mdash; Using Eigen</h2>
+    <div class="down-content">
+      <p>
+        The following C++ code uses <code>Eigen</code> to implement a damped
+        pseudoinverse and a two-task hierarchical controller at the velocity
+        level. In practice, this would be integrated with a rigid-body dynamics
+        library such as <code>pinocchio</code> or <code>RBDL</code>.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;Eigen/Dense&gt;
+
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+
+MatrixXd dampedPseudoInverse(const MatrixXd&amp; J, double lambda)
+{
+    int m = J.rows();
+    int n = J.cols();
+    if (m &gt;= n) {
+        MatrixXd A = J.transpose() * J +
+                     (lambda * lambda) * MatrixXd::Identity(n, n);
+        return A.ldlt().solve(J.transpose());
+    } else {
+        MatrixXd A = J * J.transpose() +
+                     (lambda * lambda) * MatrixXd::Identity(m, m);
+        return J.transpose() * A.ldlt().solve(MatrixXd::Identity(m, m));
+    }
+}
+
+MatrixXd nullspaceProjector(const MatrixXd&amp; J, double lambda)
+{
+    int n = J.cols();
+    MatrixXd J_pinv = dampedPseudoInverse(J, lambda);
+    MatrixXd I = MatrixXd::Identity(n, n);
+    return I - J_pinv * J;
+}
+
+VectorXd twoTaskVelocityControl(const MatrixXd&amp; J1,
+                                const VectorXd&amp; xdot1_star,
+                                const MatrixXd&amp; J2,
+                                const VectorXd&amp; xdot2_star,
+                                double lambda)
+{
+    // Task 1
+    MatrixXd J1_pinv = dampedPseudoInverse(J1, lambda);
+    VectorXd qdot1 = J1_pinv * xdot1_star;
+
+    // Null space of Task 1
+    MatrixXd N1 = nullspaceProjector(J1, lambda);
+
+    // Effective Task 2 in null space
+    MatrixXd J2_eff = J2 * N1;
+    MatrixXd J2_eff_pinv = dampedPseudoInverse(J2_eff, lambda);
+
+    VectorXd residual2 = xdot2_star - J2 * qdot1;
+    VectorXd qdot2_corr = N1 * (J2_eff_pinv * residual2);
+
+    VectorXd qdot = qdot1 + qdot2_corr;
+    return qdot;
+}
+
+int main()
+{
+    int n_dof = 7;
+    int m1 = 3;
+    int m2 = 3;
+
+    MatrixXd J1 = MatrixXd::Random(m1, n_dof);
+    MatrixXd J2 = MatrixXd::Random(m2, n_dof);
+
+    VectorXd xdot1_star(m1);
+    xdot1_star &lt;&lt; 0.1, 0.0, -0.05;
+
+    VectorXd xdot2_star(m2);
+    xdot2_star &lt;&lt; 0.0, 0.05, 0.0;
+
+    double lambda = 1e-3;
+    VectorXd qdot = twoTaskVelocityControl(J1, xdot1_star, J2, xdot2_star, lambda);
+
+    std::cout &lt;&lt; "qdot = " &lt;&lt; qdot.transpose() &lt;&lt; std::endl;
+    return 0;
+}
+      </code></pre>
+      <p>
+        This structure can be extended to more tasks by iterating the same
+        pattern and updating the null-space projector at each step as described
+        in the mathematical section.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Java Implementation — Using EJML -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Java Implementation &mdash; Using EJML</h2>
+    <div class="down-content">
+      <p>
+        In Java, the <code>EJML</code> library provides dense linear algebra
+        operations that can be used to implement whole-body controllers. Below
+        is a minimal example of two-task hierarchical control using
+        <code>SimpleMatrix</code>.
+      </p>
+      <pre><code class="language-java">
+import org.ejml.simple.SimpleMatrix;
+
+public class HierarchicalWBC {
+
+    public static SimpleMatrix dampedPseudoInverse(SimpleMatrix J, double lambda) {
+        int m = J.numRows();
+        int n = J.numCols();
+        double lam2 = lambda * lambda;
+
+        if (m &gt;= n) {
+            SimpleMatrix A = J.transpose().mult(J)
+                .plus(SimpleMatrix.identity(n).scale(lam2));
+            return A.pseudoInverse().mult(J.transpose());
+        } else {
+            SimpleMatrix A = J.mult(J.transpose())
+                .plus(SimpleMatrix.identity(m).scale(lam2));
+            return J.transpose().mult(A.pseudoInverse());
+        }
+    }
+
+    public static SimpleMatrix nullspaceProjector(SimpleMatrix J, double lambda) {
+        int n = J.numCols();
+        SimpleMatrix Jpinv = dampedPseudoInverse(J, lambda);
+        SimpleMatrix I = SimpleMatrix.identity(n);
+        return I.minus(Jpinv.mult(J));
+    }
+
+    public static SimpleMatrix twoTaskVelocityControl(SimpleMatrix J1,
+                                                      SimpleMatrix xdot1_star,
+                                                      SimpleMatrix J2,
+                                                      SimpleMatrix xdot2_star,
+                                                      double lambda) {
+        // Task 1
+        SimpleMatrix J1pinv = dampedPseudoInverse(J1, lambda);
+        SimpleMatrix qdot1 = J1pinv.mult(xdot1_star);
+
+        // Null space of Task 1
+        SimpleMatrix N1 = nullspaceProjector(J1, lambda);
+
+        // Effective Task 2 in null space
+        SimpleMatrix J2_eff = J2.mult(N1);
+        SimpleMatrix J2_eff_pinv = dampedPseudoInverse(J2_eff, lambda);
+
+        SimpleMatrix residual2 = xdot2_star.minus(J2.mult(qdot1));
+        SimpleMatrix qdot2_corr = N1.mult(J2_eff_pinv.mult(residual2));
+
+        return qdot1.plus(qdot2_corr);
+    }
+
+    public static void main(String[] args) {
+        int n_dof = 7;
+        int m1 = 3;
+        int m2 = 3;
+
+        SimpleMatrix J1 = SimpleMatrix.random_DDRM(m1, n_dof, -1.0, 1.0, null);
+        SimpleMatrix J2 = SimpleMatrix.random_DDRM(m2, n_dof, -1.0, 1.0, null);
+
+        SimpleMatrix xdot1_star = new SimpleMatrix(m1, 1, true, new double[]{0.1, 0.0, -0.05});
+        SimpleMatrix xdot2_star = new SimpleMatrix(m2, 1, true, new double[]{0.0, 0.05, 0.0});
+
+        double lambda = 1e-3;
+        SimpleMatrix qdot = twoTaskVelocityControl(J1, xdot1_star, J2, xdot2_star, lambda);
+        qdot.print();
+    }
+}
+      </code></pre>
+      <p>
+        This code can be embedded into a real-time Java control loop where
+        <code>J1</code>, <code>J2</code> and the desired task velocities are
+        updated at each control cycle.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        In MATLAB, we can exploit both the core linear algebra routines and the
+        Robotics System Toolbox. At the velocity level, a simple two-task
+        whole-body controller can be implemented as:
+      </p>
+      <pre><code class="language-matlab">
+function qdot = twoTaskWBC(q, J1, xdot1_star, J2, xdot2_star, lambda)
+%TWOTASKWBC Hierarchical two-task velocity control.
+%
+% q           : current joint configuration (unused here, but typically used
+%               to compute J1, J2 from a rigidBodyTree model)
+% J1          : Jacobian of high-priority task (m1 x n)
+% xdot1_star  : desired task-1 velocity (m1 x 1)
+% J2          : Jacobian of second-priority task (m2 x n)
+% xdot2_star  : desired task-2 velocity (m2 x 1)
+% lambda      : damping coefficient
+
+if nargin &lt; 6
+    lambda = 1e-3;
+end
+
+J1_pinv = damped_pinv(J1, lambda);
+qdot1 = J1_pinv * xdot1_star;
+
+N1 = eye(size(J1, 2)) - J1_pinv * J1;
+
+J2_eff = J2 * N1;
+J2_eff_pinv = damped_pinv(J2_eff, lambda);
+
+residual2 = xdot2_star - J2 * qdot1;
+qdot2_corr = N1 * (J2_eff_pinv * residual2);
+
+qdot = qdot1 + qdot2_corr;
+end
+
+function J_pinv = damped_pinv(J, lambda)
+[m, n] = size(J);
+if m &gt;= n
+    A = J' * J + (lambda^2) * eye(n);
+    J_pinv = A \ J';
+else
+    A = J * J' + (lambda^2) * eye(m);
+    J_pinv = J' / A;
+end
+end
+      </code></pre>
+      <p>
+        In a <strong>Simulink</strong> environment, this logic can be
+        encapsulated in a MATLAB Function block. The Jacobians
+        <code>J1</code> and <code>J2</code> can be computed in a preceding block
+        using a <code>rigidBodyTree</code> model and the block
+        <code>geometricJacobian</code>, and the output <code>qdot</code> can be
+        integrated or fed into a lower-level torque controller implemented in a
+        separate subsystem.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Mathematica provides high-level linear algebra primitives that make
+        hierarchical control concise. The following code implements a two-task
+        velocity controller:
+      </p>
+      <pre><code class="language-mathematica">
+dampedPseudoInverse[J_, lambda_] := Module[{m, n, lam2, A},
+  {m, n} = Dimensions[J];
+  lam2 = lambda^2;
+  If[m &gt;= n,
+    A = Transpose[J].J + lam2 IdentityMatrix[n];
+    LinearSolve[A, Transpose[J]],
+    A = J.Transpose[J] + lam2 IdentityMatrix[m];
+    Transpose[J].LinearSolve[A, IdentityMatrix[m]]
+  ]
+];
+
+nullspaceProjector[J_, lambda_] := Module[{n, Jpinv},
+  n = Dimensions[J][[2]];
+  Jpinv = dampedPseudoInverse[J, lambda];
+  IdentityMatrix[n] - Jpinv.J
+];
+
+twoTaskVelocityControl[J1_, xdot1star_, J2_, xdot2star_, lambda_] :=
+ Module[{J1pinv, qdot1, N1, J2eff, J2effpinv, residual2, qdot2corr},
+  J1pinv = dampedPseudoInverse[J1, lambda];
+  qdot1 = J1pinv.xdot1star;
+  N1 = nullspaceProjector[J1, lambda];
+
+  J2eff = J2.N1;
+  J2effpinv = dampedPseudoInverse[J2eff, lambda];
+
+  residual2 = xdot2star - J2.qdot1;
+  qdot2corr = N1.(J2effpinv.residual2);
+  qdot1 + qdot2corr
+];
+
+(* Example usage with random matrices *)
+SeedRandom[0];
+nDof = 7; m1 = 3; m2 = 3;
+J1 = RandomReal[{-1, 1}, {m1, nDof}];
+J2 = RandomReal[{-1, 1}, {m2, nDof}];
+
+xdot1star = {0.1, 0.0, -0.05};
+xdot2star = {0.0, 0.05, 0.0};
+
+lambda = 10.^-3;
+qdot = twoTaskVelocityControl[J1, xdot1star, J2, xdot2star, lambda]
+      </code></pre>
+      <p>
+        The same pattern can be extended to multiple tasks by looping over the
+        task list and updating the null-space projector at each step.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Null-Space Dimension for Whole-Body Tasks).</strong>
+        Consider a 7-DOF manipulator with tasks: (i) a 3D Cartesian position
+        task for the hand, (ii) a 3D orientation task for the hand, (iii) a 1D
+        scalar posture task (e.g., elbow angle regularization). Assume that each
+        task Jacobian has full row rank at the current configuration. Compute
+        the null-space dimension after each task is imposed hierarchically.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        Let \( n = 7 \). For the first task, \( m_1 = 3 \), so under full row
+        rank
+        <strong>\( \operatorname{rank}(\mathbf{J}_1) = 3 \)</strong>. The
+        null-space dimension is
+        <strong>\( n - \operatorname{rank}(\mathbf{J}_1) = 7 - 3 = 4 \)</strong
+        >.
+      </p>
+      <p>
+        For the second task, \( m_2 = 3 \) and the effective Jacobian \(
+        \mathbf{J}_2 \mathbf{N}_1 \) has rank at most \(3\). Under generic
+        conditions and sufficient redundancy, we expect
+        <strong>\( \operatorname{rank}(\mathbf{J}_2 \mathbf{N}_1) = 3 \)</strong
+        >. Then the null-space dimension after the second task is
+        <strong>\( 4 - 3 = 1 \)</strong>.
+      </p>
+      <p>
+        For the third task, \( m_3 = 1 \). Assuming it is independent from the
+        previous ones within the remaining null space, the rank increase is 1,
+        and the final null-space dimension becomes
+        <strong>\( 1 - 1 = 0 \)</strong>. Thus the 7 DOFs are fully utilized by
+        the three tasks.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Projector Properties).</strong>
+        Let \( \mathbf{J} \in \mathbb{R}^{m \times n} \) with pseudoinverse \(
+        \mathbf{J}^\# \) and define \( \mathbf{N} = \mathbf{I}_n - \mathbf{J}^\#
+        \mathbf{J} \). Show that: (a) \( \mathbf{N}^2 = \mathbf{N} \)
+        (idempotence), and (b) \( \mathbf{J}\mathbf{N} = \mathbf{0} \).
+      </p>
+      <p><strong>Solution.</strong></p>
+      <p>(a) Compute \( \mathbf{N}^2 \):</p>
+      <h4 class="mathJax">
+        \[ \mathbf{N}^2 = (\mathbf{I}_n - \mathbf{J}^\# \mathbf{J})
+        (\mathbf{I}_n - \mathbf{J}^\# \mathbf{J}) = \mathbf{I}_n - 2
+        \mathbf{J}^\# \mathbf{J} + \mathbf{J}^\# \mathbf{J} \mathbf{J}^\#
+        \mathbf{J}. \]
+      </h4>
+      <p>
+        Using the pseudoinverse property \( \mathbf{J}^\# \mathbf{J}
+        \mathbf{J}^\# = \mathbf{J}^\# \), we get \( \mathbf{J}^\# \mathbf{J}
+        \mathbf{J}^\# \mathbf{J} = \mathbf{J}^\# \mathbf{J} \). Thus
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{N}^2 = \mathbf{I}_n - 2 \mathbf{J}^\# \mathbf{J} +
+        \mathbf{J}^\# \mathbf{J} = \mathbf{I}_n - \mathbf{J}^\# \mathbf{J} =
+        \mathbf{N}. \]
+      </h4>
+      <p>(b) Compute \( \mathbf{J}\mathbf{N} \):</p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}\mathbf{N} = \mathbf{J}(\mathbf{I}_n - \mathbf{J}^\#
+        \mathbf{J}) = \mathbf{J} - \mathbf{J}\mathbf{J}^\# \mathbf{J} =
+        \mathbf{J} - \mathbf{J} = \mathbf{0}, \]
+      </h4>
+      <p>
+        by the pseudoinverse property \( \mathbf{J}\mathbf{J}^\# \mathbf{J} =
+        \mathbf{J} \). Hence \( \mathbf{N} \) is an idempotent projector onto
+        the (generalized) null space of \( \mathbf{J} \).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Preservation of High-Priority Task).</strong>
+        Consider the two-task control law \( \dot{\mathbf{q}}_2 =
+        \dot{\mathbf{q}}_1 + \mathbf{N}_1 \mathbf{w} \), where \(
+        \dot{\mathbf{q}}_1 = \mathbf{J}_1^\# \dot{\mathbf{x}}_1^\star \) and \(
+        \mathbf{N}_1 = \mathbf{I}_n - \mathbf{J}_1^\# \mathbf{J}_1 \). Show that
+        \( \mathbf{J}_1 \dot{\mathbf{q}}_2 = \dot{\mathbf{x}}_1^\star \) for any
+        choice of \( \mathbf{w} \).
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        We compute
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_1 \dot{\mathbf{q}}_2 = \mathbf{J}_1 \dot{\mathbf{q}}_1 +
+        \mathbf{J}_1 \mathbf{N}_1 \mathbf{w} = \mathbf{J}_1 \mathbf{J}_1^\#
+        \dot{\mathbf{x}}_1^\star + \mathbf{J}_1 (\mathbf{I}_n - \mathbf{J}_1^\#
+        \mathbf{J}_1) \mathbf{w}. \]
+      </h4>
+      <p>
+        The first term equals \( \dot{\mathbf{x}}_1^\star \) because \(
+        \mathbf{J}_1 \mathbf{J}_1^\# \) is the projector onto the row space of
+        \( \mathbf{J}_1 \). The second term simplifies to \( \mathbf{J}_1
+        \mathbf{w} - \mathbf{J}_1 \mathbf{J}_1^\# \mathbf{J}_1 \mathbf{w} =
+        \mathbf{J}_1 \mathbf{w} - \mathbf{J}_1 \mathbf{w} = \mathbf{0} \), again
+        by the pseudoinverse property. Hence the primary task is exactly
+        preserved.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Task Conflict Condition).</strong>
+        Let \( \mathbf{J}_1 \in \mathbb{R}^{m_1 \times n} \) and \( \mathbf{J}_2
+        \in \mathbb{R}^{m_2 \times n} \) be the Jacobians of two tasks with
+        desired velocities \( \dot{\mathbf{x}}_1^\star \) and \(
+        \dot{\mathbf{x}}_2^\star \). Using the two-task law with null-space
+        projection, discuss a condition under which Task 2 can be exactly
+        realized without disturbing Task 1.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        In the two-task scheme, Task 2 is realized by choosing a correction \(
+        \dot{\mathbf{q}}_{2,\text{corr}} = \mathbf{N}_1 \mathbf{w} \) such that
+        \( \mathbf{J}_2 \dot{\mathbf{q}}_2 = \dot{\mathbf{x}}_2^\star \). This
+        requires solving
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_2 \mathbf{N}_1 \mathbf{w} = \dot{\mathbf{x}}_2^\star -
+        \mathbf{J}_2 \dot{\mathbf{q}}_1. \]
+      </h4>
+      <p>
+        A necessary and sufficient condition for the existence of an exact
+        solution is that the right-hand side lies in the range of \(
+        \mathbf{J}_2 \mathbf{N}_1 \), i.e.,
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{x}}_2^\star - \mathbf{J}_2 \dot{\mathbf{q}}_1 \in
+        \mathcal{R}(\mathbf{J}_2 \mathbf{N}_1), \]
+      </h4>
+      <p>
+        where \( \mathcal{R}(\cdot) \) denotes the column space. Equivalently,
+        the rank of \( \mathbf{J}_2 \mathbf{N}_1 \) must be high enough to span
+        all directions needed by Task 2 that are not already used to satisfy
+        Task 1. If the rank is too small (for example, because the tasks are
+        fundamentally incompatible or the robot is insufficiently redundant),
+        Task 2 can only be approximately satisfied, and a least-squares solution
+        is used.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Torque-Level Null-Space Control).</strong>
+        Consider a torque command of the form \( \boldsymbol{&bsol;tau} =
+        \boldsymbol{&bsol;tau}_1 + \mathbf{N}_1^\top \boldsymbol{&bsol;tau}_0
+        \), where \( \boldsymbol{&bsol;tau}_1 \) realizes a primary task with
+        Jacobian \( \mathbf{J}_1 \) and \( \mathbf{N}_1 \) is a dynamically
+        consistent null-space projector. Explain why \( \boldsymbol{&bsol;tau}_0
+        \) does not affect the primary task acceleration.
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        In the dynamically consistent operational-space framework, the task
+        acceleration for Task 1 depends on the projection of torques through \(
+        \mathbf{J}_1 \mathbf{M}^{-1} \). By definition of the dynamically
+        consistent null-space projector, we have
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_1 \mathbf{M}^{-1} \mathbf{N}_1^\top = \mathbf{0}. \]
+      </h4>
+      <p>Therefore,</p>
+      <h4 class="mathJax">
+        \[ \mathbf{J}_1 \mathbf{M}^{-1} \boldsymbol{&bsol;tau} = \mathbf{J}_1
+        \mathbf{M}^{-1} \boldsymbol{&bsol;tau}_1 + \mathbf{J}_1 \mathbf{M}^{-1}
+        \mathbf{N}_1^\top \boldsymbol{&bsol;tau}_0 = \mathbf{J}_1
+        \mathbf{M}^{-1} \boldsymbol{&bsol;tau}_1. \]
+      </h4>
+      <p>
+        Thus the additional torque term \( \mathbf{N}_1^\top
+        \boldsymbol{&bsol;tau}_0 \) lies in the null space of the mapping from
+        torque to task acceleration and cannot affect the primary task. It can
+        therefore be used safely for lower-priority objectives such as posture
+        regulation or joint limit avoidance.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson, we formalized whole-body control as the coordination of
+        many DOFs across multiple tasks with different priorities. Starting from
+        the kinematic relationship \( \dot{\mathbf{x}}_i = \mathbf{J}_i
+        \dot{\mathbf{q}} \), we introduced pseudoinverse solutions and
+        null-space projectors that allow lower-priority tasks to be executed
+        within the remaining motion subspace without disturbing higher-priority
+        tasks. We extended this to recursive multi-task hierarchies and outlined
+        how the same principles apply at the torque level using dynamically
+        consistent null spaces. Implementation examples in Python, C++, Java,
+        MATLAB/Simulink, and Wolfram Mathematica illustrated how these
+        mathematical constructs map to practical code that can be integrated
+        into whole-body control stacks for complex robots.
+      </p>
+      <p>
+        The next lesson will build on this foundation by casting task
+        hierarchies into explicit quadratic programming formulations, enabling
+        systematic handling of constraints and inequalities in whole-body
+        control.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 15: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>15. References</h2>
+    <ol>
+      <li>
+        Khatib, O. (1987). A unified approach for motion and force control of
+        robot manipulators: The operational space formulation.
+        <em>IEEE Journal of Robotics and Automation</em>, 3(1), 43&ndash;53.
+      </li>
+      <li>
+        Siciliano, B., &amp; Slotine, J.-J. E. (1991). A general framework for
+        managing multiple tasks in highly redundant robotic systems.
+        <em
+          >Proceedings of the 5th International Conference on Advanced
+          Robotics</em
+        >, 1211&ndash;1216.
+      </li>
+      <li>
+        Nakamura, Y. (1991).
+        <em>Advanced Robotics: Redundancy and Optimization</em>. Addison-Wesley.
+      </li>
+      <li>
+        Sentis, L., &amp; Khatib, O. (2005). Synthesis of whole-body behaviors
+        through hierarchical control of behavioral primitives.
+        <em>International Journal of Humanoid Robotics</em>, 2(4),
+        505&ndash;518.
+      </li>
+      <li>
+        Mansard, N., Khatib, O., &amp; Kheddar, A. (2009). A unified approach to
+        integrate unilateral constraints in the stack of tasks.
+        <em>IEEE Transactions on Robotics</em>, 25(3), 670&ndash;685.
+      </li>
+      <li>
+        Escande, A., Mansard, N., &amp; Wieber, P.-B. (2014). Hierarchical
+        quadratic programming: Fast online humanoid-robot motion generation.
+        <em>International Journal of Robotics Research</em>, 33(7),
+        1006&ndash;1028.
+      </li>
+      <li>
+        Del Prete, A., Mansard, N., Nori, F., &amp; Natale, L. (2015).
+        Prioritized motion-force control of constrained fully-actuated robots:
+        &quot;Task space inverse dynamics&quot;.
+        <em>Robotics and Autonomous Systems</em>, 63, 150&ndash;157.
+      </li>
+      <li>
+        Ott, C., Kugi, A., &amp; Nakamura, Y. (2008). Resolving the problem of
+        non-integrability of nullspace velocities for compliant robot motion.
+        <em>IEEE Transactions on Robotics</em>, 24(2), 378&ndash;383.
+      </li>
+      <li>
+        Park, J., &amp; Khatib, O. (2006). A haptic teleoperation approach based
+        on contact force control.
+        <em>International Journal of Robotics Research</em>, 25(5-6),
+        575&ndash;591.
+      </li>
+      <li>
+        Buss, S. R. (2004). Introduction to inverse kinematics with Jacobian
+        transpose, pseudoinverse and damped least squares methods.
+        <em>Technical report</em>, University of California, San Diego.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson5.html">
+          <small>(previous chapter)</small> Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson2.html">
+          Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

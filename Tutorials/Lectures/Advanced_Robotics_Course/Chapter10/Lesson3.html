@@ -1,0 +1,1791 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 10: Advanced Perception for Manipulation - Lesson 3: Semantic Segmentation for Robotics | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 10: Advanced Perception for Manipulation</h1>
+    <h3><strong>Lesson 3: Semantic Segmentation for Robotics</strong></h3>
+    <p>
+      This lesson formalizes semantic segmentation as a structured prediction
+      problem and connects it to robotic manipulation. We derive probabilistic
+      and energy-based formulations, analyze deep network architectures for
+      dense prediction, and show how to project 2D segmentations into 3D to
+      obtain object-level masks in the robot frame. We then implement core ideas
+      in Python, C++, Java, MATLAB/Simulink, and Wolfram Mathematica using
+      robotics-relevant libraries (ROS, OpenCV, and vision toolboxes).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Problem Setting and Role in Manipulation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Problem Setting and Role in Manipulation</h2>
+    <div class="down-content">
+      <p>
+        In semantic segmentation, the perception system assigns a class label to
+        <em>every</em> pixel of an image (or point in a cloud). For an RGB(-D)
+        image defined on a discrete grid
+        <strong>\( \Omega \subset \mathbb{Z}^2 \)</strong> and a finite set of
+        semantic labels <strong>\( \mathcal{C} = \{1,\dots,C\} \)</strong>, a
+        segmentation is a function
+      </p>
+      <h4 class="mathJax">
+        \[ y : \Omega \to \mathcal{C}, \quad y(p) = c \;\text{means pixel } p
+        \text{ belongs to class } c . \]
+      </h4>
+      <p>
+        For manipulation, typical labels include <em>object of interest</em>,
+        <em>support surface</em> (table, shelf), <em>background</em>, and
+        sometimes <em>obstacles</em>. A segmentation determines which 3D points
+        are safe to grasp, which belong to the table, and which must be avoided.
+        Connecting to previous lessons in this chapter, we interpret
+        segmentation as an intermediate representation between raw point clouds
+        and object pose estimation or tracking.
+      </p>
+      <p>
+        A common representation is a one-hot tensor
+        <strong>\( \mathbf{Y} \in \{0,1\}^{|\Omega|\times C} \)</strong>, where
+        pixel <strong>\( p \)</strong> and class <strong>\( c \)</strong> entry
+        is
+      </p>
+      <h4 class="mathJax">
+        \[ Y_{p,c} = \begin{cases} 1, &amp; \text{if } y(p) = c,\\ 0, &amp;
+        \text{otherwise.} \end{cases} \]
+      </h4>
+      <p>
+        We will focus on <em>discriminative</em> models
+        <strong>\( p_\theta(y \mid x) \)</strong> that directly map an image (or
+        RGB-D observation) <strong>\( x \)</strong> to a distribution over
+        labelings <strong>\( y \)</strong>.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  I["RGB-D image"] --> F["Feature extractor (CNN or similar)"]
+  F --> SCORES["Per-pixel class scores"]
+  SCORES --> SMASK["2D semantic mask"]
+  SMASK --> P3D["Back-project to 3D points"]
+  P3D --> OBJ["Object point cloud for target class"]
+  OBJ --> G["Grasp / contact region selection"]
+  G --> MPC["Manipulator planner uses segmented object"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Probabilistic and Energy-Based Formulation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Probabilistic and Energy-Based Formulation</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \mathbf{Y} = \{Y_p\}_{p\in\Omega} \)</strong> be discrete
+        random variables taking values in <strong>\( \mathcal{C} \)</strong>. A
+        widely used <em>conditional random field</em> (CRF) model assigns a
+        Gibbs distribution conditioned on the observed image
+        <strong>\( x \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ p_\theta(y \mid x) = \frac{1}{Z(x;\theta)}
+        \exp\!\big(-E_\theta(y,x)\big), \]
+      </h4>
+      <p>
+        where <strong>\( Z(x;\theta) \)</strong> is the partition function and
+        the energy typically decomposes into unary and pairwise terms over a
+        pixel neighborhood system <strong>\( \mathcal{N} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ E_\theta(y,x) = \sum_{p\in\Omega} \psi_p(y_p;x,\theta) +
+        \sum_{(p,q)\in\mathcal{N}} \psi_{p,q}(y_p,y_q;x,\theta). \]
+      </h4>
+      <p>
+        <strong>Unary terms</strong>
+        <strong>\( \psi_p(y_p;x,\theta) \)</strong> encode the cost of assigning
+        class <strong>\( y_p \)</strong> to pixel <strong>\( p \)</strong>
+        based on local appearance or deep features. In modern systems these
+        often come from a deep network:
+      </p>
+      <h4 class="mathJax">
+        \[ \psi_p(c;x,\theta) = -\log p_\theta(Y_p = c \mid x), \]
+      </h4>
+      <p>
+        where <strong>\( p_\theta(Y_p = c \mid x) \)</strong> is produced by a
+        softmax layer.
+      </p>
+      <p>
+        <strong>Pairwise terms</strong> enforce spatial coherence. A common
+        Potts model is
+      </p>
+      <h4 class="mathJax">
+        \[ \psi_{p,q}(y_p,y_q;x,\theta) = \lambda \,\mathbf{1}\{y_p \neq y_q\}
+        \exp\!\left( -\frac{\|I_p - I_q\|_2^2}{2\sigma_I^2} -\frac{\|p -
+        q\|_2^2}{2\sigma_p^2} \right), \]
+      </h4>
+      <p>
+        where <strong>\( I_p \)</strong> is the color at pixel
+        <strong>\( p \)</strong>. Neighboring pixels with similar colors and
+        positions are encouraged to share labels.
+      </p>
+      <p>Maximum a posteriori (MAP) inference solves</p>
+      <h4 class="mathJax">
+        \[ \hat{y} = \arg\max_{y} p_\theta(y\mid x) = \arg\min_{y}
+        E_\theta(y,x). \]
+      </h4>
+      <p>
+        For particular classes of energies (submodular pairwise potentials) this
+        minimization can be solved exactly by s-t graph cuts. In robotics,
+        graph-cut based segmentation remains attractive for real-time CPU
+        implementations when deep models are not available, or as a refinement
+        of network predictions.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Deep Networks for Semantic Segmentation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Deep Networks for Semantic Segmentation</h2>
+    <div class="down-content">
+      <p>
+        Most current systems use <em>fully convolutional networks</em> (FCNs) or
+        encoder–decoder architectures to produce dense label probabilities.
+        Given an image <strong>\( x \)</strong>, a network with parameters
+        <strong>\( \theta \)</strong> outputs per-pixel logits
+        <strong>\( z_{p,c}(x;\theta) \)</strong>, organized as a tensor
+        <strong>\( \mathbf{Z} \in \mathbb{R}^{|\Omega|\times C} \)</strong>.
+      </p>
+      <p>Applying the softmax at each pixel:</p>
+      <h4 class="mathJax">
+        \[ p_\theta(Y_p = c \mid x) = \frac{\exp\!\big(z_{p,c}(x;\theta)\big)}
+        {\sum_{c'=1}^{C} \exp\!\big(z_{p,c'}(x;\theta)\big)}. \]
+      </h4>
+      <p>
+        For a single training example with ground-truth labels
+        <strong>\( y_p \)</strong>, the pixel-wise cross-entropy loss is
+      </p>
+      <h4 class="mathJax">
+        \[ \ell(x,y;\theta) = - \sum_{p\in\Omega} \log p_\theta(Y_p = y_p \mid
+        x). \]
+      </h4>
+      <p>
+        For class-imbalanced scenes (e.g., small objects on a large table),
+        weighted cross-entropy can reduce bias toward dominant classes:
+      </p>
+      <h4 class="mathJax">
+        \[ \ell_{\text{wce}}(x,y;\theta) = - \sum_{p\in\Omega} w_{y_p}\, \log
+        p_\theta(Y_p = y_p \mid x), \]
+      </h4>
+      <p>where <strong>\( w_c &gt; 0 \)</strong> emphasize rare classes.</p>
+      <p>
+        The gradient of the unweighted loss with respect to logits has a simple
+        closed form. Let
+        <strong>\( \ell_p(\theta) = -\log p_\theta(Y_p = y_p \mid x) \)</strong>
+        and denote the Kronecker delta by
+        <strong>\( \delta_{c,y_p} \)</strong>. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \ell_p}{\partial z_{p,c}} = p_\theta(Y_p = c \mid x) -
+        \delta_{c,y_p}, \]
+      </h4>
+      <p>
+        which implies that backpropagation for segmentation is structurally
+        identical to that for multi-class classification, but applied at every
+        pixel.
+      </p>
+      <p>
+        For evaluation, the <em>intersection-over-union</em> (IoU) for class
+        <strong>\( c \)</strong> is defined by confusion counts
+        <strong>\( \text{TP}_c, \text{FP}_c, \text{FN}_c \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{IoU}_c = \frac{\text{TP}_c} {\text{TP}_c + \text{FP}_c
+        + \text{FN}_c}, \quad \text{mIoU} = \frac{1}{C}\sum_{c=1}^{C}
+        \operatorname{IoU}_c. \]
+      </h4>
+      <p>
+        IoU is more informative than pixel accuracy for robotics, since
+        imprecise boundaries around objects of interest can significantly affect
+        grasp success, even if the majority of background pixels are correctly
+        classified.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: 3D Semantic Segmentation and Projection to Robot Frame -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. 3D Semantic Segmentation and Projection to Robot Frame</h2>
+    <div class="down-content">
+      <p>
+        Manipulation requires reasoning in 3D. Given synchronized RGB and depth
+        images and a calibrated pinhole camera with intrinsic matrix
+        <strong>\( \mathbf{K} \in \mathbb{R}^{3\times 3} \)</strong>, each pixel
+        <strong>\( p = (u,v) \)</strong> with depth
+        <strong>\( d_p &gt; 0 \)</strong> back-projects to a 3D point in the
+        camera frame:
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{p} = \begin{bmatrix} u \\ v \\ 1 \end{bmatrix},\quad
+        \mathbf{P}_{\text{cam}}(p) = d_p\,\mathbf{K}^{-1}\tilde{p} \in
+        \mathbb{R}^3. \]
+      </h4>
+      <p>
+        If the homogeneous transform from camera frame to robot base frame is
+        known from calibration,
+        <strong
+          >\( \mathbf{T}^{\text{base}}_{\text{cam}} \in \mathrm{SE}(3)
+          \)</strong
+        >, we obtain
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{P}}_{\text{cam}} = \begin{bmatrix}
+        \mathbf{P}_{\text{cam}} \\ 1 \end{bmatrix},\quad
+        \tilde{\mathbf{P}}_{\text{base}} = \mathbf{T}^{\text{base}}_{\text{cam}}
+        \tilde{\mathbf{P}}_{\text{cam}}, \]
+      </h4>
+      <p>
+        and the 3D position in the robot base frame is
+        <strong>\( \mathbf{P}_{\text{base}} \)</strong>, the first three
+        components of <strong>\( \tilde{\mathbf{P}}_{\text{base}} \)</strong>.
+      </p>
+      <p>
+        Given a semantic mask for class
+        <strong>\( c^\star \)</strong>, e.g. a target object, define the set of
+        pixels belonging to that class:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{M}_{c^\star} = \{ p\in\Omega : y(p) = c^\star \}. \]
+      </h4>
+      <p>The corresponding object point cloud in the base frame is</p>
+      <h4 class="mathJax">
+        \[ \mathcal{P}_{c^\star} = \{ \mathbf{P}_{\text{base}}(p) : p \in
+        \mathcal{M}_{c^\star} \}. \]
+      </h4>
+      <p>
+        A simple 3D descriptor for grasp planning is the centroid and covariance
+        of this cloud:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\mu} = \frac{1}{|\mathcal{P}_{c^\star}|}
+        \sum_{\mathbf{P}\in\mathcal{P}_{c^\star}} \mathbf{P}, \quad
+        \mathbf{\Sigma} = \frac{1}{|\mathcal{P}_{c^\star}|}
+        \sum_{\mathbf{P}\in\mathcal{P}_{c^\star}}
+        (\mathbf{P}-\boldsymbol{\mu})(\mathbf{P}-\boldsymbol{\mu})^\top. \]
+      </h4>
+      <p>
+        These quantities summarize object size and orientation and can be passed
+        to a grasp synthesis module (later chapters) or used to place heuristic
+        top-down grasps aligned with principal directions.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: System Architecture for a Robotic Segmentation Node -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. System Architecture for a Robotic Segmentation Node</h2>
+    <div class="down-content">
+      <p>
+        In practice, semantic segmentation runs as a node within a robotics
+        middleware (e.g., ROS). The node subscribes to camera topics, performs
+        inference on a GPU or CPU, and publishes dense labels and object masks
+        in both 2D and 3D. A typical data flow is:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Camera topics '/camera/rgb' + '/camera/depth'"] --> B["Segmentation node"]
+  B --> C["2D class probabilities"]
+  C --> D["2D semantic mask (target class)"]
+  B --> E["Per-pixel depth + intrinsics"]
+  E --> F["3D back-projection in base frame"]
+  D --> F
+  F --> G["3D object mask point cloud"]
+  G --> H["Grasp pose generator"]
+  H --> J["Manipulator motion planner / controller"]
+        </pre>
+      </div>
+      <p>
+        The following sections give language-specific implementations of the
+        segmentation core and its interaction with robotic software stacks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation (PyTorch + ROS + OpenCV) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Implementation (PyTorch, OpenCV, ROS)</h2>
+    <div class="down-content">
+      <p>
+        We implement a compact FCN-style network in PyTorch and wrap it as a ROS
+        node. For brevity, we consider a fixed number of classes and an input
+        image already resized to a canonical resolution.
+      </p>
+      <pre><code class="language-python">
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import cv2
+
+# Optional: ROS interface (comment out if not using ROS)
+try:
+    import rospy
+    from sensor_msgs.msg import Image
+    from cv_bridge import CvBridge
+    ROS_AVAILABLE = True
+except ImportError:
+    ROS_AVAILABLE = False
+
+
+class SmallSegNet(nn.Module):
+    def __init__(self, num_classes: int = 4):
+        super().__init__()
+        # Encoder
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        # Bottleneck
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        # Decoder (simple upsampling)
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.up2 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.logits = nn.Conv2d(32, num_classes, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (N, 3, H, W) in [0,1]
+        x = F.relu(self.conv1(x))
+        x = self.pool(x)          # (N, 32, H/2, W/2)
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)          # (N, 64, H/4, W/4)
+        x = F.relu(self.conv3(x)) # (N, 128, H/4, W/4)
+        x = F.relu(self.up1(x))   # (N, 64, H/2, W/2)
+        x = F.relu(self.up2(x))   # (N, 32, H,   W)
+        x = self.logits(x)        # (N, C, H, W)
+        return x
+
+
+def load_model(weights_path: str, num_classes: int) -> SmallSegNet:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SmallSegNet(num_classes=num_classes).to(device)
+    state_dict = torch.load(weights_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
+
+
+def segment_rgb_image(model: SmallSegNet, rgb: np.ndarray) -> np.ndarray:
+    """
+    rgb: uint8 array with shape (H, W, 3), BGR or RGB.
+    Returns: uint8 mask with shape (H, W), each entry is class index.
+    """
+    device = next(model.parameters()).device
+    img = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+    img_f = img.astype(np.float32) / 255.0
+    tensor = torch.from_numpy(img_f.transpose(2, 0, 1)).unsqueeze(0).to(device)
+    with torch.no_grad():
+        logits = model(tensor)
+        probs = F.softmax(logits, dim=1)
+        mask = torch.argmax(probs, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
+    return mask
+
+
+def backproject_to_base(mask: np.ndarray,
+                        depth: np.ndarray,
+                        K: np.ndarray,
+                        T_base_cam: np.ndarray,
+                        target_class: int) -> np.ndarray:
+    """
+    Back-project pixels of target_class into 3D base frame.
+    depth: depth image in meters, shape (H, W).
+    K: 3x3 camera intrinsics.
+    T_base_cam: 4x4 homogeneous transform.
+    Returns: array of 3D points, shape (N, 3).
+    """
+    ys, xs = np.where(mask == target_class)
+    if ys.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    # Build homogeneous pixel coordinates
+    ones = np.ones_like(xs, dtype=np.float32)
+    pix = np.stack([xs.astype(np.float32),
+                    ys.astype(np.float32),
+                    ones], axis=0)  # (3, N)
+
+    depths = depth[ys, xs].astype(np.float32)  # (N,)
+    K_inv = np.linalg.inv(K)
+    # Camera-frame coordinates
+    P_cam = (K_inv @ pix) * depths  # (3, N)
+    P_cam_h = np.vstack([P_cam, ones])  # (4, N)
+    # Transform to base frame
+    P_base_h = T_base_cam @ P_cam_h
+    P_base = P_base_h[:3, :].T  # (N, 3)
+    return P_base
+
+
+# Optional ROS node wrapper
+def run_ros_node(weights_path: str,
+                 num_classes: int,
+                 target_class: int):
+    if not ROS_AVAILABLE:
+        raise RuntimeError("ROS and cv_bridge are not available in this environment.")
+    rospy.init_node("semantic_segmentation_node")
+    bridge = CvBridge()
+    model = load_model(weights_path, num_classes)
+
+    K = np.eye(3, dtype=np.float32)
+    T_base_cam = np.eye(4, dtype=np.float32)
+
+    pub_mask = rospy.Publisher("/segmentation/mask", Image, queue_size=1)
+
+    def callback(msg: Image):
+        rgb = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        mask = segment_rgb_image(model, rgb)
+        mask_msg = bridge.cv2_to_imgmsg(mask, encoding="mono8")
+        pub_mask.publish(mask_msg)
+
+    sub = rospy.Subscriber("/camera/rgb/image_raw", Image, callback, queue_size=1)
+    rospy.spin()
+
+
+if __name__ == "__main__":
+    # Example standalone usage (no ROS)
+    dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
+    model = SmallSegNet(num_classes=4)
+    model.eval()
+    mask = segment_rgb_image(model, dummy_img)
+    print("Mask shape:", mask.shape)
+      </code></pre>
+      <p>
+        For training, the loss function from Section 3 can be implemented
+        directly with <code>torch.nn.CrossEntropyLoss</code>, optionally with
+        class weights. The <code>backproject_to_base</code> function then
+        converts a selected class mask into a 3D point cloud usable by
+        manipulation modules developed in later chapters.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation (OpenCV DNN + ROS) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Implementation (OpenCV DNN, ROS)</h2>
+    <div class="down-content">
+      <p>
+        In C++, OpenCV's DNN module can load an ONNX semantic segmentation model
+        and integrate it with ROS. The following simplified node loads a network
+        and publishes an 8-bit mask image:
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;ros/ros.h&gt;
+#include &lt;image_transport/image_transport.h&gt;
+#include &lt;cv_bridge/cv_bridge.h&gt;
+#include &lt;sensor_msgs/Image.h&gt;
+
+#include &lt;opencv2/opencv.hpp&gt;
+#include &lt;opencv2/dnn.hpp&gt;
+
+class SegmentationNode {
+public:
+    SegmentationNode(const std::string&amp; onnx_path,
+                     int num_classes)
+        : it_(nh_), num_classes_(num_classes)
+    {
+        net_ = cv::dnn::readNetFromONNX(onnx_path);
+        sub_ = it_.subscribe("/camera/rgb/image_raw", 1,
+                             &amp;SegmentationNode::imageCallback, this);
+        pub_ = it_.advertise("/segmentation/mask", 1);
+    }
+
+    void spin() {
+        ros::spin();
+    }
+
+private:
+    void imageCallback(const sensor_msgs::ImageConstPtr&amp; msg) {
+        cv_bridge::CvImageConstPtr cv_ptr;
+        try {
+            cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
+        } catch (cv_bridge::Exception&amp; e) {
+            ROS_ERROR("cv_bridge exception: %s", e.what());
+            return;
+        }
+
+        cv::Mat img = cv_ptr-&gt;image;
+        cv::Mat blob = cv::dnn::blobFromImage(
+            img, 1.0 / 255.0, cv::Size(320, 240),
+            cv::Scalar(0, 0, 0), true, false
+        );
+
+        net_.setInput(blob);
+        cv::Mat scores = net_.forward(); // shape: (1, C, H, W)
+
+        int C = num_classes_;
+        int H = scores.size[2];
+        int W = scores.size[3];
+
+        cv::Mat mask(H, W, CV_8UC1);
+        const float* data = reinterpret_cast&lt;const float*&gt;(scores.data);
+
+        for (int y = 0; y &lt; H; ++y) {
+            for (int x = 0; x &lt; W; ++x) {
+                int best_class = 0;
+                float best_score = data[y * W * C + x * C + 0];
+                for (int c = 1; c &lt; C; ++c) {
+                    float val = data[y * W * C + x * C + c];
+                    if (val &gt; best_score) {
+                        best_score = val;
+                        best_class = c;
+                    }
+                }
+                mask.at&lt;unsigned char&gt;(y, x) = static_cast&lt;unsigned char&gt;(best_class);
+            }
+        }
+
+        cv::Mat mask_resized;
+        cv::resize(mask, mask_resized, img.size(), 0, 0, cv::INTER_NEAREST);
+
+        sensor_msgs::ImagePtr out_msg =
+            cv_bridge::CvImage(msg-&gt;header, "mono8", mask_resized).toImageMsg();
+        pub_.publish(out_msg);
+    }
+
+    ros::NodeHandle nh_;
+    image_transport::ImageTransport it_;
+    image_transport::Subscriber sub_;
+    image_transport::Publisher pub_;
+    cv::dnn::Net net_;
+    int num_classes_;
+};
+
+int main(int argc, char** argv) {
+    ros::init(argc, argv, "semantic_segmentation_node_cpp");
+    std::string onnx_path = "/path/to/model.onnx";
+    int num_classes = 4;
+    SegmentationNode node(onnx_path, num_classes);
+    node.spin();
+    return 0;
+}
+      </code></pre>
+      <p>
+        For 3D projection, one can subscribe to the depth image and camera info,
+        then implement the back-projection equations from Section 4 using
+        <code>cv::Mat</code> and Eigen or another linear algebra library for
+        homogeneous transforms.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation (OpenCV Java Bindings) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Implementation (OpenCV Java Bindings)</h2>
+    <div class="down-content">
+      <p>
+        Java is less common in low-level manipulation, but Java-based robotic
+        stacks (and Android-based systems) can still benefit from segmentation.
+        The following example performs a simple two-class segmentation by color
+        thresholding using OpenCV's Java API; it can serve as a placeholder for
+        a deep model:
+      </p>
+      <pre><code class="language-java">
+import org.opencv.core.Core;
+import org.opencv.core.CvType;
+import org.opencv.core.Mat;
+import org.opencv.core.Scalar;
+import org.opencv.imgcodecs.Imgcodecs;
+import org.opencv.imgproc.Imgproc;
+
+public class SimpleColorSegmentation {
+    static {
+        System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+    }
+
+    public static void main(String[] args) {
+        String inputPath = "scene.png";
+        Mat bgr = Imgcodecs.imread(inputPath);
+        if (bgr.empty()) {
+            System.err.println("Could not load image.");
+            return;
+        }
+
+        Mat hsv = new Mat();
+        Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV);
+
+        // Example: segment pixels that are "table" colored (e.g., brown)
+        Scalar lower = new Scalar(5, 50, 50);
+        Scalar upper = new Scalar(20, 255, 255);
+        Mat mask = new Mat(hsv.rows(), hsv.cols(), CvType.CV_8UC1);
+        Core.inRange(hsv, lower, upper, mask);
+
+        Imgcodecs.imwrite("mask_table.png", mask);
+        System.out.println("Saved binary mask to mask_table.png");
+    }
+}
+      </code></pre>
+      <p>
+        A deep segmentation network can be accessed via Java bindings to
+        libraries such as TensorFlow or through JNI wrappers around C++ code.
+        The key robotics ideas (projection to 3D, integration with planners)
+        remain governed by the mathematical formulation in Section 4.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB's Computer Vision Toolbox provides high-level functions for
+        semantic segmentation that integrate naturally with Simulink models of
+        robotic systems. Assuming a pre-trained network
+        <code>net</code> for a set of classes:
+      </p>
+      <pre><code class="language-matlab">
+% Load RGB image
+rgb = imread("scene.png");
+
+% Load pre-trained semantic segmentation network (e.g., DeepLab v3+)
+load("trainedSegNet.mat","net");
+
+% Perform pixel-wise classification
+[C, scores] = semanticseg(rgb, net);
+
+% Visualize one class mask, e.g., "targetObject"
+targetClass = "targetObject";
+mask = C == targetClass;
+imshowpair(rgb, mask, "montage");
+
+% Suppose we have a registered depth image and camera intrinsics K
+depth = imread("depth.png");      % depth in meters stored as single
+depth = single(depth);
+K = [fx 0 cx; 0 fy cy; 0 0 1];
+
+% Back-project mask pixels into 3D camera frame
+[H, W] = size(mask);
+[u, v] = meshgrid(0:W-1, 0:H-1);
+u = single(u); v = single(v);
+
+idx = find(mask);
+u_vec = u(idx);
+v_vec = v(idx);
+d_vec = depth(idx);
+
+pix = [u_vec.'; v_vec.'; ones(1, numel(u_vec), "single")];
+Kinv = inv(K);
+P_cam = Kinv * pix .* d_vec.;
+
+% Transform into base frame with T_base_cam (4x4)
+T_base_cam = eye(4, "single");
+P_cam_h = [P_cam; ones(1, size(P_cam,2), "single")];
+P_base_h = T_base_cam * P_cam_h;
+P_base = P_base_h(1:3,:).';
+
+% P_base is an N-by-3 array of 3D points for the target object
+      </code></pre>
+      <p>
+        In Simulink, a block diagram can be constructed where a semantic
+        segmentation block feeds a point cloud processing block that computes
+        object pose and passes it to a manipulator controller subsystem,
+        naturally connecting perception to actuation within a single model-based
+        environment.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Wolfram Mathematica supports image segmentation via both classical and
+        neural approaches. A basic semantic segmentation experiment can be
+        carried out as follows:
+      </p>
+      <pre><code class="language-mathematica">
+(* Load an RGB image *)
+img = Import["scene.png"];
+
+(* Simple clustering-based segmentation into k regions *)
+k = 4;
+seg = Colorize @ ImageSegmentation[img, k];
+
+(* Assign integer labels to each region *)
+labels = MorphologicalComponents[seg];
+
+(* Visualize a particular region, e.g., label 1 *)
+targetLabel = 1;
+mask = Binarize[labels, {targetLabel - 0.5, targetLabel + 0.5}];
+Row[{img, Colorize[mask]}]
+
+(* Example of defining a small fully convolutional network *)
+net = NetChain[{
+    ConvolutionLayer[16, {3, 3}, "PaddingSize" -&gt; 1],
+    ElementwiseLayer["ReLU"],
+    ConvolutionLayer[32, {3, 3}, "PaddingSize" -&gt; 1],
+    ElementwiseLayer["ReLU"],
+    ConvolutionLayer[4, {1, 1}] (* 4 semantic classes *)
+},
+   "Input" -&gt; NetEncoder[{"Image", ColorSpace -&gt; "RGB"}],
+   "Output" -&gt; NetDecoder[{"Class", Range[4]}]
+];
+
+(* Training would require a dataset of {image, labelImage} pairs *)
+      </code></pre>
+      <p>
+        For robotics use, the segmented 2D mask can be exported and combined
+        with external tools (e.g., a separate kinematics or motion planning
+        pipeline) using Wolfram's symbolic and numeric capabilities for
+        reasoning about geometry.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Gradient of Pixel-wise Cross-Entropy):</strong>
+        Consider a segmentation network producing logits
+        <strong>\( z_{p,c} \)</strong> at pixel <strong>\( p \)</strong>. Let
+        <strong
+          >\( p_{p,c} = \exp(z_{p,c}) / \sum_{c'} \exp(z_{p,c'}) \)</strong
+        >
+        and the loss
+        <strong>\( \ell_p = -\log p_{p,y_p} \)</strong>. Derive
+        <strong>\( \partial \ell_p / \partial z_{p,c} \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Write
+        <strong
+          >\( \ell_p = -z_{p,y_p} + \log(\sum_{c'} \exp(z_{p,c'})) \)</strong
+        >. Differentiating with respect to <strong>\( z_{p,c} \)</strong> gives
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \ell_p}{\partial z_{p,c}} = -\mathbf{1}\{c = y_p\} +
+        \frac{\exp(z_{p,c})}{\sum_{c'} \exp(z_{p,c'})} = p_{p,c} - \mathbf{1}\{c
+        = y_p\}. \]
+      </h4>
+      <p>
+        Stacking over all pixels and classes recovers the standard softmax
+        cross-entropy gradient used in deep learning libraries.
+      </p>
+
+      <p>
+        <strong>Problem 2 (IoU in Terms of Confusion Matrix):</strong>
+        Let <strong>\( n_{ij} \)</strong> be the number of pixels with true
+        class <strong>\( i \)</strong> and predicted class
+        <strong>\( j \)</strong>. Express
+        <strong>\( \operatorname{IoU}_c \)</strong> for class
+        <strong>\( c \)</strong> in terms of <strong>\( n_{ij} \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> For class <strong>\( c \)</strong>, we have
+        <strong>\( \text{TP}_c = n_{cc} \)</strong>. False positives are
+        predictions that equal <strong>\( c \)</strong> but ground truth is not
+        <strong>\( c \)</strong>:
+        <strong>\( \text{FP}_c = \sum_{i\neq c} n_{ic} \)</strong>. False
+        negatives are ground truth pixels of class
+        <strong>\( c \)</strong> predicted as something else:
+        <strong>\( \text{FN}_c = \sum_{j\neq c} n_{cj} \)</strong>. Therefore
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{IoU}_c = \frac{n_{cc}} {n_{cc} + \sum_{i\neq c} n_{ic}
+        + \sum_{j\neq c} n_{cj}}. \]
+      </h4>
+
+      <p>
+        <strong>Problem 3 (Unary-Only CRF and Independent Pixels):</strong>
+        Show that if the pairwise terms vanish,
+        <strong>\( \psi_{p,q} \equiv 0 \)</strong>, then the MAP labeling
+        decomposes into independent per-pixel decisions.
+      </p>
+      <p>
+        <strong>Solution:</strong> With no pairwise terms, the energy reduces to
+      </p>
+      <h4 class="mathJax">\[ E(y,x) = \sum_{p\in\Omega} \psi_p(y_p;x). \]</h4>
+      <p>
+        Thus
+        <strong>\( \hat{y} = \arg\min_{y} \sum_{p} \psi_p(y_p;x) \)</strong>.
+        Since <strong>\( y_p \)</strong> only appears in
+        <strong>\( \psi_p \)</strong>, the minimization factorizes:
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{y}_p = \arg\min_{c\in\mathcal{C}} \psi_p(c;x), \quad \forall
+        p\in\Omega. \]
+      </h4>
+      <p>
+        This is exactly the per-pixel classification rule
+        <strong>\( \hat{y}_p = \arg\max_c p_\theta(Y_p = c \mid x) \)</strong>.
+        Pairwise terms therefore encode all spatial coupling in the CRF.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Back-Projection Jacobian):</strong>
+        Consider the back-projection function
+        <strong
+          >\( \mathbf{P}_{\text{cam}}(u,v,d) = d\,\mathbf{K}^{-1}[u,v,1]^\top
+          \)</strong
+        >. Compute the Jacobian of
+        <strong>\( \mathbf{P}_{\text{cam}} \)</strong> with respect to the depth
+        <strong>\( d \)</strong> and discuss its implication for depth noise
+        near the camera.
+      </p>
+      <p>
+        <strong>Solution:</strong> Write
+        <strong
+          >\( \mathbf{P}_{\text{cam}}(u,v,d) = d\,\mathbf{q}(u,v) \)</strong
+        >, where
+        <strong>\( \mathbf{q}(u,v) = \mathbf{K}^{-1}[u,v,1]^\top \)</strong> is
+        independent of <strong>\( d \)</strong>. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \mathbf{P}_{\text{cam}}}{\partial d} =
+        \mathbf{q}(u,v). \]
+      </h4>
+      <p>
+        Thus a small depth perturbation
+        <strong>\( \delta d \)</strong> induces a 3D perturbation
+        <strong
+          >\( \delta \mathbf{P}_{\text{cam}} = \mathbf{q}(u,v)\,\delta d
+          \)</strong
+        >. Close to the optical axis, <strong>\( \mathbf{q}(u,v) \)</strong> is
+        almost aligned with the camera's <em>z</em>-axis, so small depth errors
+        mainly affect distance along the line of sight. This is critical when
+        using segmented depth points to estimate object height above a table:
+        errors in <strong>\( d \)</strong> directly propagate to grasp pose
+        estimation.
+      </p>
+
+      <p>
+        <strong
+          >Problem 5 (Effect of Class Weights on the Loss Landscape):</strong
+        >
+        Consider the weighted loss
+        <strong>\( \ell_{\text{wce}} \)</strong> from Section 3. Show that
+        increasing <strong>\( w_c \)</strong> for a rare class
+        <strong>\( c \)</strong> effectively rescales the gradient contributions
+        from pixels of that class, and interpret this in terms of optimization
+        dynamics.
+      </p>
+      <p>
+        <strong>Solution:</strong> For a pixel with label
+        <strong>\( y_p = c \)</strong>, the derivative with respect to
+        <strong>\( z_{p,k} \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \ell_{\text{wce}}}{\partial z_{p,k}} = w_c\big(p_{p,k}
+        - \mathbf{1}\{k=c\}\big). \]
+      </h4>
+      <p>
+        Relative to the unweighted case, every pixel of class
+        <strong>\( c \)</strong> contributes a factor
+        <strong>\( w_c \)</strong> to the gradient. Larger
+        <strong>\( w_c \)</strong> therefore increases the effective learning
+        rate for that class, causing optimization to focus on reducing errors
+        for rare classes, at the cost of slower convergence for abundant
+        classes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formulated semantic segmentation as a structured prediction problem
+        over pixel-wise labels, introduced CRF-style energy models, and derived
+        the gradients underlying deep segmentation networks. We showed how to
+        evaluate segmentations with IoU-based metrics, and how to project 2D
+        masks into the robot base frame to obtain object point clouds for
+        manipulation. Finally, we implemented segmentation components in Python,
+        C++, Java, MATLAB/Simulink, and Wolfram Mathematica, emphasizing their
+        integration with robotic middleware and 3D geometry. Subsequent lessons
+        will build on these ideas to represent affordances and
+        action-conditioned perception.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Long, J., Shelhamer, E., &amp; Darrell, T. (2015). Fully convolutional
+        networks for semantic segmentation.
+        <em
+          >Proceedings of the IEEE Conference on Computer Vision and Pattern
+          Recognition (CVPR)</em
+        >, 3431–3440.
+      </li>
+      <li>
+        Chen, L.-C., Papandreou, G., Kokkinos, I., Murphy, K., &amp; Yuille,
+        A.L. (2018). DeepLab: Semantic image segmentation with deep
+        convolutional nets, atrous convolution, and fully connected CRFs.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        40(4), 834–848.
+      </li>
+      <li>
+        Boykov, Y., Veksler, O., &amp; Zabih, R. (2001). Fast approximate energy
+        minimization via graph cuts.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        23(11), 1222–1239.
+      </li>
+      <li>
+        Krähenbühl, P., &amp; Koltun, V. (2011). Efficient inference in fully
+        connected CRFs with Gaussian edge potentials.
+        <em>Advances in Neural Information Processing Systems</em>, 24, 109–117.
+      </li>
+      <li>
+        Kendall, A., Badrinarayanan, V., &amp; Cipolla, R. (2017). Bayesian
+        SegNet: Model uncertainty in deep convolutional encoder–decoder
+        architectures for scene understanding.
+        <em>Proceedings of the British Machine Vision Conference (BMVC)</em>.
+      </li>
+      <li>
+        Geiger, A., Lenz, P., &amp; Urtasun, R. (2012). Are we ready for
+        autonomous driving? The KITTI vision benchmark suite.
+        <em
+          >Proceedings of the IEEE Conference on Computer Vision and Pattern
+          Recognition (CVPR)</em
+        >, 3354–3361.
+      </li>
+      <li>
+        Badrinarayanan, V., Kendall, A., &amp; Cipolla, R. (2017). SegNet: A
+        deep convolutional encoder–decoder architecture for image segmentation.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        39(12), 2481–2495.
+      </li>
+    </ol>
+  </div>
+</section>
+
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter10/Lesson2.html">
+          Lesson 2: Scene Flow and Object Tracking
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter10/Lesson4.html">
+          Lesson 4: Affordances and Action-Conditioned Perception
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="active-lesson" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

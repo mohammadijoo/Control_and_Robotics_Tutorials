@@ -1,0 +1,2052 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 11: State Estimation for Control (Control-Facing Only) - Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 11: State Estimation for Control (Control-Facing Only)</h1>
+    <h3>
+      <strong
+        >Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector
+        State</strong
+      >
+    </h3>
+    <p>
+      This lesson develops the Extended Kalman Filter (EKF) for nonlinear state
+      estimation in robot manipulators, focusing on joint state and end-effector
+      pose estimation for feedback control. We derive the EKF from a
+      linearization of the nonlinear dynamics and kinematics, specialize it to
+      standard robot models, and give implementation patterns in Python, C++,
+      Java, MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In robot control, we rarely measure the full state exactly. Joint
+        encoders may be noisy or missing, velocities are often obtained by
+        differentiating noisy positions, and end-effector pose estimates may
+        come from cameras or IMUs with drift and delay. The controller, however,
+        requires an estimate of the state vector
+        <strong>\( \mathbf{x}_k \)</strong>, typically
+        <strong
+          >\( \mathbf{x}_k = [\mathbf{q}_k^\top \; \dot{\mathbf{q}}_k^\top]^\top
+          \)</strong
+        >
+        or augmented with end-effector pose and velocities.
+      </p>
+      <p>
+        For a nonlinear robot model, we write the discrete-time process and
+        measurement equations as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_k, \mathbf{u}_k) +
+        \mathbf{w}_k, \qquad \mathbf{z}_k = \mathbf{h}(\mathbf{x}_k) +
+        \mathbf{v}_k, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{u}_k \)</strong> is the control input (joint
+        torques <strong>\( \boldsymbol{&bsol;tau}_k \)</strong> or commanded
+        joint motions), <strong>\( \mathbf{w}_k \)</strong> and
+        <strong>\( \mathbf{v}_k \)</strong> are zero-mean Gaussian noises with
+        covariances <strong>\( \mathbf{Q}_k \)</strong> and
+        <strong>\( \mathbf{R}_k \)</strong>. The EKF replaces the nonlinear
+        model locally by its first-order linearization, then applies the optimal
+        linear Kalman filter to this local approximation.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  Xk["x_hat(k|k)"] --> F["Nonlinear dynamics f(x_k,u_k)"]
+  U["u_k (joint torques)"] --> F
+  F --> XP["x_hat(k+1|k) (prediction)"]
+  XP --> H["Measurement model h(x)"]
+  Z["z_k+1 (encoders, ee sensors)"] --> INNOV["innovation: z_k+1 - h(x_hat)"]
+  H --> INNOV
+  INNOV --> K["compute gain K_k+1"]
+  XP --> UPDATE["x_hat(k+1|k+1) (correction)"]
+  K --> UPDATE
+        </pre>
+      </div>
+      <p>
+        The EKF provides a recursive estimator suitable for on-line control: at
+        each sampling instant the filter predicts the robot state forward using
+        the dynamics, then corrects it using joint and end-effector
+        measurements.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Nonlinear State-Space Model for a Manipulator -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Nonlinear State-Space Model for a Manipulator</h2>
+    <div class="down-content">
+      <p>
+        For an <strong>\(n\)</strong>-DOF manipulator, you already know the
+        joint-space dynamics
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q}) \ddot{\mathbf{q}} +
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}(\mathbf{q}) = \boldsymbol{&bsol;tau} +
+        \mathbf{J}^\top(\mathbf{q})\mathbf{f}_{\text{ext}}, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{M}(\mathbf{q}) \)</strong> is the inertia
+        matrix,
+        <strong>\( \mathbf{C}(\mathbf{q},\dot{\mathbf{q}}) \)</strong> is the
+        Coriolis/centrifugal matrix,
+        <strong>\( \mathbf{g}(\mathbf{q}) \)</strong> is gravity, and
+        <strong>\( \mathbf{J}(\mathbf{q}) \)</strong> is the geometric Jacobian.
+      </p>
+      <p>
+        For state estimation we adopt a joint-space state vector
+        <strong
+          >\( \mathbf{x} = [\mathbf{q}^\top \; \dot{\mathbf{q}}^\top]^\top \in
+          \mathbb{R}^{2n} \)</strong
+        >. With sampling time <strong>\( \Delta t \)</strong>, a simple
+        discretization (forward Euler for illustration) gives
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{q}_{k+1} &amp;= \mathbf{q}_k + \Delta t \,
+        \dot{\mathbf{q}}_k, \\ \dot{\mathbf{q}}_{k+1} &amp;= \dot{\mathbf{q}}_k
+        + \Delta t \, \ddot{\mathbf{q}}_k, \\ \ddot{\mathbf{q}}_k &amp;=
+        \mathbf{M}^{-1}(\mathbf{q}_k) \Big( \boldsymbol{&bsol;tau}_k -
+        \mathbf{C}(\mathbf{q}_k,\dot{\mathbf{q}}_k)\dot{\mathbf{q}}_k -
+        \mathbf{g}(\mathbf{q}_k) \Big). \end{aligned} \]
+      </h4>
+      <p>
+        Collecting terms, we define the discrete-time process function
+        <strong
+          >\( \mathbf{f} : \mathbb{R}^{2n} \times \mathbb{R}^{n} \to
+          \mathbb{R}^{2n} \)</strong
+        >
+        by
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_k, \boldsymbol{&bsol;tau}_k)
+        + \mathbf{w}_k, \]
+      </h4>
+      <p>
+        where
+        <strong
+          >\( \mathbf{w}_k \sim \mathcal{N}(\mathbf{0},\mathbf{Q}_k) \)</strong
+        >
+        models unmodeled dynamics and discretization errors.
+      </p>
+      <p>For measurements we assume:</p>
+      <ul>
+        <li>
+          Joint encoders providing positions
+          <strong
+            >\( \mathbf{z}^{(q)}_k = \mathbf{q}_k + \mathbf{v}^{(q)}_k
+            \)</strong
+          >.
+        </li>
+        <li>
+          An external sensor (e.g., camera, motion capture) providing
+          end-effector pose
+          <strong>\( \mathbf{x}^{\text{ee}}_k \)</strong>, related to joints by
+          forward kinematics
+          <strong
+            >\( \mathbf{x}^{\text{ee}}_k = \mathbf{p}(\mathbf{q}_k) \)</strong
+          >.
+        </li>
+      </ul>
+      <p>Stacking measurements yields a nonlinear measurement model</p>
+      <h4 class="mathJax">
+        \[ \mathbf{z}_k = \begin{bmatrix} \mathbf{z}_k^{(q)} \\
+        \mathbf{z}_k^{(\text{ee})} \end{bmatrix} = \underbrace{ \begin{bmatrix}
+        \mathbf{I} &amp; \mathbf{0} \\ \mathbf{p}(\cdot) &amp; \mathbf{0}
+        \end{bmatrix}}_{\text{nonlinear in } \mathbf{q}} \mathbf{x}_k +
+        \mathbf{v}_k \;\equiv\; \mathbf{h}(\mathbf{x}_k) + \mathbf{v}_k, \]
+      </h4>
+      <p>
+        where
+        <strong
+          >\( \mathbf{v}_k \sim \mathcal{N}(\mathbf{0},\mathbf{R}_k) \)</strong
+        >
+        models sensor noise.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Discrete-Time EKF Derivation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Discrete-Time EKF Derivation</h2>
+    <div class="down-content">
+      <p>
+        Assume at time <strong>\(k\)</strong> we have a Gaussian approximation
+        of the state given all measurements up to <strong>\(k\)</strong>:
+        <strong
+          >\( \mathbf{x}_k | \mathcal{Z}_k \sim
+          \mathcal{N}(\hat{\mathbf{x}}_{k|k}, \mathbf{P}_{k|k}) \)</strong
+        >, where
+        <strong
+          >\( \mathcal{Z}_k = \{\mathbf{z}_0,\dots,\mathbf{z}_k\} \)</strong
+        >.
+      </p>
+      <h3>3.1 Prediction Step</h3>
+      <p>
+        The true state evolves as
+        <strong
+          >\( \mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_k,\mathbf{u}_k) +
+          \mathbf{w}_k \)</strong
+        >. The EKF approximates the predicted mean by pushing the estimate
+        through the nonlinear dynamics:
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x}}_{k+1|k} =
+        \mathbf{f}(\hat{\mathbf{x}}_{k|k},\mathbf{u}_k). \]
+      </h4>
+      <p>
+        To propagate covariance we linearize
+        <strong>\( \mathbf{f} \)</strong> around
+        <strong>\( \hat{\mathbf{x}}_{k|k} \)</strong>. Define the Jacobian
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{F}_k = \left.\frac{\partial \mathbf{f}}{\partial
+        \mathbf{x}}\right|_{\mathbf{x}=\hat{\mathbf{x}}_{k|k},\mathbf{u}=\mathbf{u}_k}
+        \in \mathbb{R}^{2n \times 2n}. \]
+      </h4>
+      <p>
+        Write the estimation error
+        <strong
+          >\( \tilde{\mathbf{x}}_k = \mathbf{x}_k - \hat{\mathbf{x}}_{k|k}
+          \)</strong
+        >. A first-order Taylor expansion gives
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{f}(\hat{\mathbf{x}}_{k|k},\mathbf{u}_k) +
+        \mathbf{F}_k \tilde{\mathbf{x}}_k + \mathbf{w}_k +
+        \mathcal{O}(\|\tilde{\mathbf{x}}_k\|^2), \]
+      </h4>
+      <p>so that, neglecting higher-order terms,</p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{x}}_{k+1} = \mathbf{x}_{k+1} -
+        \hat{\mathbf{x}}_{k+1|k} \approx \mathbf{F}_k \tilde{\mathbf{x}}_k +
+        \mathbf{w}_k. \]
+      </h4>
+      <p>
+        Taking covariance on both sides and using independence
+        <strong
+          >\( \mathbb{E}[\tilde{\mathbf{x}}_k \mathbf{w}_k^\top] = \mathbf{0}
+          \)</strong
+        >
+        yields the predicted covariance:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1|k} = \mathbf{F}_k \mathbf{P}_{k|k} \mathbf{F}_k^\top
+        + \mathbf{Q}_k. \]
+      </h4>
+
+      <h3>3.2 Measurement Update</h3>
+      <p>
+        At time <strong>\( k+1 \)</strong> we obtain a measurement
+        <strong
+          >\( \mathbf{z}_{k+1} = \mathbf{h}(\mathbf{x}_{k+1}) + \mathbf{v}_{k+1}
+          \)</strong
+        >. Linearize <strong>\( \mathbf{h} \)</strong> at the predicted mean:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{H}_{k+1} = \left.\frac{\partial \mathbf{h}}{\partial
+        \mathbf{x}}\right|_{\mathbf{x}=\hat{\mathbf{x}}_{k+1|k}}. \]
+      </h4>
+      <p>
+        Again define the prediction error
+        <strong
+          >\( \tilde{\mathbf{x}}_{k+1|k} = \mathbf{x}_{k+1} -
+          \hat{\mathbf{x}}_{k+1|k} \)</strong
+        >. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{z}_{k+1} \approx \mathbf{h}(\hat{\mathbf{x}}_{k+1|k}) +
+        \mathbf{H}_{k+1} \tilde{\mathbf{x}}_{k+1|k} + \mathbf{v}_{k+1}. \]
+      </h4>
+      <p>The innovation (or residual) is</p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\nu}_{k+1} = \mathbf{z}_{k+1} -
+        \mathbf{h}(\hat{\mathbf{x}}_{k+1|k}). \]
+      </h4>
+      <p>Approximating the innovation covariance by</p>
+      <h4 class="mathJax">
+        \[ \mathbf{S}_{k+1} = \mathbf{H}_{k+1} \mathbf{P}_{k+1|k}
+        \mathbf{H}_{k+1}^\top + \mathbf{R}_{k+1}, \]
+      </h4>
+      <p>the EKF chooses the Kalman gain</p>
+      <h4 class="mathJax">
+        \[ \mathbf{K}_{k+1} = \mathbf{P}_{k+1|k} \mathbf{H}_{k+1}^\top
+        \mathbf{S}_{k+1}^{-1}, \]
+      </h4>
+      <p>and updates mean and covariance as</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \hat{\mathbf{x}}_{k+1|k+1} &amp;=
+        \hat{\mathbf{x}}_{k+1|k} + \mathbf{K}_{k+1} \boldsymbol{\nu}_{k+1}, \\
+        \mathbf{P}_{k+1|k+1} &amp;= (\mathbf{I} -
+        \mathbf{K}_{k+1}\mathbf{H}_{k+1})\mathbf{P}_{k+1|k}. \end{aligned} \]
+      </h4>
+      <p>Numerically, it is often safer to use the Joseph stabilized form</p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1|k+1} = (\mathbf{I} -
+        \mathbf{K}_{k+1}\mathbf{H}_{k+1})\mathbf{P}_{k+1|k} (\mathbf{I} -
+        \mathbf{K}_{k+1}\mathbf{H}_{k+1})^\top + \mathbf{K}_{k+1}
+        \mathbf{R}_{k+1} \mathbf{K}_{k+1}^\top, \]
+      </h4>
+      <p>
+        which preserves symmetry and positive semi-definiteness better in finite
+        precision.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: EKF for Joint State Estimation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. EKF for Joint State Estimation</h2>
+    <div class="down-content">
+      <p>
+        Consider state
+        <strong
+          >\( \mathbf{x}_k = [\mathbf{q}_k^\top \; \dot{\mathbf{q}}_k^\top]^\top
+          \)</strong
+        >
+        and measurement
+        <strong
+          >\( \mathbf{z}_k^{(q)} = \mathbf{q}_k + \mathbf{v}_k^{(q)} \)</strong
+        >. If only encoders are used (no end-effector sensor), the measurement
+        model is linear:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{h}^{(q)}(\mathbf{x}_k) = \begin{bmatrix}\mathbf{I}_n &amp;
+        \mathbf{0}_{n\times n}\end{bmatrix} \mathbf{x}_k, \quad \mathbf{H}^{(q)}
+        = \begin{bmatrix}\mathbf{I}_n &amp; \mathbf{0}_{n\times n}\end{bmatrix}.
+        \]
+      </h4>
+      <p>
+        In that case, the EKF reduces to a <em>linear</em> Kalman filter for the
+        given nonlinear dynamics linearized around the trajectory.
+      </p>
+      <p>
+        To compute the Jacobian <strong>\( \mathbf{F}_k \)</strong> for the
+        dynamics, write explicitly
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{f}(\mathbf{x}_k,\boldsymbol{&bsol;tau}_k) = \begin{bmatrix}
+        \mathbf{q}_k + \Delta t \, \dot{\mathbf{q}}_k \\ \dot{\mathbf{q}}_k +
+        \Delta t \, \mathbf{M}^{-1}(\mathbf{q}_k) \big(\boldsymbol{&bsol;tau}_k
+        - \mathbf{C}(\mathbf{q}_k,\dot{\mathbf{q}}_k)\dot{\mathbf{q}}_k -
+        \mathbf{g}(\mathbf{q}_k) \big) \end{bmatrix}. \]
+      </h4>
+      <p>
+        Splitting
+        <strong>\( \mathbf{x}_k = [\mathbf{q}_k;\dot{\mathbf{q}}_k] \)</strong>
+        we obtain a block Jacobian
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{F}_k = \begin{bmatrix} \dfrac{\partial
+        \mathbf{q}_{k+1}}{\partial \mathbf{q}_k} &amp; \dfrac{\partial
+        \mathbf{q}_{k+1}}{\partial \dot{\mathbf{q}}_k} \\ \dfrac{\partial
+        \dot{\mathbf{q}}_{k+1}}{\partial \mathbf{q}_k} &amp; \dfrac{\partial
+        \dot{\mathbf{q}}_{k+1}}{\partial \dot{\mathbf{q}}_k} \end{bmatrix}
+        \approx \begin{bmatrix} \mathbf{I}_n &amp; \Delta t \,\mathbf{I}_n \\
+        \star &amp; \star \end{bmatrix}, \]
+      </h4>
+      <p>
+        where the lower blocks are obtained by differentiating the inverse
+        dynamics. In practice, these derivatives are often computed by automatic
+        differentiation or by using the robot dynamics library (e.g. Pinocchio,
+        RBDL) which can provide analytic Jacobians.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: EKF for End-Effector State via Kinematics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. EKF for End-Effector State via Kinematics</h2>
+    <div class="down-content">
+      <p>
+        Now we augment the measurement with a nonlinear end-effector pose
+        <strong
+          >\( \mathbf{x}^{\text{ee}}_k = \mathbf{p}(\mathbf{q}_k) \)</strong
+        >. Assume <strong>\( \mathbf{p}(\cdot) \)</strong> is the forward
+        kinematics mapping from joint positions to position-orientation
+        representation (e.g. position plus Euler angles or quaternions).
+      </p>
+      <p>The measurement function becomes</p>
+      <h4 class="mathJax">
+        \[ \mathbf{h}(\mathbf{x}_k) = \begin{bmatrix} \mathbf{q}_k \\
+        \mathbf{p}(\mathbf{q}_k) \end{bmatrix} = \begin{bmatrix} \mathbf{I}_n
+        &amp; \mathbf{0} \\ \mathbf{p}(\mathbf{q}_k) &amp; \mathbf{0}
+        \end{bmatrix} \mathbf{x}_k \quad \text{(nonlinear in } \mathbf{q}_k
+        \text{)}. \]
+      </h4>
+      <p>The measurement Jacobian is block-structured:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{H}_k = \begin{bmatrix} \dfrac{\partial \mathbf{q}_k}{\partial
+        \mathbf{q}_k} &amp; \dfrac{\partial \mathbf{q}_k}{\partial
+        \dot{\mathbf{q}}_k} \\ \dfrac{\partial
+        \mathbf{p}(\mathbf{q}_k)}{\partial \mathbf{q}_k} &amp; \dfrac{\partial
+        \mathbf{p}(\mathbf{q}_k)}{\partial \dot{\mathbf{q}}_k} \end{bmatrix} =
+        \begin{bmatrix} \mathbf{I}_n &amp; \mathbf{0} \\
+        \mathbf{J}_p(\mathbf{q}_k) &amp; \mathbf{0} \end{bmatrix}, \]
+      </h4>
+      <p>
+        where
+        <strong
+          >\( \mathbf{J}_p(\mathbf{q}) = \frac{\partial \mathbf{p}}{\partial
+          \mathbf{q}} \)</strong
+        >
+        is the position-orientation Jacobian (a subset or transformation of the
+        standard geometric Jacobian).
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  X["state x_k = [q; dq]"] --> FK["forward kinematics p(q)"]
+  X --> ENC["joint encoder model: \nz_q = q + noise"]
+  FK --> EES["ee sensor model: \nz_ee approx p(q) + noise"]
+  ENC --> STACK["stacked measurement z_k = [z_q; z_ee]"]
+  EES --> STACK
+  STACK --> EKF["EKF update (H_k from I and J_p(q))"]
+  EKF --> XNEXT["updated x_hat(k|k) for controller"]
+        </pre>
+      </div>
+      <p>
+        This construction fuses joint encoders (which are precise but local)
+        with end-effector measurements (which are global but noisier), yielding
+        a consistent estimate of both joint states and end-effector pose aligned
+        in a common coordinate frame for control.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementation Aspects and Tuning -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementation Aspects and Tuning</h2>
+    <div class="down-content">
+      <p><strong>Covariance tuning.</strong></p>
+      <ul>
+        <li>
+          <strong>Process noise</strong>
+          <strong>\( \mathbf{Q}_k \)</strong> reflects model uncertainty:
+          friction, unmodeled flexibility, discretization error. A common choice
+          is block-diagonal in position and velocity, with larger variance in
+          velocities.
+        </li>
+        <li>
+          <strong>Measurement noise</strong>
+          <strong>\( \mathbf{R}_k \)</strong> is determined from sensor
+          specifications or empirical variance estimates from static
+          measurements.
+        </li>
+      </ul>
+      <p><strong>Consistency and linearization limits.</strong></p>
+      <ul>
+        <li>
+          The EKF is only locally valid: if the initial error is large or the
+          dynamics are highly nonlinear over a sampling interval, linearization
+          can be inaccurate and the filter may become inconsistent or even
+          diverge.
+        </li>
+        <li>
+          For highly nonlinear orientation representations (e.g. Euler angles),
+          it is often better to use minimal-error coordinates on the Lie group
+          (e.g. local error on SO(3)), but this belongs to more advanced
+          estimation on manifolds.
+        </li>
+      </ul>
+      <p><strong>Computational considerations.</strong></p>
+      <ul>
+        <li>
+          EKF requires computing Jacobians and updating a
+          <strong>\( 2n \times 2n \)</strong> covariance. For typical
+          manipulators with <strong>\( n \leq 7 \)</strong>, this is tractable
+          at kHz rates in modern hardware.
+        </li>
+        <li>
+          Use Cholesky-based linear algebra and exploit sparsity of Jacobians
+          when available (e.g. block diagonal or banded structures).
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation Sketch (Joint + End-Effector EKF)</h2>
+    <div class="down-content">
+      <p>
+        Below is a Python/Numpy sketch for an EKF estimating
+        <strong
+          >\( \mathbf{x} = [\mathbf{q}^\top \; \dot{\mathbf{q}}^\top]^\top
+          \)</strong
+        >
+        from joint encoders and end-effector pose measurements. Robot-specific
+        functions <code>robot_forward_dynamics</code> and
+        <code>forward_kinematics</code> must be provided (e.g., via a robotics
+        library).
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+
+class RobotEKF:
+    def __init__(self, n_dof, dt):
+        self.n = n_dof
+        self.dt = dt
+        dim_x = 2 * n_dof
+
+        self.x = np.zeros((dim_x, 1))  # [q; dq]
+        self.P = np.eye(dim_x) * 1e-2
+
+        # Process and measurement noise covariances
+        q_pos = 1e-6
+        q_vel = 1e-4
+        self.Q = np.block([
+            [q_pos * np.eye(n_dof), np.zeros((n_dof, n_dof))],
+            [np.zeros((n_dof, n_dof)), q_vel * np.eye(n_dof)]
+        ])
+
+        # Example: joint encoder + ee position (3d) noise
+        r_enc = 1e-5
+        r_ee = 1e-4
+        self.dim_z = n_dof + 3
+        self.R = np.diag(
+            np.concatenate([
+                r_enc * np.ones(n_dof),
+                r_ee * np.ones(3)
+            ])
+        )
+
+    def f(self, x, u):
+        """Nonlinear process model x_{k+1} = f(x_k, u_k)."""
+        n = self.n
+        q = x[0:n].reshape(-1, 1)
+        dq = x[n:2*n].reshape(-1, 1)
+
+        # Robot forward dynamics: qddot = M^{-1}(q) * (tau - C(q,dq)dq - g(q))
+        # This must be implemented using your robot model.
+        qddot = robot_forward_dynamics(q, dq, u)
+
+        q_next = q + self.dt * dq
+        dq_next = dq + self.dt * qddot
+        return np.vstack((q_next, dq_next))
+
+    def F_jacobian(self, x, u, eps=1e-6):
+        """Numerical Jacobian of f wrt x."""
+        dim_x = x.shape[0]
+        F = np.zeros((dim_x, dim_x))
+        fx = self.f(x, u)
+        for i in range(dim_x):
+            dx = np.zeros_like(x)
+            dx[i, 0] = eps
+            f_plus = self.f(x + dx, u)
+            F[:, i:i+1] = (f_plus - fx) / eps
+        return F
+
+    def h(self, x):
+        """Measurement model: stacked joint positions and ee position."""
+        n = self.n
+        q = x[0:n].reshape(-1, 1)
+        # Encoders measure q directly
+        z_q = q
+
+        # Forward kinematics: ee_pos in R^3
+        ee_pos = forward_kinematics(q)  # shape (3,1)
+        return np.vstack((z_q, ee_pos))
+
+    def H_jacobian(self, x, eps=1e-6):
+        """Numerical Jacobian of h wrt x."""
+        dim_x = x.shape[0]
+        z0 = self.h(x)
+        dim_z = z0.shape[0]
+        H = np.zeros((dim_z, dim_x))
+        for i in range(dim_x):
+            dx = np.zeros_like(x)
+            dx[i, 0] = eps
+            H[:, i:i+1] = (self.h(x + dx) - z0) / eps
+        return H
+
+    def predict(self, u):
+        """EKF prediction step."""
+        x = self.x
+        P = self.P
+
+        # Mean prediction
+        self.x = self.f(x, u)
+
+        # Jacobian wrt x
+        F = self.F_jacobian(x, u)
+        self.P = F @ P @ F.T + self.Q
+
+    def update(self, z):
+        """EKF update step with measurement z."""
+        x_pred = self.x
+        P_pred = self.P
+
+        z_pred = self.h(x_pred)
+        H = self.H_jacobian(x_pred)
+
+        y = z.reshape(-1, 1) - z_pred                      # innovation
+        S = H @ P_pred @ H.T + self.R                     # innovation covariance
+        K = P_pred @ H.T @ np.linalg.inv(S)               # Kalman gain
+
+        self.x = x_pred + K @ y
+        I = np.eye(P_pred.shape[0])
+        self.P = (I - K @ H) @ P_pred @ (I - K @ H).T + K @ self.R @ K.T
+
+# Example placeholders for robot-specific functions:
+def robot_forward_dynamics(q, dq, tau):
+    # Implement using your dynamics library (Pinocchio, RBDL, etc.)
+    # Here we simply use a dummy model with unit inertia and no coupling.
+    return tau  # qddot = tau (very simplified)
+
+def forward_kinematics(q):
+    # Implement your forward kinematics to 3D ee position
+    # Here, return a dummy linear function.
+    return np.array([[q.sum()], [0.0], [0.0]])
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation Sketch with Eigen -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation Sketch (Eigen-Based)</h2>
+    <div class="down-content">
+      <p>
+        The following C++ code uses Eigen to implement one EKF prediction–update
+        cycle for a manipulator. Robot-specific dynamics and kinematics must be
+        supplied by your chosen library.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+
+using Eigen::VectorXd;
+using Eigen::MatrixXd;
+
+struct RobotEKF {
+    int n;          // number of joints
+    double dt;      // sampling time
+    VectorXd x;     // state [q; dq]
+    MatrixXd P;     // covariance
+    MatrixXd Q;     // process noise
+    MatrixXd R;     // measurement noise
+
+    RobotEKF(int n_dof, double dt_)
+        : n(n_dof), dt(dt_)
+    {
+        int dim_x = 2 * n;
+        x = VectorXd::Zero(dim_x);
+        P = MatrixXd::Identity(dim_x, dim_x) * 1e-2;
+
+        Q = MatrixXd::Zero(dim_x, dim_x);
+        Q.block(0, 0, n, n) = 1e-6 * MatrixXd::Identity(n, n);
+        Q.block(n, n, n, n) = 1e-4 * MatrixXd::Identity(n, n);
+
+        int dim_z = n + 3;  // q encoders + 3D ee position
+        R = MatrixXd::Zero(dim_z, dim_z);
+        R.block(0, 0, n, n) = 1e-5 * MatrixXd::Identity(n, n);
+        R.block(n, n, 3, 3) = 1e-4 * MatrixXd::Identity(3, 3);
+    }
+
+    VectorXd f(const VectorXd&amp; xk, const VectorXd&amp; u) const {
+        int dim_x = xk.size();
+        int n_local = n;
+        VectorXd q = xk.segment(0, n_local);
+        VectorXd dq = xk.segment(n_local, n_local);
+
+        VectorXd qddot = robot_forward_dynamics(q, dq, u); // user-defined
+
+        VectorXd x_next(dim_x);
+        x_next.segment(0, n_local) = q + dt * dq;
+        x_next.segment(n_local, n_local) = dq + dt * qddot;
+        return x_next;
+    }
+
+    MatrixXd F_jacobian(const VectorXd&amp; xk, const VectorXd&amp; u) const {
+        int dim_x = xk.size();
+        MatrixXd F(dim_x, dim_x);
+        VectorXd fx = f(xk, u);
+        double eps = 1e-6;
+
+        for (int i = 0; i &lt; dim_x; ++i) {
+            VectorXd dx = VectorXd::Zero(dim_x);
+            dx(i) = eps;
+            VectorXd f_plus = f(xk + dx, u);
+            F.col(i) = (f_plus - fx) / eps;
+        }
+        return F;
+    }
+
+    VectorXd h(const VectorXd&amp; xk) const {
+        int dim_x = xk.size();
+        int n_local = n;
+        VectorXd q = xk.segment(0, n_local);
+        VectorXd z(dim_z());
+        // encoders
+        z.segment(0, n_local) = q;
+        // ee position
+        VectorXd ee = forward_kinematics(q);  // size 3
+        z.segment(n_local, 3) = ee;
+        return z;
+    }
+
+    MatrixXd H_jacobian(const VectorXd&amp; xk) const {
+        int dim_x = xk.size();
+        int dimz = dim_z();
+        MatrixXd H(dimz, dim_x);
+        double eps = 1e-6;
+        VectorXd h0 = h(xk);
+
+        for (int i = 0; i &lt; dim_x; ++i) {
+            VectorXd dx = VectorXd::Zero(dim_x);
+            dx(i) = eps;
+            VectorXd h_plus = h(xk + dx);
+            H.col(i) = (h_plus - h0) / eps;
+        }
+        return H;
+    }
+
+    int dim_z() const { return n + 3; }
+
+    void predict(const VectorXd&amp; u) {
+        VectorXd x_prev = x;
+        MatrixXd P_prev = P;
+
+        x = f(x_prev, u);
+        MatrixXd F = F_jacobian(x_prev, u);
+        P = F * P_prev * F.transpose() + Q;
+    }
+
+    void update(const VectorXd&amp; z_meas) {
+        VectorXd x_pred = x;
+        MatrixXd P_pred = P;
+
+        VectorXd z_pred = h(x_pred);
+        MatrixXd H = H_jacobian(x_pred);
+        VectorXd y = z_meas - z_pred;
+
+        MatrixXd S = H * P_pred * H.transpose() + R;
+        MatrixXd K = P_pred * H.transpose() * S.inverse();
+
+        x = x_pred + K * y;
+        MatrixXd I = MatrixXd::Identity(P_pred.rows(), P_pred.cols());
+        P = (I - K * H) * P_pred * (I - K * H).transpose() + K * R * K.transpose();
+    }
+};
+
+// Placeholders for robot functions.
+VectorXd robot_forward_dynamics(const VectorXd&amp; q,
+                                const VectorXd&amp; dq,
+                                const VectorXd&amp; tau)
+{
+    // TODO: implement using your robot dynamics library
+    return tau; // qddot = tau (dummy)
+}
+
+VectorXd forward_kinematics(const VectorXd&amp; q)
+{
+    // TODO: implement your forward kinematics
+    VectorXd ee(3);
+    ee.setZero();
+    ee(0) = q.sum(); // dummy: x = sum of joint angles
+    return ee;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        Java does not have a standard matrix library; you can use EJML or
+        similar. Here, for clarity, we show an interface assuming a small helper
+        class <code>Mat</code> for matrix operations (to be implemented or
+        mapped to EJML).
+      </p>
+      <pre><code class="language-java">
+public class RobotEKFJava {
+    private final int n;
+    private final double dt;
+    private Mat x;  // state [q; dq], column vector
+    private Mat P;  // covariance
+    private Mat Q;
+    private Mat R;
+    private final int dimZ;
+
+    public RobotEKFJava(int nDof, double dt) {
+        this.n = nDof;
+        this.dt = dt;
+        int dimX = 2 * n;
+
+        this.x = Mat.zeros(dimX, 1);
+        this.P = Mat.eye(dimX).scale(1e-2);
+
+        this.Q = Mat.zeros(dimX, dimX);
+        this.Q.setBlock(0, 0, n, n, Mat.eye(n).scale(1e-6));
+        this.Q.setBlock(n, n, n, n, Mat.eye(n).scale(1e-4));
+
+        this.dimZ = n + 3;
+        this.R = Mat.zeros(dimZ, dimZ);
+        this.R.setBlock(0, 0, n, n, Mat.eye(n).scale(1e-5));
+        this.R.setBlock(n, n, 3, 3, Mat.eye(3).scale(1e-4));
+    }
+
+    // Process model
+    private Mat f(Mat xk, Mat u) {
+        int dimX = xk.rows();
+        Mat q = xk.subMat(0, n, 0, 1);
+        Mat dq = xk.subMat(n, 2 * n, 0, 1);
+
+        Mat qddot = robotForwardDynamics(q, dq, u); // user-defined
+
+        Mat qNext = q.add(dq.scale(dt));
+        Mat dqNext = dq.add(qddot.scale(dt));
+
+        Mat xNext = Mat.zeros(dimX, 1);
+        xNext.setBlock(0, 0, n, 1, qNext);
+        xNext.setBlock(n, 0, n, 1, dqNext);
+        return xNext;
+    }
+
+    private Mat FJacobian(Mat xk, Mat u) {
+        int dimX = xk.rows();
+        Mat F = Mat.zeros(dimX, dimX);
+        Mat fx = f(xk, u);
+        double eps = 1e-6;
+
+        for (int i = 0; i &lt; dimX; ++i) {
+            Mat dx = Mat.zeros(dimX, 1);
+            dx.set(i, 0, eps);
+            Mat fPlus = f(xk.add(dx), u);
+            Mat col = fPlus.sub(fx).scale(1.0 / eps);
+            F.setCol(i, col);
+        }
+        return F;
+    }
+
+    // Measurement model
+    private Mat h(Mat xk) {
+        Mat z = Mat.zeros(dimZ, 1);
+        Mat q = xk.subMat(0, n, 0, 1);
+        z.setBlock(0, 0, n, 1, q);
+
+        Mat ee = forwardKinematics(q); // size 3x1
+        z.setBlock(n, 0, 3, 1, ee);
+        return z;
+    }
+
+    private Mat HJacobian(Mat xk) {
+        int dimX = xk.rows();
+        Mat H = Mat.zeros(dimZ, dimX);
+        Mat h0 = h(xk);
+        double eps = 1e-6;
+
+        for (int i = 0; i &lt; dimX; ++i) {
+            Mat dx = Mat.zeros(dimX, 1);
+            dx.set(i, 0, eps);
+            Mat hPlus = h(xk.add(dx));
+            Mat col = hPlus.sub(h0).scale(1.0 / eps);
+            H.setCol(i, col);
+        }
+        return H;
+    }
+
+    public void predict(Mat u) {
+        Mat xPrev = x.copy();
+        Mat PPrev = P.copy();
+
+        x = f(xPrev, u);
+        Mat F = FJacobian(xPrev, u);
+        P = F.mul(PPrev).mul(F.transpose()).add(Q);
+    }
+
+    public void update(Mat zMeas) {
+        Mat xPred = x.copy();
+        Mat PPred = P.copy();
+
+        Mat zPred = h(xPred);
+        Mat H = HJacobian(xPred);
+        Mat y = zMeas.sub(zPred);
+
+        Mat S = H.mul(PPred).mul(H.transpose()).add(R);
+        Mat K = PPred.mul(H.transpose()).mul(S.inverse());
+
+        x = xPred.add(K.mul(y));
+        Mat I = Mat.eye(PPred.rows());
+        P = (I.sub(K.mul(H)))
+                .mul(PPred)
+                .mul((I.sub(K.mul(H))).transpose())
+                .add(K.mul(R).mul(K.transpose()));
+    }
+
+    // Robot-specific stubs:
+    private Mat robotForwardDynamics(Mat q, Mat dq, Mat tau) {
+        // Implement using your dynamics
+        return tau; // qddot = tau (dummy)
+    }
+
+    private Mat forwardKinematics(Mat q) {
+        Mat ee = Mat.zeros(3, 1);
+        double sum = 0.0;
+        for (int i = 0; i &lt; q.rows(); ++i)
+            sum += q.get(i, 0);
+        ee.set(0, 0, sum);
+        return ee;
+    }
+
+    public Mat getState() { return x; }
+}
+      </code></pre>
+      <p>
+        Here <code>Mat</code> is a placeholder for a matrix wrapper providing
+        basic operations (<code>add</code>, <code>sub</code>, <code>mul</code>,
+        <code>inverse</code>, etc.). In practice, you would map this code to a
+        concrete library (e.g., EJML or Apache Commons Math).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB / Simulink Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB / Simulink Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is well suited for prototyping EKF-based state estimation. A
+        typical implementation uses a function to perform one predict–update
+        step:
+      </p>
+      <pre><code class="language-matlab">
+function [x_next, P_next] = robot_ekf_step(x, P, u, z, dt, Q, R)
+% x, P : current state and covariance
+% u    : control input (joint torques)
+% z    : measurement [q_enc; ee_pos]
+% dt   : sampling time
+% Q, R : process and measurement noise covariances
+
+n = numel(x) / 2;
+q  = x(1:n);
+dq = x(n+1:end);
+
+% ----- Process model -----
+qddot = robot_forward_dynamics(q, dq, u);  % user-supplied
+
+q_pred  = q  + dt * dq;
+dq_pred = dq + dt * qddot;
+x_pred  = [q_pred; dq_pred];
+
+F = numerical_jacobian(@(xx) f_process(xx, u, dt), x);
+
+P_pred = F * P * F.' + Q;
+
+% ----- Measurement model -----
+z_pred = h_measurement(x_pred);
+
+H = numerical_jacobian(@h_measurement, x_pred);
+
+y = z - z_pred;
+S = H * P_pred * H.' + R;
+K = P_pred * H.' / S;
+
+x_next = x_pred + K * y;
+I = eye(size(P_pred));
+P_next = (I - K * H) * P_pred * (I - K * H).' + K * R * K.';
+
+end
+
+function x_next = f_process(x, u, dt)
+    % helper for numerical Jacobian
+    n = numel(x) / 2;
+    q  = x(1:n);
+    dq = x(n+1:end);
+    qddot = robot_forward_dynamics(q, dq, u);
+    q_next  = q  + dt * dq;
+    dq_next = dq + dt * qddot;
+    x_next = [q_next; dq_next];
+end
+
+function z = h_measurement(x)
+    global n_dof
+    q  = x(1:n_dof);
+    z_q  = q;
+    ee   = forward_kinematics(q);  % 3x1
+    z = [z_q; ee];
+end
+
+function J = numerical_jacobian(fun, x)
+    fx = fun(x);
+    m  = numel(fx);
+    n  = numel(x);
+    J  = zeros(m, n);
+    eps = 1e-6;
+    for i = 1:n
+        dx = zeros(n,1);
+        dx(i) = eps;
+        f_plus = fun(x + dx);
+        J(:, i) = (f_plus - fx) / eps;
+    end
+end
+      </code></pre>
+      <p>In Simulink, you typically:</p>
+      <ul>
+        <li>
+          Use a <em>Unit Delay</em> or <em>Memory</em> block to store
+          <strong>\( \hat{\mathbf{x}}_{k|k} \)</strong> and
+          <strong>\( \mathbf{P}_{k|k} \)</strong>.
+        </li>
+        <li>
+          Implement the process and measurement models inside MATLAB Function
+          blocks.
+        </li>
+        <li>
+          Wire the EKF prediction to run with control
+          <strong>\( \boldsymbol{&bsol;tau}_k \)</strong> and update with
+          measurements <strong>\( \mathbf{z}_k \)</strong> at each sample.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        Mathematica can implement an EKF by defining symbolic or numeric process
+        and measurement functions and iterating the recursion. Below is a
+        numeric example:
+      </p>
+      <pre><code class="language-mathematica">
+(* State dimension for n DOF: dimX = 2 n *)
+nDof = 2;
+dt   = 0.001;
+dimX = 2 nDof;
+dimZ = nDof + 3;
+
+(* Process model f[x_, u_] *)
+fProcess[x_, u_] := Module[
+  {q, dq, qddot, qNext, dqNext},
+  q  = x[[1 ;; nDof]];
+  dq = x[[nDof + 1 ;; 2 nDof]];
+
+  qddot = robotForwardDynamics[q, dq, u]; (* user-defined *)
+
+  qNext  = q  + dt dq;
+  dqNext = dq + dt qddot;
+  Join[qNext, dqNext]
+];
+
+(* Measurement model h[x_] *)
+hMeasurement[x_] := Module[
+  {q, ee},
+  q  = x[[1 ;; nDof]];
+  ee = forwardKinematics[q];  (* 3-vector *)
+  Join[q, ee]
+];
+
+(* Numerical Jacobian *)
+jacobian[fun_, x_List] := Module[
+  {fx, n, m, eps, cols},
+  fx  = fun[x];
+  m   = Length[fx];
+  n   = Length[x];
+  eps = 10.^(-6);
+  cols = Table[
+    Module[{dx = ConstantArray[0., n], fplus},
+      dx[[i]] = eps;
+      fplus = fun[x + dx];
+      (fplus - fx)/eps
+    ],
+    {i, 1, n}
+  ];
+  Transpose[cols]
+];
+
+(* One EKF step *)
+ekfStep[{x_, P_}, {u_, z_, Q_, R_}] := Module[
+  {xPred, F, PPred, zPred, H, y, S, K, I, PPost, xPost},
+  xPred = fProcess[x, u];
+  F     = jacobian[fProcess[#, u] &, x];
+  PPred = F . P . Transpose[F] + Q;
+
+  zPred = hMeasurement[xPred];
+  H     = jacobian[hMeasurement, xPred];
+  y     = z - zPred;
+  S     = H . PPred . Transpose[H] + R;
+  K     = PPred . Transpose[H] . Inverse[S];
+
+  xPost = xPred + K . y;
+  I     = IdentityMatrix[Length[x]];
+  PPost = (I - K . H) . PPred . Transpose[I - K . H] + K . R . Transpose[K];
+
+  {xPost, PPost}
+];
+
+(* Example usage: fold over time steps *)
+x0 = ConstantArray[0., dimX];
+P0 = IdentityMatrix[dimX] 0.01;
+
+(* robotForwardDynamics and forwardKinematics must be implemented *)
+
+(* {uSeq, zSeq} are sequences of controls and measurements *)
+stateCovSeq = FoldList[
+  ekfStep,
+  {x0, P0},
+  MapThread[
+    { #1, #2, Q, R } &,
+    {uSeq, zSeq}
+  ]
+];
+      </code></pre>
+      <p>
+        Here <code>robotForwardDynamics</code> and
+        <code>forwardKinematics</code> are user-defined functions with access to
+        the manipulator model; <code>Q</code> and <code>R</code> are covariance
+        matrices chosen according to sensor and model uncertainty.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Deriving the Prediction Covariance):</strong>
+        Consider the nonlinear process
+        <strong
+          >\( \mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_k) + \mathbf{w}_k
+          \)</strong
+        >
+        with
+        <strong
+          >\( \mathbf{w}_k \sim \mathcal{N}(\mathbf{0},\mathbf{Q}) \)</strong
+        >. Let <strong>\( \hat{\mathbf{x}}_{k|k} \)</strong> be an estimate with
+        error covariance <strong>\( \mathbf{P}_{k|k} \)</strong>. Show that,
+        under first-order linearization around
+        <strong>\( \hat{\mathbf{x}}_{k|k} \)</strong>, the predicted covariance
+        is
+        <strong
+          >\( \mathbf{P}_{k+1|k} = \mathbf{F}_k \mathbf{P}_{k|k}
+          \mathbf{F}_k^\top + \mathbf{Q} \)</strong
+        >, where
+        <strong
+          >\( \mathbf{F}_k = \frac{\partial \mathbf{f}}{\partial
+          \mathbf{x}}|_{\hat{\mathbf{x}}_{k|k}} \)</strong
+        >.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        Define
+        <strong
+          >\( \tilde{\mathbf{x}}_k = \mathbf{x}_k - \hat{\mathbf{x}}_{k|k}
+          \)</strong
+        >. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_k) + \mathbf{w}_k \approx
+        \mathbf{f}(\hat{\mathbf{x}}_{k|k}) + \mathbf{F}_k \tilde{\mathbf{x}}_k +
+        \mathbf{w}_k. \]
+      </h4>
+      <p>
+        The predicted mean is
+        <strong
+          >\( \hat{\mathbf{x}}_{k+1|k} = \mathbf{f}(\hat{\mathbf{x}}_{k|k})
+          \)</strong
+        >, so the new error is
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{x}}_{k+1} = \mathbf{x}_{k+1} -
+        \hat{\mathbf{x}}_{k+1|k} \approx \mathbf{F}_k \tilde{\mathbf{x}}_k +
+        \mathbf{w}_k. \]
+      </h4>
+      <p>
+        Taking covariance and using
+        <strong
+          >\( \mathbb{E}[\tilde{\mathbf{x}}_k \mathbf{w}_k^\top] = \mathbf{0}
+          \)</strong
+        >
+        yields
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1|k} =
+        \mathbb{E}[\tilde{\mathbf{x}}_{k+1}\tilde{\mathbf{x}}_{k+1}^\top]
+        \approx \mathbf{F}_k \mathbf{P}_{k|k}\mathbf{F}_k^\top + \mathbf{Q}. \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Measurement Jacobian for End-Effector Pose):</strong>
+        For a planar 2-DOF arm with link lengths
+        <strong>\( l_1, l_2 \)</strong> and joint angles
+        <strong>\( \mathbf{q} = [q_1, q_2]^\top \)</strong>, the end-effector
+        position is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{p}(\mathbf{q}) = \begin{bmatrix} l_1 \cos q_1 + l_2
+        \cos(q_1+q_2) \\ l_1 \sin q_1 + l_2 \sin(q_1+q_2) \end{bmatrix}. \]
+      </h4>
+      <p>
+        Derive the measurement Jacobian
+        <strong>\( \mathbf{H}_k \)</strong> for the EKF when the state is
+        <strong>\( \mathbf{x}_k = [q_1,q_2,\dot{q}_1,\dot{q}_2]^\top \)</strong>
+        and the measurement consists of
+        <strong>\( \mathbf{z}_k = \mathbf{p}(\mathbf{q}_k) \)</strong>.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        The measurement function is
+        <strong
+          >\( \mathbf{h}(\mathbf{x}_k) = \mathbf{p}(\mathbf{q}_k) \)</strong
+        >, independent of velocities. Derivatives w.r.t.
+        <strong>\( \dot{q}_1,\dot{q}_2 \)</strong> are zero. Therefore
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{H}_k = \begin{bmatrix} \dfrac{\partial \mathbf{p}}{\partial
+        q_1} &amp; \dfrac{\partial \mathbf{p}}{\partial q_2} &amp;
+        \dfrac{\partial \mathbf{p}}{\partial \dot{q}_1} &amp; \dfrac{\partial
+        \mathbf{p}}{\partial \dot{q}_2} \end{bmatrix} = \begin{bmatrix} -l_1
+        \sin q_1 - l_2 \sin(q_1+q_2) &amp; -l_2 \sin(q_1+q_2) &amp; 0 &amp; 0 \\
+        l_1 \cos q_1 + l_2 \cos(q_1+q_2) &amp; l_2 \cos(q_1+q_2) &amp; 0 &amp; 0
+        \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        <strong
+          >Problem 3 (Fusion of Joint Encoders and End-Effector Pose):</strong
+        >
+        Explain qualitatively how fusing joint encoder measurements and
+        end-effector pose measurements in the EKF can help detect and compensate
+        for slowly varying joint encoder biases.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        If only encoders are used, a slowly drifting bias in
+        <strong>\( q_i \)</strong> cannot be distinguished from a true joint
+        offset; the filter will treat it as part of the state. Adding
+        end-effector pose measurements from an independent sensor introduces
+        global geometric constraints: many combinations of joint angles yield
+        end-effector positions inconsistent with the measured pose. If the state
+        is augmented with bias variables, e.g.
+        <strong
+          >\( \mathbf{x} = [\mathbf{q}^\top, \dot{\mathbf{q}}^\top,
+          \mathbf{b}^\top]^\top \)</strong
+        >, the EKF can attribute persistent discrepancies between forward
+        kinematics and measured end-effector pose to the biases
+        <strong>\( \mathbf{b} \)</strong>, gradually correcting them. This is a
+        special case of joint state and parameter estimation.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Filter Stability vs. Tuning):</strong>
+        You find that your joint/end-effector EKF becomes numerically unstable
+        when you decrease
+        <strong>\( \mathbf{R} \)</strong> while leaving
+        <strong>\( \mathbf{Q} \)</strong> unchanged. Give a conceptual
+        explanation.
+      </p>
+      <p><strong>Solution:</strong></p>
+      <p>
+        Decreasing <strong>\( \mathbf{R} \)</strong> means you trust the
+        measurements more than before. The Kalman gain
+        <strong>\( \mathbf{K}_k \)</strong> becomes larger, so the filter reacts
+        more aggressively to innovations. If
+        <strong>\( \mathbf{Q} \)</strong> is too small, the predicted covariance
+        can become unrealistically small, and the filter may overreact to
+        measurement noise, especially when the linearization is poor. The
+        combination leads to large swings in the state estimate and covariance
+        that can cause numerical instability or loss of positive definiteness. A
+        consistent tuning maintains a reasonable ratio between
+        <strong>\( \mathbf{Q} \)</strong> and <strong>\( \mathbf{R} \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Algorithmic Flow):</strong>
+        Sketch the algorithmic flow for an EKF-based joint/end-effector
+        estimator running in a control loop.
+      </p>
+      <p><strong>Solution (flow diagram):</strong></p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  START["start loop at time k"] --> READU["read control input u_k"]
+  READU --> PRED["EKF predict with f(x_k,u_k)"]
+  PRED --> READZ["read sensors: encoders, ee pose"]
+  READZ --> UPDATE["EKF update: compute innovation, K_k, x_hat(k|k)"]
+  UPDATE --> CTRL["use x_hat(k|k) in controller"]
+  CTRL --> INC["increment k"]
+  INC --> START
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we formulated the joint and end-effector state estimation
+        problem for robot manipulators within a nonlinear state-space framework
+        and derived the Extended Kalman Filter as a local linearization of the
+        dynamics and kinematics. We specialized the process and measurement
+        Jacobians to standard robot models, showed how to fuse joint encoders
+        with end-effector sensors, and discussed covariance tuning and numerical
+        stability. Finally, we provided implementation sketches in Python, C++,
+        Java, MATLAB/Simulink, and Mathematica, preparing you for integrating
+        EKF-based estimators tightly with robot controllers in subsequent
+        lessons.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Kalman, R. E. (1960). A new approach to linear filtering and prediction
+        problems.
+        <em>Transactions of the ASME – Journal of Basic Engineering</em>, 82(1),
+        35–45.
+      </li>
+      <li>
+        Jazwinski, A. H. (1970).
+        <em>Stochastic Processes and Filtering Theory</em>. Academic Press.
+      </li>
+      <li>
+        Maybeck, P. S. (1979).
+        <em>Stochastic Models, Estimation, and Control, Vol. 1</em>. Academic
+        Press.
+      </li>
+      <li>
+        Anderson, B. D. O., &amp; Moore, J. B. (1979).
+        <em>Optimal Filtering</em>. Prentice Hall.
+      </li>
+      <li>
+        Bryson, A. E., &amp; Ho, Y.-C. (1969). <em>Applied Optimal Control</em>.
+        Blaisdell Publishing.
+      </li>
+      <li>
+        Bar-Shalom, Y., Li, X. R., &amp; Kirubarajan, T. (2001).
+        <em>Estimation with Applications to Tracking and Navigation</em>. Wiley.
+      </li>
+      <li>
+        Crassidis, J. L., &amp; Junkins, J. L. (2012).
+        <em>Optimal Estimation of Dynamic Systems</em>, 2nd ed. CRC Press.
+      </li>
+      <li>
+        Hurd, W. J. (1972). Optimal nonlinear filtering for continuous-time
+        systems.
+        <em>IEEE Transactions on Automatic Control</em>, 17(6), 705–713.
+      </li>
+      <li>
+        Luenberger, D. G. (1964). Observers for multivariable systems.
+        <em>IEEE Transactions on Automatic Control</em>, 11(2), 190–197.
+      </li>
+      <li>
+        Särkkä, S. (2013). <em>Bayesian Filtering and Smoothing</em>. Cambridge
+        University Press.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter11/Lesson2.html">
+          Lesson 2: Observer Design for Robot States
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter11/Lesson4.html">
+          Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="active-lesson" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

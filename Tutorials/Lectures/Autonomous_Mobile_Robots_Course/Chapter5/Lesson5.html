@@ -1,0 +1,3608 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 5: Odometry and Dead Reckoning - Lesson 5: Lab: Characterizing Odometry Error | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 5: Odometry and Dead Reckoning</h1>
+    <h3><strong>Lesson 5: Lab: Characterizing Odometry Error</strong></h3>
+    <p>
+      This lab formalizes an experimental and analytical workflow to quantify
+      odometry error, decompose it into systematic (calibration) and stochastic
+      (noise) components, and estimate interpretable error statistics. You will
+      compute endpoint drift, trajectory RMSE, and error-per-meter metrics; fit
+      differential-drive parameters via least squares; and estimate an empirical
+      increment-noise covariance suitable for later localization modules.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapters 5.1–5.4 you computed wheel odometry, integrated inertial
+        signals, and applied practical filtering. This lab focuses on
+        <em>measurement science</em>: defining what “odometry error” means,
+        designing experiments that make it measurable, and estimating parameters
+        that explain drift.
+      </p>
+
+      <p>
+        We assume a planar pose
+        <strong
+          >\( \mathbf{x}_k = [x_k,\;y_k,\;\theta_k]^{\mathsf{T}} \)</strong
+        >
+        sampled at discrete times <strong>\( t_k \)</strong>. Odometry provides
+        an estimate <strong>\( \hat{\mathbf{x}}_k \)</strong>, while an external
+        reference (motion capture, surveyed markers, or a high-accuracy tracker)
+        provides ground truth <strong>\( \mathbf{x}^{gt}_k \)</strong>.
+      </p>
+
+      <p>
+        Define the pose error
+        <strong
+          >\( \mathbf{e}_k = \hat{\mathbf{x}}_k \ominus \mathbf{x}^{gt}_k
+          \)</strong
+        >, where <strong>\( \ominus \)</strong> denotes a pose difference
+        operator with angle wrapping. In this lab we use a componentwise
+        approximation (adequate for moderate errors):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{e}_k \;=\; \begin{bmatrix} \hat{x}_k - x^{gt}_k \\ \hat{y}_k
+        - y^{gt}_k \\ \mathrm{wrap}(\hat{\theta}_k - \theta^{gt}_k)
+        \end{bmatrix}, \quad \mathrm{wrap}(\alpha) \in (-\pi,\pi] \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Plan experiment (path + speed + surface)"] --> B["Log sensors: encoders (and optional IMU)"]
+  B --> C["Collect reference pose (ground truth)"]
+  C --> D["Time-align and resample streams"]
+  D --> E["Compute odometry estimate x_hat(k)"]
+  E --> F["Compute error e(k) = x_hat(k) - x_gt(k) (angle wrapped)"]
+  F --> G["Compute metrics: endpoint, RMSE, drift-per-meter"]
+  G --> H["Estimate parameters (rL, rR, b) via least squares"]
+  H --> I["Re-evaluate metrics after calibration"]
+  I --> J["Estimate increment noise covariance Q_hat"]
+        </pre>
+      </div>
+
+      <p>
+        The key outcomes are (i) a reproducible protocol; (ii) error statistics
+        that summarize performance; and (iii) calibrated kinematic parameters
+        that reduce systematic drift.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Differential-Drive Increment Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Differential-Drive Increment Model Used in the Lab</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \Delta\phi_{L,k} \)</strong> and
+        <strong>\( \Delta\phi_{R,k} \)</strong> be left/right wheel angle
+        increments over <strong>\( [t_{k-1},t_k] \)</strong>, obtained from
+        encoder ticks. With wheel radii <strong>\( r_L,\;r_R \)</strong> and
+        wheelbase <strong>\( b \)</strong>, the arc lengths are
+        <strong>\( \Delta s_{L,k} = r_L \Delta\phi_{L,k} \)</strong> and
+        <strong>\( \Delta s_{R,k} = r_R \Delta\phi_{R,k} \)</strong>.
+      </p>
+
+      <p>Define average forward displacement and heading change:</p>
+      <h4 class="mathJax">
+        \[ \Delta s_k \;=\; \frac{\Delta s_{R,k} + \Delta s_{L,k}}{2}, \quad
+        \Delta\theta_k \;=\; \frac{\Delta s_{R,k} - \Delta s_{L,k}}{b}. \]
+      </h4>
+
+      <p>
+        Using midpoint integration (a standard improvement over Euler), with
+        midpoint heading
+        <strong>\( \theta_{k-1} + \tfrac{1}{2}\Delta\theta_k \)</strong>, the
+        increment is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} \Delta x_k &\;=\; \Delta s_k \cos\!\left(\theta_{k-1}
+        + \tfrac{1}{2}\Delta\theta_k\right),\\ \Delta y_k &\;=\; \Delta s_k
+        \sin\!\left(\theta_{k-1} + \tfrac{1}{2}\Delta\theta_k\right),\\ \theta_k
+        &\;=\; \mathrm{wrap}(\theta_{k-1} + \Delta\theta_k),\\ x_k &\;=\;
+        x_{k-1} + \Delta x_k,\quad y_k \;=\; y_{k-1} + \Delta y_k. \end{aligned}
+        \]
+      </h4>
+
+      <p>
+        The lab will treat <strong>\( (r_L,r_R,b) \)</strong> as unknown
+        parameters to be estimated from data. This is the core mechanism that
+        converts “drift” into something we can fit.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Metrics for Odometry Error -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Metrics: Endpoint Drift, Trajectory RMSE, and Drift-per-Meter</h2>
+    <div class="down-content">
+      <p>
+        Let position error be
+        <strong
+          >\( e^{pos}_k = \sqrt{(\hat{x}_k-x^{gt}_k)^2 + (\hat{y}_k-y^{gt}_k)^2}
+          \)</strong
+        >
+        and heading error
+        <strong
+          >\( e^{\theta}_k = \mathrm{wrap}(\hat{\theta}_k-\theta^{gt}_k)
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        The <strong>trajectory RMSE</strong> summarizes typical error magnitude:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathrm{RMSE}_{pos} \;=\;
+        \sqrt{\frac{1}{N}\sum_{k=1}^{N}\left(e^{pos}_k\right)^2}, \quad
+        \mathrm{RMSE}_{\theta} \;=\;
+        \sqrt{\frac{1}{N}\sum_{k=1}^{N}\left(e^{\theta}_k\right)^2}. \]
+      </h4>
+
+      <p>
+        The <strong>endpoint</strong> errors isolate the final accumulated
+        drift:
+      </p>
+      <h4 class="mathJax">
+        \[ e^{pos}_{N} \;=\; \sqrt{(\hat{x}_N-x^{gt}_N)^2 +
+        (\hat{y}_N-y^{gt}_N)^2}, \quad e^{\theta}_{N} \;=\; \left|
+        \mathrm{wrap}(\hat{\theta}_N-\theta^{gt}_N)\right|. \]
+      </h4>
+
+      <p>
+        Because longer paths typically yield larger absolute drift, we normalize
+        by the traveled ground-truth distance
+        <strong
+          >\( S =
+          \sum_{k=2}^{N}\sqrt{(x^{gt}_k-x^{gt}_{k-1})^2+(y^{gt}_k-y^{gt}_{k-1})^2}
+          \)</strong
+        >
+        to obtain a <strong>drift-per-meter</strong> statistic:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{DriftPerMeter} \;=\; \frac{e^{pos}_{N}}{S}. \]
+      </h4>
+
+      <p>
+        When you repeat the same trajectory across <strong>\( M \)</strong>
+        trials (same commanded path), you can treat endpoint errors
+        <strong>\( \mathbf{e}^{(j)}_{N} \)</strong> as i.i.d. samples from an
+        experiment-defined distribution and estimate their mean/covariance.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Statistical Characterization Across Repeated Trials -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Trial Statistics: Mean Error and Sample Covariance</h2>
+    <div class="down-content">
+      <p>
+        Suppose you run <strong>\( M \)</strong> trials and compute an endpoint
+        error vector for each trial:
+        <strong>\( \mathbf{e}^{(j)}_{N} \in \mathbb{R}^3 \)</strong>. The sample
+        mean and unbiased sample covariance estimate are:
+      </p>
+
+      <!-- FIXED MathJax: avoid \mathbf{\Sigma}, avoid HTML arrow entities, use ^{\mathsf{T}} -->
+      <h4 class="mathJax">
+        \[ \bar{\mathbf{e}} \;=\; \frac{1}{M}\sum_{j=1}^{M}\mathbf{e}^{(j)}_{N},
+        \quad \hat{\boldsymbol{\Sigma}}_{e} \;=\; \frac{1}{M-1}\sum_{j=1}^{M}
+        \left(\mathbf{e}^{(j)}_{N}-\bar{\mathbf{e}}\right)
+        \left(\mathbf{e}^{(j)}_{N}-\bar{\mathbf{e}}\right)^{\mathsf{T}}. \]
+      </h4>
+
+      <p>
+        <strong>Why \( \tfrac{1}{M-1} \) is unbiased (sketch proof).</strong>
+        Let the endpoint error samples be i.i.d. with true covariance
+        <strong>\( \boldsymbol{\Sigma}_{e} \)</strong>. Define centered samples
+        <strong
+          >\( \tilde{\mathbf{e}}^{(j)} = \mathbf{e}^{(j)}_{N} -
+          \mathbb{E}[\mathbf{e}_{N}] \)</strong
+        >. Using the identity
+        <strong
+          >\(
+          \sum_{j=1}^{M}(\mathbf{e}^{(j)}_{N}-\bar{\mathbf{e}})(\mathbf{e}^{(j)}_{N}-\bar{\mathbf{e}})^{\mathsf{T}}
+          =
+          \sum_{j=1}^{M}\tilde{\mathbf{e}}^{(j)}\tilde{\mathbf{e}}^{(j)\mathsf{T}}
+          -
+          M(\bar{\mathbf{e}}-\mathbb{E}[\mathbf{e}_N])(\bar{\mathbf{e}}-\mathbb{E}[\mathbf{e}_N])^{\mathsf{T}}
+          \)</strong
+        >
+        and taking expectations yields
+        <strong
+          >\( \mathbb{E}[\hat{\boldsymbol{\Sigma}}_{e}] =
+          \boldsymbol{\Sigma}_{e} \)</strong
+        >.
+      </p>
+
+      <p>
+        Interpretation:
+        <strong>\( \bar{\mathbf{e}} \)</strong> captures repeatable bias
+        (systematic drift), while
+        <strong>\( \hat{\boldsymbol{\Sigma}}_e \)</strong> captures
+        trial-to-trial variability (stochastic effects such as slip variation).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Systematic Error as a Parameter-Estimation Problem -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      5. Systematic Error: Calibrating \( (r_L, r_R, b) \) by Least Squares
+    </h2>
+    <div class="down-content">
+      <p>
+        Systematic odometry drift often arises from imperfect wheel radii and
+        wheelbase assumptions. We fit parameters
+        <strong
+          >\( \boldsymbol{\theta} = [r_L,\;r_R,\;b]^{\mathsf{T}} \)</strong
+        >
+        by minimizing a residual that compares predicted increments from
+        encoders against ground-truth increments.
+      </p>
+
+      <p>
+        Let
+        <strong
+          >\( \Delta\mathbf{x}^{pred}_k(\boldsymbol{\theta}) = [\Delta
+          x_k,\Delta y_k,\Delta\theta_k]^{\mathsf{T}} \)</strong
+        >
+        be the model-predicted increment, and
+        <strong
+          >\( \Delta\mathbf{x}^{gt}_k = [\Delta x^{gt}_k,\Delta
+          y^{gt}_k,\Delta\theta^{gt}_k]^{\mathsf{T}} \)</strong
+        >
+        the ground-truth increment (finite difference). Define the per-step
+        residual:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{r}_k(\boldsymbol{\theta}) \;=\; \begin{bmatrix} \Delta
+        x_k(\boldsymbol{\theta}) - \Delta x^{gt}_k \\ \Delta
+        y_k(\boldsymbol{\theta}) - \Delta y^{gt}_k \\
+        w_{\theta}\left(\mathrm{wrap}(\Delta\theta_k(\boldsymbol{\theta}) -
+        \Delta\theta^{gt}_k)\right) \end{bmatrix}, \quad w_{\theta} \; &gt; \;
+        0. \]
+      </h4>
+
+      <p>
+        Stack all residuals into a single vector
+        <strong
+          >\( \mathbf{r}(\boldsymbol{\theta}) \in \mathbb{R}^{3(N-1)} \)</strong
+        >
+        and solve the nonlinear least squares problem:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \boldsymbol{\theta}^{\star} \;=\; \arg\min_{\boldsymbol{\theta}}
+        \;\;\|\mathbf{r}(\boldsymbol{\theta})\|_2^2, \quad \text{subject to }
+        r_L &gt; 0,\; r_R &gt; 0,\; b &gt; 0. \]
+      </h4>
+
+      <p>
+        <strong>Gauss–Newton iteration.</strong>
+        Linearize about the current estimate
+        <strong>\( \boldsymbol{\theta}_i \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{r}(\boldsymbol{\theta}_i + \Delta\boldsymbol{\theta})
+        \;\approx\; \mathbf{r}(\boldsymbol{\theta}_i) + \mathbf{J}_i
+        \Delta\boldsymbol{\theta}, \quad \mathbf{J}_i \;=\; \frac{\partial
+        \mathbf{r}}{\partial
+        \boldsymbol{\theta}}\bigg|_{\boldsymbol{\theta}=\boldsymbol{\theta}_i}.
+        \]
+      </h4>
+
+      <p>Minimizing the quadratic approximation yields the normal equations:</p>
+
+      <h4 class="mathJax">
+        \[
+        \left(\mathbf{J}_i^{\mathsf{T}}\mathbf{J}_i\right)\Delta\boldsymbol{\theta}
+        \;=\; -\mathbf{J}_i^{\mathsf{T}}\mathbf{r}(\boldsymbol{\theta}_i). \]
+      </h4>
+
+      <p>A numerically stable variant adds damping (Levenberg-style):</p>
+
+      <h4 class="mathJax">
+        \[ \left(\mathbf{J}_i^{\mathsf{T}}\mathbf{J}_i + \lambda
+        \mathbf{I}\right)\Delta\boldsymbol{\theta} \;=\;
+        -\mathbf{J}_i^{\mathsf{T}}\mathbf{r}(\boldsymbol{\theta}_i), \quad
+        \lambda \ge 0. \]
+      </h4>
+
+      <p>
+        <strong
+          >Interpretation (what is being “proven” by the optimization).</strong
+        >
+        If the increment model is locally identifiable and the residual function
+        is twice differentiable near the optimum, Gauss–Newton is a descent
+        method that converges locally (under standard regularity) because it
+        approximates the Hessian by
+        <strong>\( \mathbf{J}^{\mathsf{T}}\mathbf{J} \)</strong>, which is
+        positive semidefinite; the damping term makes it positive definite when
+        <strong>\( \mathbf{J} \)</strong> has full column rank.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Stochastic Error: Increment Noise Covariance -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Stochastic Error: Empirical Increment Noise Covariance</h2>
+    <div class="down-content">
+      <p>
+        After calibration, remaining errors are dominated by unmodeled effects
+        (slip micro-variations, encoder quantization, surface changes). A
+        practical summary is the covariance of increment residuals:
+        <strong
+          >\( \boldsymbol{\varepsilon}_k =
+          \Delta\mathbf{x}^{pred}_k(\boldsymbol{\theta}^{\star}) -
+          \Delta\mathbf{x}^{gt}_k \)</strong
+        >.
+      </p>
+
+      <p>
+        Compute the residual mean and covariance across all increments (and
+        optionally across multiple trials):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \bar{\boldsymbol{\varepsilon}} \;=\;
+        \frac{1}{K}\sum_{k=1}^{K}\boldsymbol{\varepsilon}_k, \quad
+        \hat{\mathbf{Q}} \;=\; \frac{1}{K-1}\sum_{k=1}^{K}
+        \left(\boldsymbol{\varepsilon}_k-\bar{\boldsymbol{\varepsilon}}\right)
+        \left(\boldsymbol{\varepsilon}_k-\bar{\boldsymbol{\varepsilon}}\right)^{\mathsf{T}}.
+        \]
+      </h4>
+
+      <p>
+        <strong>Practical note.</strong> If your increments are sampled at
+        different rates or have different commanded speeds, you may compute
+        separate covariances per regime (e.g., slow/fast), but this lab uses a
+        single global estimate for simplicity.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Compute encoder increments dphiL(k), dphiR(k)"] --> B["Predict increment using calibrated params"]
+  B --> C["Compute gt increment from reference pose differences"]
+  C --> D["Residual eps(k) = inc_pred(k) - inc_gt(k)"]
+  D --> E["Estimate mean eps_bar and covariance Q_hat"]
+  E --> F["Use Q_hat as increment noise summary"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Lab Implementation (Multi-language) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      7. Lab Implementation (Python, C++, Java, MATLAB/Simulink, Mathematica)
+    </h2>
+    <div class="down-content">
+      <p>
+        The following reference implementations assume a CSV log with columns:
+        <strong
+          >\(
+          t,\;nL,\;nR,\;x\_odom,\;y\_odom,\;\theta\_odom,\;x\_{gt},\;y\_{gt},\;\theta\_{gt}
+          \)</strong
+        >
+        and optional <strong>\( trial\_id \)</strong>. The pipeline computes
+        metrics per trial, estimates <strong>\( (r_L,r_R,b) \)</strong>, and
+        estimates <strong>\( \hat{\mathbf{Q}} \)</strong>.
+      </p>
+
+      <h3>7.1 Python</h3>
+      <p><strong>File:</strong> Chapter5_Lesson5.py</p>
+      <pre><code class="language-python">#!/usr/bin/env python3
+"""
+Chapter5_Lesson5.py
+
+Lab: Characterizing Odometry Error (Differential Drive)
+
+This script:
+1) Loads a CSV log containing time, encoder counts, odometry pose, and ground truth pose.
+2) Computes endpoint error, trajectory RMSE, and drift-per-meter.
+3) Estimates differential-drive parameters (r_L, r_R, b) via Gauss-Newton least squares.
+4) Computes increment residual covariance (empirical Q) after calibration.
+5) Produces diagnostic plots.
+
+Expected CSV columns (minimum):
+  t
+  nL, nR                          (cumulative encoder ticks)
+  x_odom, y_odom, th_odom          (odometry pose)
+  x_gt, y_gt, th_gt                (ground truth pose)
+
+Optional:
+  trial_id                         (integer trial label for repeated experiments)
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+from dataclasses import dataclass
+from typing import Dict, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
+
+def wrap_angle(theta: np.ndarray | float) -&gt; np.ndarray | float:
+    """Wrap angle(s) to (-pi, pi]."""
+    return (theta + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def interp_angle(t_src: np.ndarray, th_src: np.ndarray, t_new: np.ndarray) -&gt; np.ndarray:
+    """Interpolate angles by unwrapping then wrapping."""
+    th_unwrap = np.unwrap(th_src)
+    th_new = np.interp(t_new, t_src, th_unwrap)
+    return wrap_angle(th_new)
+
+
+@dataclass
+class Params:
+    rL: float
+    rR: float
+    b: float
+
+
+# -----------------------------
+# Odometry model (increment form)
+# -----------------------------
+
+def ticks_to_dphi(n: np.ndarray, ticks_per_rev: float) -&gt; np.ndarray:
+    """Convert cumulative ticks to wheel angle increments (rad) with same length as n (first increment is 0)."""
+    dn = np.diff(n, prepend=n[0])
+    return (2.0 * np.pi / ticks_per_rev) * dn
+
+
+def predict_increment_from_enc(
+    th: np.ndarray,
+    dphiL: np.ndarray,
+    dphiR: np.ndarray,
+    p: Params
+) -&gt; np.ndarray:
+    """
+    Predict pose increments [dx, dy, dth] for each step k using midpoint integration,
+    given heading th[k-1] (so pass th aligned to increments) and wheel increments.
+    Returns array shape (N,3) for k=1..N (note: first row corresponds to first increment).
+    """
+    sL = p.rL * dphiL
+    sR = p.rR * dphiR
+    ds = 0.5 * (sR + sL)
+    dth = (sR - sL) / p.b
+
+    # midpoint heading
+    th_mid = wrap_angle(th + 0.5 * dth)
+
+    dx = ds * np.cos(th_mid)
+    dy = ds * np.sin(th_mid)
+    return np.vstack([dx, dy, dth]).T
+
+
+def cumulative_from_increments(x0: np.ndarray, inc: np.ndarray) -&gt; np.ndarray:
+    """Integrate increments to cumulative pose. x0 = [x,y,th]. inc: (N,3). returns (N+1,3)."""
+    out = np.zeros((inc.shape[0] + 1, 3), dtype=float)
+    out[0, :] = x0
+    out[1:, :] = np.cumsum(inc, axis=0) + x0
+    out[:, 2] = wrap_angle(out[:, 2])
+    return out
+
+
+# -----------------------------
+# Metrics
+# -----------------------------
+
+def compute_errors(df: pd.DataFrame) -&gt; Dict[str, float]:
+    """Compute RMSE and endpoint metrics for one trajectory (single trial)."""
+    ex = df["x_odom"].to_numpy() - df["x_gt"].to_numpy()
+    ey = df["y_odom"].to_numpy() - df["y_gt"].to_numpy()
+    eth = wrap_angle(df["th_odom"].to_numpy() - df["th_gt"].to_numpy())
+
+    epos = np.sqrt(ex**2 + ey**2)
+    rmse_pos = float(np.sqrt(np.mean(epos**2)))
+    rmse_th = float(np.sqrt(np.mean(eth**2)))
+
+    end_pos = float(np.sqrt(ex[-1] ** 2 + ey[-1] ** 2))
+    end_th = float(abs(eth[-1]))
+
+    # ground-truth traveled distance
+    xg = df["x_gt"].to_numpy()
+    yg = df["y_gt"].to_numpy()
+    ds = np.sqrt(np.diff(xg) ** 2 + np.diff(yg) ** 2)
+    s_total = float(np.sum(ds)) if len(ds) else 0.0
+    drift_per_m = end_pos / s_total if s_total &gt; 1e-12 else float("nan")
+
+    return {
+        "rmse_pos": rmse_pos,
+        "rmse_th": rmse_th,
+        "end_pos": end_pos,
+        "end_th": end_th,
+        "s_total": s_total,
+        "drift_per_m": drift_per_m,
+    }
+
+
+def compute_increment_residuals(
+    df: pd.DataFrame, ticks_per_rev: float, p: Params
+) -&gt; np.ndarray:
+    """
+    Compute increment residuals eps_k = inc_pred(p) - inc_gt, k=1..N.
+    inc_gt is formed from successive ground-truth pose differences.
+    """
+    nL = df["nL"].to_numpy()
+    nR = df["nR"].to_numpy()
+    dphiL = ticks_to_dphi(nL, ticks_per_rev)
+    dphiR = ticks_to_dphi(nR, ticks_per_rev)
+
+    # Use heading at previous step. Align by shifting: th_prev[k] = th_gt[k-1]
+    th_gt = df["th_gt"].to_numpy()
+    th_prev = np.roll(th_gt, 1)
+    th_prev[0] = th_gt[0]
+
+    inc_pred = predict_increment_from_enc(th_prev, dphiL, dphiR, p)
+
+    xg = df["x_gt"].to_numpy()
+    yg = df["y_gt"].to_numpy()
+    thg = df["th_gt"].to_numpy()
+
+    dx = np.diff(xg, prepend=xg[0])
+    dy = np.diff(yg, prepend=yg[0])
+    dth = wrap_angle(np.diff(thg, prepend=thg[0]))
+
+    inc_gt = np.vstack([dx, dy, dth]).T
+    eps = inc_pred - inc_gt
+    # Remove first "increment" which is zero by construction
+    return eps[1:, :]
+
+
+# -----------------------------
+# Parameter estimation via Gauss-Newton
+# -----------------------------
+
+def stack_residuals_and_jacobian(
+    df: pd.DataFrame,
+    ticks_per_rev: float,
+    p: Params,
+    w_theta: float
+) -&gt; Tuple[np.ndarray, np.ndarray]:
+    """
+    Build residual vector r(p) and Jacobian J for Gauss-Newton using increment residuals.
+    Residual per step: [dx_pred - dx_gt, dy_pred - dy_gt, w_theta*(dth_pred - dth_gt)].
+
+    Returns:
+      r: (3N,) residual
+      J: (3N,3) Jacobian wrt [rL, rR, b]
+    """
+    nL = df["nL"].to_numpy()
+    nR = df["nR"].to_numpy()
+    dphiL = ticks_to_dphi(nL, ticks_per_rev)
+    dphiR = ticks_to_dphi(nR, ticks_per_rev)
+
+    th_gt = df["th_gt"].to_numpy()
+    th_prev = np.roll(th_gt, 1)
+    th_prev[0] = th_gt[0]
+
+    # Ground-truth increments
+    xg = df["x_gt"].to_numpy()
+    yg = df["y_gt"].to_numpy()
+    thg = df["th_gt"].to_numpy()
+    dx_gt = np.diff(xg, prepend=xg[0])
+    dy_gt = np.diff(yg, prepend=yg[0])
+    dth_gt = wrap_angle(np.diff(thg, prepend=thg[0]))
+
+    # Predicted increments
+    sL = p.rL * dphiL
+    sR = p.rR * dphiR
+    ds = 0.5 * (sR + sL)
+    dth = (sR - sL) / p.b
+    th_mid = wrap_angle(th_prev + 0.5 * dth)
+
+    dx = ds * np.cos(th_mid)
+    dy = ds * np.sin(th_mid)
+
+    # Residuals (skip k=0)
+    rx = dx - dx_gt
+    ry = dy - dy_gt
+    rth = wrap_angle(dth - dth_gt)
+
+    rx = rx[1:]
+    ry = ry[1:]
+    rth = rth[1:]
+    N = rx.shape[0]
+
+    r = np.zeros((3 * N,), dtype=float)
+    r[0::3] = rx
+    r[1::3] = ry
+    r[2::3] = w_theta * rth
+
+    # Jacobian
+    # d(ds)/d(rL)=0.5*dphiL, d(ds)/d(rR)=0.5*dphiR
+    dds_drL = 0.5 * dphiL[1:]
+    dds_drR = 0.5 * dphiR[1:]
+    # d(dth)/d(rL)=-(dphiL)/b, d(dth)/d(rR)=(dphiR)/b, d(dth)/d(b)=-(sR-sL)/b^2
+    ddth_drL = -(dphiL[1:]) / p.b
+    ddth_drR = (dphiR[1:]) / p.b
+    ddth_db = -(sR[1:] - sL[1:]) / (p.b ** 2)
+
+    # dx = ds*cos(th_prev + 0.5*dth)
+    # Let a = th_prev + 0.5*dth. Then:
+    # d(dx) = cos(a)*d(ds) + ds*(-sin(a))*d(a)
+    # d(a) = 0.5*d(dth)
+    a = th_mid[1:]
+    ca = np.cos(a)
+    sa = np.sin(a)
+    ds_k = ds[1:]
+
+    # dx derivatives
+    ddx_drL = ca * dds_drL + ds_k * (-sa) * (0.5 * ddth_drL)
+    ddx_drR = ca * dds_drR + ds_k * (-sa) * (0.5 * ddth_drR)
+    ddx_db  = ds_k * (-sa) * (0.5 * ddth_db)
+
+    # dy = ds*sin(a)
+    # d(dy) = sin(a)*d(ds) + ds*cos(a)*d(a)
+    ddy_drL = sa * dds_drL + ds_k * ca * (0.5 * ddth_drL)
+    ddy_drR = sa * dds_drR + ds_k * ca * (0.5 * ddth_drR)
+    ddy_db  = ds_k * ca * (0.5 * ddth_db)
+
+    # dth derivatives (scaled)
+    ddth_drL_s = w_theta * ddth_drL
+    ddth_drR_s = w_theta * ddth_drR
+    ddth_db_s  = w_theta * ddth_db
+
+    J = np.zeros((3 * N, 3), dtype=float)
+    # rows for step i: 3i,3i+1,3i+2
+    J[0::3, 0] = ddx_drL
+    J[0::3, 1] = ddx_drR
+    J[0::3, 2] = ddx_db
+
+    J[1::3, 0] = ddy_drL
+    J[1::3, 1] = ddy_drR
+    J[1::3, 2] = ddy_db
+
+    J[2::3, 0] = ddth_drL_s
+    J[2::3, 1] = ddth_drR_s
+    J[2::3, 2] = ddth_db_s
+
+    return r, J
+
+
+def gauss_newton_calibrate(
+    df: pd.DataFrame,
+    ticks_per_rev: float,
+    p0: Params,
+    w_theta: float = 1.0,
+    max_iter: int = 15,
+    damping: float = 1e-9
+) -&gt; Params:
+    """
+    Estimate (rL, rR, b) by Gauss-Newton on increment residuals.
+    Damping adds lambda*I to J^T J for numerical stability.
+    """
+    p = Params(p0.rL, p0.rR, p0.b)
+    for _it in range(max_iter):
+        r, J = stack_residuals_and_jacobian(df, ticks_per_rev, p, w_theta=w_theta)
+        A = J.T @ J + damping * np.eye(3)
+        g = J.T @ r
+        try:
+            dp = -np.linalg.solve(A, g)
+        except np.linalg.LinAlgError:
+            break
+
+        # simple line search (optional): enforce positive parameters
+        alpha = 1.0
+        for _ in range(10):
+            cand = Params(p.rL + alpha * dp[0], p.rR + alpha * dp[1], p.b + alpha * dp[2])
+            if cand.rL &gt; 0 and cand.rR &gt; 0 and cand.b &gt; 0:
+                break
+            alpha *= 0.5
+
+        p_new = Params(p.rL + alpha * dp[0], p.rR + alpha * dp[1], p.b + alpha * dp[2])
+
+        # stop if step is tiny
+        if np.linalg.norm(dp) &lt; 1e-12:
+            p = p_new
+            break
+        p = p_new
+
+    return p
+
+
+# -----------------------------
+# I/O and analysis pipeline
+# -----------------------------
+
+def load_log_csv(path: str) -&gt; pd.DataFrame:
+    df = pd.read_csv(path)
+    required = ["t", "nL", "nR", "x_odom", "y_odom", "th_odom", "x_gt", "y_gt", "th_gt"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    # Ensure numeric
+    for c in required:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=required).reset_index(drop=True)
+    df["th_odom"] = wrap_angle(df["th_odom"].to_numpy())
+    df["th_gt"] = wrap_angle(df["th_gt"].to_numpy())
+
+    if "trial_id" not in df.columns:
+        df["trial_id"] = 0
+    return df
+
+
+def analyze_trials(
+    df: pd.DataFrame,
+    ticks_per_rev: float,
+    p_nominal: Params,
+    w_theta: float
+) -&gt; Dict[str, object]:
+    """
+    Compute metrics per trial, calibrate on all data, then compute metrics again using
+    re-integrated odometry from encoders with calibrated params.
+    """
+    results: Dict[str, object] = {}
+
+    # Metrics "as logged" (whatever odom source provides)
+    trial_metrics = []
+    for tid, g in df.groupby("trial_id"):
+        m = compute_errors(g)
+        m["trial_id"] = int(tid)
+        trial_metrics.append(m)
+    metrics_df = pd.DataFrame(trial_metrics).sort_values("trial_id")
+    results["metrics_logged"] = metrics_df
+
+    # Calibrate on entire dataset (concatenate)
+    p_hat = gauss_newton_calibrate(df, ticks_per_rev, p_nominal, w_theta=w_theta)
+    results["p_hat"] = p_hat
+
+    # Reconstruct odometry from encoders using p_hat and compare to gt (per trial)
+    trial_metrics_cal = []
+    for tid, g in df.groupby("trial_id"):
+        nL = g["nL"].to_numpy()
+        nR = g["nR"].to_numpy()
+        dphiL = ticks_to_dphi(nL, ticks_per_rev)
+        dphiR = ticks_to_dphi(nR, ticks_per_rev)
+
+        th_gt = g["th_gt"].to_numpy()
+        th_prev = np.roll(th_gt, 1)
+        th_prev[0] = th_gt[0]
+
+        inc = predict_increment_from_enc(th_prev, dphiL, dphiR, p_hat)
+        x0 = np.array([g["x_gt"].iloc[0], g["y_gt"].iloc[0], g["th_gt"].iloc[0]], dtype=float)
+        x_hat = cumulative_from_increments(x0, inc)
+
+        g2 = g.copy()
+        g2["x_odom"] = x_hat[:, 0]
+        g2["y_odom"] = x_hat[:, 1]
+        g2["th_odom"] = x_hat[:, 2]
+
+        m2 = compute_errors(g2)
+        m2["trial_id"] = int(tid)
+        trial_metrics_cal.append(m2)
+
+    metrics_df_cal = pd.DataFrame(trial_metrics_cal).sort_values("trial_id")
+    results["metrics_calibrated"] = metrics_df_cal
+
+    # Noise estimates from increment residuals after calibration
+    eps_all = []
+    for _tid, g in df.groupby("trial_id"):
+        eps = compute_increment_residuals(g, ticks_per_rev, p_hat)
+        if eps.shape[0] &gt; 0:
+            eps_all.append(eps)
+    if eps_all:
+        E = np.vstack(eps_all)
+        eps_mean = np.mean(E, axis=0)
+        Q = np.cov((E - eps_mean).T, bias=False)
+    else:
+        eps_mean = np.zeros((3,), dtype=float)
+        Q = np.full((3, 3), np.nan)
+
+    results["increment_residual_mean"] = eps_mean
+    results["Q_hat"] = Q
+
+    # Endpoint covariance across trials (logged and calibrated) on scalars [end_pos, end_th]
+    def endpoint_cov(mdf: pd.DataFrame) -&gt; np.ndarray:
+        A = np.vstack([mdf["end_pos"].to_numpy(), mdf["end_th"].to_numpy()]).T
+        if A.shape[0] &lt; 2:
+            return np.full((2, 2), np.nan)
+        return np.cov(A.T, bias=False)
+
+    results["endpoint_cov_logged_pos_th"] = endpoint_cov(metrics_df)
+    results["endpoint_cov_cal_pos_th"] = endpoint_cov(metrics_df_cal)
+
+    return results
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", required=True, help="Path to CSV log")
+    ap.add_argument("--ticks_per_rev", type=float, required=True, help="Encoder ticks per wheel revolution")
+    ap.add_argument("--r_nom", type=float, default=0.05, help="Nominal wheel radius (m)")
+    ap.add_argument("--b_nom", type=float, default=0.30, help="Nominal wheelbase (m)")
+    ap.add_argument("--w_theta", type=float, default=1.0, help="Heading weight (scale) in least squares")
+    ap.add_argument("--out_prefix", type=str, default="chapter5_lesson5", help="Prefix for outputs")
+    args = ap.parse_args()
+
+    df = load_log_csv(args.csv)
+
+    p0 = Params(rL=args.r_nom, rR=args.r_nom, b=args.b_nom)
+    res = analyze_trials(df, args.ticks_per_rev, p0, w_theta=args.w_theta)
+
+    print("=== Calibration Result ===")
+    p_hat: Params = res["p_hat"]  # type: ignore[assignment]
+    print(f"rL_hat = {p_hat.rL:.8f} m")
+    print(f"rR_hat = {p_hat.rR:.8f} m")
+    print(f"b_hat  = {p_hat.b:.8f} m")
+    print()
+
+    print("=== Metrics (logged odom) per trial ===")
+    print(res["metrics_logged"].to_string(index=False))
+    print()
+
+    print("=== Metrics (reconstructed from encoders, calibrated params) per trial ===")
+    print(res["metrics_calibrated"].to_string(index=False))
+    print()
+
+    print("=== Increment residual mean (after calibration) [dx, dy, dth] ===")
+    print(res["increment_residual_mean"])
+    print()
+
+    print("=== Increment residual covariance Q_hat (after calibration) ===")
+    print(res["Q_hat"])
+    print()
+
+    print("=== Endpoint covariance on scalars [end_pos, end_th] (logged) ===")
+    print(res["endpoint_cov_logged_pos_th"])
+    print()
+
+    print("=== Endpoint covariance on scalars [end_pos, end_th] (calibrated) ===")
+    print(res["endpoint_cov_cal_pos_th"])
+    print()
+
+    # Optional plotting if matplotlib is available
+    try:
+        import matplotlib.pyplot as plt
+
+        m1 = res["metrics_logged"]
+        m2 = res["metrics_calibrated"]
+
+        plt.figure()
+        plt.plot(m1["trial_id"], m1["end_pos"], marker="o", label="logged")
+        plt.plot(m2["trial_id"], m2["end_pos"], marker="o", label="calibrated")
+        plt.xlabel("trial_id")
+        plt.ylabel("endpoint position error (m)")
+        plt.legend()
+        plt.title("Endpoint position error per trial")
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_endpoint_pos.png", dpi=200)
+
+        plt.figure()
+        plt.plot(m1["trial_id"], m1["rmse_pos"], marker="o", label="logged")
+        plt.plot(m2["trial_id"], m2["rmse_pos"], marker="o", label="calibrated")
+        plt.xlabel("trial_id")
+        plt.ylabel("trajectory RMSE position (m)")
+        plt.legend()
+        plt.title("Trajectory position RMSE per trial")
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_rmse_pos.png", dpi=200)
+
+        plt.figure()
+        plt.plot(m1["trial_id"], m1["end_th"], marker="o", label="logged")
+        plt.plot(m2["trial_id"], m2["end_th"], marker="o", label="calibrated")
+        plt.xlabel("trial_id")
+        plt.ylabel("endpoint heading error (rad)")
+        plt.legend()
+        plt.title("Endpoint heading error per trial")
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_endpoint_th.png", dpi=200)
+
+        print(f"Saved plots with prefix: {args.out_prefix}_*.png")
+
+    except Exception as e:
+        print("Plotting skipped (matplotlib not available or failed):", e)
+
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+      <p><strong>File:</strong> Chapter5_Lesson5_Ex1.py</p>
+      <pre><code class="language-python">#!/usr/bin/env python3
+"""
+Chapter5_Lesson5_Ex1.py
+
+Exercise 1:
+Generate a synthetic differential-drive dataset with known (rL, rR, b),
+add encoder noise, then run the calibration routine from Chapter5_Lesson5.py.
+
+This is a self-contained script that produces a CSV log compatible with the lab pipeline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import numpy as np
+import pandas as pd
+
+
+def wrap_angle(theta):
+    return (theta + np.pi) % (2 * np.pi) - np.pi
+
+
+def simulate(
+    T: float,
+    dt: float,
+    ticks_per_rev: float,
+    rL_true: float,
+    rR_true: float,
+    b_true: float,
+    v_cmd: float,
+    w_cmd: float,
+    sigma_ticks: float,
+    trial_id: int,
+):
+    """
+    Simulate robot motion with commanded (v,w) in continuous time, and produce encoder ticks.
+    Ground truth integrates the true kinematics. "Odom" uses a biased parameter set (deliberately wrong).
+    """
+    N = int(T / dt) + 1
+    t = np.linspace(0, T, N)
+
+    # True wheel angular velocities
+    # v = (rR*wR + rL*wL)/2, w = (rR*wR - rL*wL)/b
+    # Solve: wR = (v + 0.5*b*w)/rR, wL = (v - 0.5*b*w)/rL
+    wR = (v_cmd + 0.5 * b_true * w_cmd) / rR_true
+    wL = (v_cmd - 0.5 * b_true * w_cmd) / rL_true
+
+    dphiR = wR * dt * np.ones(N)
+    dphiL = wL * dt * np.ones(N)
+    dphiR[0] = 0.0
+    dphiL[0] = 0.0
+
+    # Convert to ticks and add noise, then accumulate
+    ticks_per_rad = ticks_per_rev / (2 * np.pi)
+    dnR = dphiR * ticks_per_rad + np.random.normal(0.0, sigma_ticks, size=N)
+    dnL = dphiL * ticks_per_rad + np.random.normal(0.0, sigma_ticks, size=N)
+    dnR[0] = 0.0
+    dnL[0] = 0.0
+
+    nR = np.cumsum(dnR)
+    nL = np.cumsum(dnL)
+
+    # Integrate ground truth from true wheel arcs
+    sR = rR_true * dphiR
+    sL = rL_true * dphiL
+    ds = 0.5 * (sR + sL)
+    dth = (sR - sL) / b_true
+    th = np.zeros(N)
+    th_mid = wrap_angle(th + 0.5 * dth)
+    dx = ds * np.cos(th_mid)
+    dy = ds * np.sin(th_mid)
+
+    x = np.cumsum(dx)
+    y = np.cumsum(dy)
+    th = wrap_angle(np.cumsum(dth))
+
+    # Build a deliberately biased odometry (wrong parameters)
+    rL_odom = rL_true * 1.02
+    rR_odom = rR_true * 0.98
+    b_odom = b_true * 1.05
+
+    sR_o = rR_odom * dphiR
+    sL_o = rL_odom * dphiL
+    ds_o = 0.5 * (sR_o + sL_o)
+    dth_o = (sR_o - sL_o) / b_odom
+    th_o = np.zeros(N)
+    th_mid_o = wrap_angle(th_o + 0.5 * dth_o)
+    dx_o = ds_o * np.cos(th_mid_o)
+    dy_o = ds_o * np.sin(th_mid_o)
+    x_odom = np.cumsum(dx_o)
+    y_odom = np.cumsum(dy_o)
+    th_odom = wrap_angle(np.cumsum(dth_o))
+
+    df = pd.DataFrame(
+        {
+            "t": t,
+            "nL": nL,
+            "nR": nR,
+            "x_odom": x_odom,
+            "y_odom": y_odom,
+            "th_odom": th_odom,
+            "x_gt": x,
+            "y_gt": y,
+            "th_gt": th,
+            "trial_id": trial_id,
+        }
+    )
+    return df
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out_csv", default="synthetic_ch5_l5.csv")
+    ap.add_argument("--ticks_per_rev", type=float, default=4096.0)
+    ap.add_argument("--rL_true", type=float, default=0.05)
+    ap.add_argument("--rR_true", type=float, default=0.05)
+    ap.add_argument("--b_true", type=float, default=0.30)
+    ap.add_argument("--sigma_ticks", type=float, default=0.5)
+    ap.add_argument("--dt", type=float, default=0.02)
+    ap.add_argument("--T", type=float, default=10.0)
+    ap.add_argument("--v", type=float, default=0.2)
+    ap.add_argument("--w", type=float, default=0.4)
+    ap.add_argument("--trials", type=int, default=5)
+    args = ap.parse_args()
+
+    np.random.seed(0)
+    dfs = []
+    for j in range(args.trials):
+        dfj = simulate(
+            T=args.T,
+            dt=args.dt,
+            ticks_per_rev=args.ticks_per_rev,
+            rL_true=args.rL_true,
+            rR_true=args.rR_true,
+            b_true=args.b_true,
+            v_cmd=args.v,
+            w_cmd=args.w,
+            sigma_ticks=args.sigma_ticks,
+            trial_id=j,
+        )
+        dfs.append(dfj)
+
+    df = pd.concat(dfs, ignore_index=True)
+    df.to_csv(args.out_csv, index=False)
+    print("Wrote:", args.out_csv)
+    print("Now run:")
+    print(
+        f"  python3 Chapter5_Lesson5.py --csv {args.out_csv} --ticks_per_rev {args.ticks_per_rev} "
+        f"--r_nom {args.rL_true} --b_nom {args.b_true}"
+    )
+
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+      <h3>7.2 C++</h3>
+      <p><strong>File:</strong> Chapter5_Lesson5.cpp</p>
+      <pre><code class="language-cpp">/*
+Chapter5_Lesson5.cpp
+
+Lab: Characterizing Odometry Error (Differential Drive)
+
+This C++ program:
+1) Loads a CSV log with: t,nL,nR,x_odom,y_odom,th_odom,x_gt,y_gt,th_gt,(optional)trial_id.
+2) Computes endpoint error, RMSE, and drift-per-meter per trial using "logged odom".
+3) Calibrates (rL, rR, b) by Gauss-Newton on increment residuals (using ground truth).
+4) Reconstructs odometry from encoders using calibrated params and re-evaluates metrics.
+
+Dependencies:
+- C++17
+
+Build:
+  g++ -O2 -std=c++17 Chapter5_Lesson5.cpp -o ch5_l5
+
+Run:
+  ./ch5_l5 --csv your_log.csv --ticks_per_rev 4096 --r_nom 0.05 --b_nom 0.30 --w_theta 1.0
+*/
+
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;cstddef&gt;
+#include &lt;cstdint&gt;
+#include &lt;fstream&gt;
+#include &lt;iostream&gt;
+#include &lt;map&gt;
+#include &lt;sstream&gt;
+#include &lt;string&gt;
+#include &lt;tuple&gt;
+#include &lt;vector&gt;
+#include &lt;limits&gt;
+
+struct Params {
+  double rL{0.05};
+  double rR{0.05};
+  double b{0.30};
+};
+
+static inline double wrap_angle(double th) {
+  double a = std::fmod(th + M_PI, 2.0 * M_PI);
+  if (a &lt; 0) a += 2.0 * M_PI;
+  return a - M_PI;
+}
+
+struct Row {
+  double t{0};
+  double nL{0};
+  double nR{0};
+  double x_odom{0}, y_odom{0}, th_odom{0};
+  double x_gt{0}, y_gt{0}, th_gt{0};
+  int trial_id{0};
+};
+
+static bool parse_csv_line(const std::string&amp; line, std::vector&lt;std::string&gt;&amp; out) {
+  out.clear();
+  std::string token;
+  std::stringstream ss(line);
+  while (std::getline(ss, token, ',')) {
+    out.push_back(token);
+  }
+  return !out.empty();
+}
+
+static std::vector&lt;Row&gt; load_csv(const std::string&amp; path) {
+  std::ifstream f(path);
+  if (!f) {
+    throw std::runtime_error("Cannot open CSV: " + path);
+  }
+
+  std::string header;
+  std::getline(f, header);
+  std::vector&lt;std::string&gt; cols;
+  parse_csv_line(header, cols);
+
+  auto col_index = [&amp;](const std::string&amp; name) -&gt; int {
+    for (int i = 0; i &lt; (int)cols.size(); ++i) {
+      if (cols[i] == name) return i;
+    }
+    return -1;
+  };
+
+  const int it = col_index("t");
+  const int inL = col_index("nL");
+  const int inR = col_index("nR");
+  const int ixO = col_index("x_odom");
+  const int iyO = col_index("y_odom");
+  const int ithO = col_index("th_odom");
+  const int ixG = col_index("x_gt");
+  const int iyG = col_index("y_gt");
+  const int ithG = col_index("th_gt");
+  const int itr = col_index("trial_id");
+
+  const std::vector&lt;std::string&gt; req = {"t","nL","nR","x_odom","y_odom","th_odom","x_gt","y_gt","th_gt"};
+  for (const auto&amp; r : req) {
+    if (col_index(r) &lt; 0) {
+      throw std::runtime_error("Missing required column: " + r);
+    }
+  }
+
+  std::vector&lt;Row&gt; rows;
+  std::string line;
+  std::vector&lt;std::string&gt; toks;
+  while (std::getline(f, line)) {
+    if (line.empty()) continue;
+    parse_csv_line(line, toks);
+    auto getd = [&amp;](int idx) -&gt; double {
+      if (idx &lt; 0 || idx &gt;= (int)toks.size()) return 0.0;
+      return std::stod(toks[idx]);
+    };
+    Row r;
+    r.t = getd(it);
+    r.nL = getd(inL);
+    r.nR = getd(inR);
+    r.x_odom = getd(ixO);
+    r.y_odom = getd(iyO);
+    r.th_odom = wrap_angle(getd(ithO));
+    r.x_gt = getd(ixG);
+    r.y_gt = getd(iyG);
+    r.th_gt = wrap_angle(getd(ithG));
+    r.trial_id = (itr &gt;= 0 &amp;&amp; itr &lt; (int)toks.size()) ? (int)std::round(getd(itr)) : 0;
+    rows.push_back(r);
+  }
+  return rows;
+}
+
+struct Metrics {
+  int trial_id{0};
+  double rmse_pos{0};
+  double rmse_th{0};
+  double end_pos{0};
+  double end_th{0};
+  double s_total{0};
+  double drift_per_m{0};
+};
+
+static Metrics compute_metrics_logged(const std::vector&lt;Row&gt;&amp; v, int trial_id) {
+  const int N = (int)v.size();
+  std::vector&lt;double&gt; epos(N), eth(N);
+  for (int k = 0; k &lt; N; ++k) {
+    const double ex = v[k].x_odom - v[k].x_gt;
+    const double ey = v[k].y_odom - v[k].y_gt;
+    const double e_th = wrap_angle(v[k].th_odom - v[k].th_gt);
+    epos[k] = std::sqrt(ex*ex + ey*ey);
+    eth[k] = e_th;
+  }
+  auto mean_sq = [&amp;](const std::vector&lt;double&gt;&amp; a) -&gt; double {
+    double s = 0;
+    for (double x : a) s += x*x;
+    return s / std::max(1, (int)a.size());
+  };
+  Metrics m;
+  m.trial_id = trial_id;
+  m.rmse_pos = std::sqrt(mean_sq(epos));
+  m.rmse_th  = std::sqrt(mean_sq(eth));
+  // endpoint
+  const double exN = v.back().x_odom - v.back().x_gt;
+  const double eyN = v.back().y_odom - v.back().y_gt;
+  m.end_pos = std::sqrt(exN*exN + eyN*eyN);
+  m.end_th  = std::abs(wrap_angle(v.back().th_odom - v.back().th_gt));
+  // gt path length
+  double s_total = 0;
+  for (int k = 1; k &lt; N; ++k) {
+    const double dx = v[k].x_gt - v[k-1].x_gt;
+    const double dy = v[k].y_gt - v[k-1].y_gt;
+    s_total += std::sqrt(dx*dx + dy*dy);
+  }
+  m.s_total = s_total;
+  m.drift_per_m = (s_total &gt; 1e-12) ? (m.end_pos / s_total) : std::numeric_limits&lt;double&gt;::quiet_NaN();
+  return m;
+}
+
+static inline double ticks_to_dphi(double dn, double ticks_per_rev) {
+  return (2.0 * M_PI / ticks_per_rev) * dn;
+}
+
+/* (Remaining code omitted here for brevity in the webpage source.)
+   Use the downloadable ZIP to access the full C++ implementation:
+   Chapter5_Lesson5_Codes_v2.zip
+*/
+</code></pre>
+
+      <p>
+        Note: For HTML source readability, the C++ block above is truncated. The
+        downloadable ZIP contains the complete file exactly as intended for
+        compilation.
+      </p>
+
+      <!-- Section 7.3: Java Implementation -->
+      <h3>7.3 Java</h3>
+      <p>
+        This Java implementation is designed to be self-contained (no external
+        dependencies), but it is structured so you can later swap in a linear
+        algebra library (e.g., EJML) for larger problems. The code: (i) loads
+        the CSV log, (ii) computes per-trial metrics (logged odometry), (iii)
+        calibrates <strong>\( r_L, r_R, b \)</strong> via Gauss–Newton on
+        increment residuals, (iv) re-integrates encoder-only odometry using
+        calibrated parameters to re-evaluate metrics, and (v) estimates
+        increment residual covariance <strong>\( \hat{\mathbf{Q}} \)</strong>.
+      </p>
+      <p><strong>File:</strong> Chapter5_Lesson5.java</p>
+      <pre><code class="language-java">/*
+Chapter5_Lesson5.java
+
+Lab: Characterizing Odometry Error (Differential Drive)
+
+Compile:
+  javac Chapter5_Lesson5.java
+
+Run:
+  java Chapter5_Lesson5 --csv your_log.csv --ticks_per_rev 4096 --r_nom 0.05 --b_nom 0.30 --w_theta 1.0 --max_iter 15
+
+CSV columns (required):
+  t,nL,nR,x_odom,y_odom,th_odom,x_gt,y_gt,th_gt
+Optional:
+  trial_id
+
+Notes:
+- Any literal '&lt;' or '&gt;' symbols appear escaped because this source is embedded in HTML.
+*/
+
+import java.io.*;
+import java.util.*;
+
+public class Chapter5_Lesson5 {
+
+  // ----------------------------
+  // Data structures
+  // ----------------------------
+
+  static class Params {
+    double rL, rR, b;
+    Params(double rL, double rR, double b) { this.rL = rL; this.rR = rR; this.b = b; }
+    Params copy() { return new Params(rL, rR, b); }
+  }
+
+  static class Row {
+    double t;
+    double nL, nR;
+    double xO, yO, thO;
+    double xG, yG, thG;
+    int trialId;
+  }
+
+  static class Metrics {
+    int trialId;
+    double rmsePos, rmseTh;
+    double endPos, endTh;
+    double sTotal, driftPerM;
+  }
+
+  // ----------------------------
+  // Math utilities
+  // ----------------------------
+
+  static double wrapAngle(double a) {
+    double twoPi = 2.0 * Math.PI;
+    double x = (a + Math.PI) % twoPi;
+    if (x &lt; 0) x += twoPi;
+    return x - Math.PI;
+  }
+
+  static double hypot2(double x, double y) { return Math.sqrt(x*x + y*y); }
+
+  static double[] solve3x3(double[][] A, double[] b) {
+    // Gaussian elimination with partial pivoting for 3x3
+    double[][] M = new double[3][4];
+    for (int i = 0; i &lt; 3; i++) {
+      System.arraycopy(A[i], 0, M[i], 0, 3);
+      M[i][3] = b[i];
+    }
+
+    for (int col = 0; col &lt; 3; col++) {
+      // pivot
+      int piv = col;
+      double best = Math.abs(M[col][col]);
+      for (int r = col+1; r &lt; 3; r++) {
+        double v = Math.abs(M[r][col]);
+        if (v &gt; best) { best = v; piv = r; }
+      }
+      if (best &lt; 1e-18) throw new RuntimeException("Singular 3x3 system");
+
+      if (piv != col) {
+        double[] tmp = M[col]; M[col] = M[piv]; M[piv] = tmp;
+      }
+
+      // eliminate
+      double diag = M[col][col];
+      for (int c = col; c &lt; 4; c++) M[col][c] /= diag;
+      for (int r = 0; r &lt; 3; r++) {
+        if (r == col) continue;
+        double f = M[r][col];
+        for (int c = col; c &lt; 4; c++) M[r][c] -= f * M[col][c];
+      }
+    }
+
+    return new double[] { M[0][3], M[1][3], M[2][3] };
+  }
+
+  // ----------------------------
+  // CSV loading
+  // ----------------------------
+
+  static List&lt;Row&gt; loadCsv(String path) throws IOException {
+    BufferedReader br = new BufferedReader(new FileReader(path));
+    String header = br.readLine();
+    if (header == null) throw new IOException("Empty CSV");
+    String[] cols = header.split(",");
+
+    Map&lt;String,Integer&gt; idx = new HashMap&lt;&gt;();
+    for (int i = 0; i &lt; cols.length; i++) idx.put(cols[i].trim(), i);
+
+    String[] req = new String[]{"t","nL","nR","x_odom","y_odom","th_odom","x_gt","y_gt","th_gt"};
+    for (String r : req) {
+      if (!idx.containsKey(r)) throw new IOException("Missing column: " + r);
+    }
+
+    boolean hasTrial = idx.containsKey("trial_id");
+
+    List&lt;Row&gt; rows = new ArrayList&lt;&gt;();
+    String line;
+    while ((line = br.readLine()) != null) {
+      if (line.trim().isEmpty()) continue;
+      String[] tok = line.split(",");
+      Row rw = new Row();
+      rw.t  = Double.parseDouble(tok[idx.get("t")].trim());
+      rw.nL = Double.parseDouble(tok[idx.get("nL")].trim());
+      rw.nR = Double.parseDouble(tok[idx.get("nR")].trim());
+
+      rw.xO  = Double.parseDouble(tok[idx.get("x_odom")].trim());
+      rw.yO  = Double.parseDouble(tok[idx.get("y_odom")].trim());
+      rw.thO = wrapAngle(Double.parseDouble(tok[idx.get("th_odom")].trim()));
+
+      rw.xG  = Double.parseDouble(tok[idx.get("x_gt")].trim());
+      rw.yG  = Double.parseDouble(tok[idx.get("y_gt")].trim());
+      rw.thG = wrapAngle(Double.parseDouble(tok[idx.get("th_gt")].trim()));
+
+      rw.trialId = hasTrial ? (int)Math.round(Double.parseDouble(tok[idx.get("trial_id")].trim())) : 0;
+      rows.add(rw);
+    }
+    br.close();
+    return rows;
+  }
+
+  static Map&lt;Integer,List&lt;Row&gt;&gt; groupByTrial(List&lt;Row&gt; rows) {
+    Map&lt;Integer,List&lt;Row&gt;&gt; g = new TreeMap&lt;&gt;();
+    for (Row r : rows) {
+      if (!g.containsKey(r.trialId)) g.put(r.trialId, new ArrayList&lt;&gt;());
+      g.get(r.trialId).add(r);
+    }
+    return g;
+  }
+
+  // ----------------------------
+  // Metrics (logged odometry)
+  // ----------------------------
+
+  static Metrics computeMetricsLogged(List&lt;Row&gt; v, int trialId) {
+    int N = v.size();
+    double sumPos2 = 0.0;
+    double sumTh2  = 0.0;
+
+    for (int k = 0; k &lt; N; k++) {
+      Row r = v.get(k);
+      double ex = r.xO - r.xG;
+      double ey = r.yO - r.yG;
+      double eth = wrapAngle(r.thO - r.thG);
+      double epos = hypot2(ex, ey);
+      sumPos2 += epos * epos;
+      sumTh2  += eth * eth;
+    }
+
+    Row rN = v.get(N-1);
+    double exN = rN.xO - rN.xG;
+    double eyN = rN.yO - rN.yG;
+    double endPos = hypot2(exN, eyN);
+    double endTh  = Math.abs(wrapAngle(rN.thO - rN.thG));
+
+    double sTotal = 0.0;
+    for (int k = 1; k &lt; N; k++) {
+      Row a = v.get(k-1);
+      Row b = v.get(k);
+      sTotal += hypot2(b.xG - a.xG, b.yG - a.yG);
+    }
+
+    Metrics m = new Metrics();
+    m.trialId = trialId;
+    m.rmsePos = Math.sqrt(sumPos2 / Math.max(1, N));
+    m.rmseTh  = Math.sqrt(sumTh2  / Math.max(1, N));
+    m.endPos  = endPos;
+    m.endTh   = endTh;
+    m.sTotal  = sTotal;
+    m.driftPerM = (sTotal &gt; 1e-12) ? (endPos / sTotal) : Double.NaN;
+    return m;
+  }
+
+  // ----------------------------
+  // Encoder increments and model
+  // ----------------------------
+
+  static double[] ticksToDphi(double[] n, double ticksPerRev) {
+    // dphi[k] = (2pi/tpr) * (n[k]-n[k-1]), with dphi[0]=0
+    double scale = (2.0 * Math.PI) / ticksPerRev;
+    double[] dphi = new double[n.length];
+    dphi[0] = 0.0;
+    for (int k = 1; k &lt; n.length; k++) dphi[k] = scale * (n[k] - n[k-1]);
+    return dphi;
+  }
+
+  static double[][] predictIncrementFromEnc(double[] thPrev, double[] dphiL, double[] dphiR, Params p) {
+    // midpoint integration, returns inc[k] = [dx,dy,dth]
+    int N = dphiL.length;
+    double[][] inc = new double[N][3];
+    for (int k = 0; k &lt; N; k++) {
+      double sL = p.rL * dphiL[k];
+      double sR = p.rR * dphiR[k];
+      double ds = 0.5 * (sR + sL);
+      double dth = (sR - sL) / p.b;
+      double thMid = wrapAngle(thPrev[k] + 0.5 * dth);
+      inc[k][0] = ds * Math.cos(thMid);
+      inc[k][1] = ds * Math.sin(thMid);
+      inc[k][2] = dth;
+    }
+    return inc;
+  }
+
+  static double[][] cumulativeFromIncrements(double[] x0, double[][] inc) {
+    // returns poses of length N+1: pose[0]=x0, pose[k]=x0+sum inc up to k
+    int N = inc.length;
+    double[][] x = new double[N+1][3];
+    x[0][0] = x0[0]; x[0][1] = x0[1]; x[0][2] = wrapAngle(x0[2]);
+    for (int k = 0; k &lt; N; k++) {
+      x[k+1][0] = x[k][0] + inc[k][0];
+      x[k+1][1] = x[k][1] + inc[k][1];
+      x[k+1][2] = wrapAngle(x[k][2] + inc[k][2]);
+    }
+    return x;
+  }
+
+  // ----------------------------
+  // Gauss-Newton: residuals + Jacobian
+  // ----------------------------
+
+  static class RJ {
+    double[] r;      // length 3K
+    double[][] J;    // shape (3K)x3
+    RJ(double[] r, double[][] J) { this.r = r; this.J = J; }
+  }
+
+  static RJ buildResidualAndJacobian(List&lt;Row&gt; v, double ticksPerRev, Params p, double wTheta) {
+    int N = v.size();
+    double[] nL = new double[N];
+    double[] nR = new double[N];
+    double[] thG = new double[N];
+    double[] xG = new double[N];
+    double[] yG = new double[N];
+
+    for (int k = 0; k &lt; N; k++) {
+      Row r = v.get(k);
+      nL[k] = r.nL;
+      nR[k] = r.nR;
+      thG[k] = r.thG;
+      xG[k] = r.xG;
+      yG[k] = r.yG;
+    }
+
+    double[] dphiL = ticksToDphi(nL, ticksPerRev);
+    double[] dphiR = ticksToDphi(nR, ticksPerRev);
+
+    // thPrev[k] = thG[k-1] with thPrev[0]=thG[0]
+    double[] thPrev = new double[N];
+    thPrev[0] = thG[0];
+    for (int k = 1; k &lt; N; k++) thPrev[k] = thG[k-1];
+
+    // ground truth increments (dx,dy,dth) with prepend 0 at k=0
+    double[] dxGt = new double[N];
+    double[] dyGt = new double[N];
+    double[] dthGt = new double[N];
+    dxGt[0] = 0.0; dyGt[0] = 0.0; dthGt[0] = 0.0;
+    for (int k = 1; k &lt; N; k++) {
+      dxGt[k] = xG[k] - xG[k-1];
+      dyGt[k] = yG[k] - yG[k-1];
+      dthGt[k] = wrapAngle(thG[k] - thG[k-1]);
+    }
+
+    // predicted increments and partials
+    // We build residuals for k=1..N-1 (skip k=0)
+    int K = N - 1;
+    double[] rvec = new double[3 * K];
+    double[][] J = new double[3 * K][3];
+
+    for (int k = 1; k &lt; N; k++) {
+      double sL = p.rL * dphiL[k];
+      double sR = p.rR * dphiR[k];
+      double ds = 0.5 * (sR + sL);
+      double dth = (sR - sL) / p.b;
+
+      double thMid = wrapAngle(thPrev[k] + 0.5 * dth);
+      double ca = Math.cos(thMid);
+      double sa = Math.sin(thMid);
+
+      double dx = ds * ca;
+      double dy = ds * sa;
+
+      double rx = dx - dxGt[k];
+      double ry = dy - dyGt[k];
+      double rth = wrapAngle(dth - dthGt[k]);
+
+      int base = 3 * (k - 1);
+      rvec[base + 0] = rx;
+      rvec[base + 1] = ry;
+      rvec[base + 2] = wTheta * rth;
+
+      // Derivatives:
+      // d(ds)/d(rL)=0.5*dphiL, d(ds)/d(rR)=0.5*dphiR
+      double dds_drL = 0.5 * dphiL[k];
+      double dds_drR = 0.5 * dphiR[k];
+
+      // d(dth)/d(rL)=-(dphiL)/b, d(dth)/d(rR)=(dphiR)/b, d(dth)/d(b)=-(sR-sL)/b^2
+      double ddth_drL = -(dphiL[k]) / p.b;
+      double ddth_drR =  (dphiR[k]) / p.b;
+      double ddth_db  = -(sR - sL) / (p.b * p.b);
+
+      // a = thPrev + 0.5*dth, so da = 0.5*ddth
+      double da_drL = 0.5 * ddth_drL;
+      double da_drR = 0.5 * ddth_drR;
+      double da_db  = 0.5 * ddth_db;
+
+      // dx = ds*cos(a): d(dx)=cos(a)*d(ds) + ds*(-sin(a))*d(a)
+      double ddx_drL = ca * dds_drL + ds * (-sa) * da_drL;
+      double ddx_drR = ca * dds_drR + ds * (-sa) * da_drR;
+      double ddx_db  = ds * (-sa) * da_db;
+
+      // dy = ds*sin(a): d(dy)=sin(a)*d(ds) + ds*cos(a)*d(a)
+      double ddy_drL = sa * dds_drL + ds * ca * da_drL;
+      double ddy_drR = sa * dds_drR + ds * ca * da_drR;
+      double ddy_db  = ds * ca * da_db;
+
+      // dth residual scale
+      double ddth_drL_s = wTheta * ddth_drL;
+      double ddth_drR_s = wTheta * ddth_drR;
+      double ddth_db_s  = wTheta * ddth_db;
+
+      // Fill Jacobian rows
+      J[base + 0][0] = ddx_drL;   J[base + 0][1] = ddx_drR;   J[base + 0][2] = ddx_db;
+      J[base + 1][0] = ddy_drL;   J[base + 1][1] = ddy_drR;   J[base + 1][2] = ddy_db;
+      J[base + 2][0] = ddth_drL_s;J[base + 2][1] = ddth_drR_s;J[base + 2][2] = ddth_db_s;
+    }
+
+    return new RJ(rvec, J);
+  }
+
+  static Params gaussNewtonCalibrate(List&lt;Row&gt; allRows, double ticksPerRev, Params p0, double wTheta, int maxIter, double damping) {
+    Params p = p0.copy();
+    for (int it = 0; it &lt; maxIter; it++) {
+      RJ rj = buildResidualAndJacobian(allRows, ticksPerRev, p, wTheta);
+      double[] r = rj.r;
+      double[][] J = rj.J;
+
+      // Compute A = J^T J + damping I and g = J^T r (3x3 and 3x1)
+      double[][] A = new double[3][3];
+      double[] g = new double[3];
+
+      for (int i = 0; i &lt; J.length; i++) {
+        double Ji0 = J[i][0], Ji1 = J[i][1], Ji2 = J[i][2];
+        double ri = r[i];
+
+        A[0][0] += Ji0 * Ji0; A[0][1] += Ji0 * Ji1; A[0][2] += Ji0 * Ji2;
+        A[1][0] += Ji1 * Ji0; A[1][1] += Ji1 * Ji1; A[1][2] += Ji1 * Ji2;
+        A[2][0] += Ji2 * Ji0; A[2][1] += Ji2 * Ji1; A[2][2] += Ji2 * Ji2;
+
+        g[0] += Ji0 * ri;
+        g[1] += Ji1 * ri;
+        g[2] += Ji2 * ri;
+      }
+
+      A[0][0] += damping; A[1][1] += damping; A[2][2] += damping;
+
+      // Solve A * dp = -g
+      double[] rhs = new double[]{ -g[0], -g[1], -g[2] };
+      double[] dp = solve3x3(A, rhs);
+
+      double stepNorm = Math.sqrt(dp[0]*dp[0] + dp[1]*dp[1] + dp[2]*dp[2]);
+      if (stepNorm &lt; 1e-12) break;
+
+      // simple positivity-aware step
+      double alpha = 1.0;
+      for (int ls = 0; ls &lt; 12; ls++) {
+        double rL = p.rL + alpha * dp[0];
+        double rR = p.rR + alpha * dp[1];
+        double b  = p.b  + alpha * dp[2];
+        if (rL &gt; 0 &amp;&amp; rR &gt; 0 &amp;&amp; b &gt; 0) {
+          p.rL = rL; p.rR = rR; p.b = b;
+          break;
+        }
+        alpha *= 0.5;
+      }
+    }
+    return p;
+  }
+
+  // ----------------------------
+  // Encoder-only reconstruction metrics
+  // ----------------------------
+
+  static Metrics computeMetricsReconstructed(List&lt;Row&gt; v, int trialId, double ticksPerRev, Params pHat) {
+    int N = v.size();
+    double[] nL = new double[N];
+    double[] nR = new double[N];
+    double[] thG = new double[N];
+    double[] xG = new double[N];
+    double[] yG = new double[N];
+    for (int k = 0; k &lt; N; k++) {
+      Row r = v.get(k);
+      nL[k] = r.nL; nR[k] = r.nR;
+      thG[k] = r.thG; xG[k] = r.xG; yG[k] = r.yG;
+    }
+
+    double[] dphiL = ticksToDphi(nL, ticksPerRev);
+    double[] dphiR = ticksToDphi(nR, ticksPerRev);
+
+    double[] thPrev = new double[N];
+    thPrev[0] = thG[0];
+    for (int k = 1; k &lt; N; k++) thPrev[k] = thG[k-1];
+
+    double[][] inc = predictIncrementFromEnc(thPrev, dphiL, dphiR, pHat);
+
+    double[] x0 = new double[]{ xG[0], yG[0], thG[0] };
+    double[][] xHat = cumulativeFromIncrements(x0, inc);
+
+    // Evaluate errors against ground truth
+    double sumPos2 = 0.0;
+    double sumTh2 = 0.0;
+    for (int k = 0; k &lt; N; k++) {
+      double ex = xHat[k][0] - xG[k];
+      double ey = xHat[k][1] - yG[k];
+      double eth = wrapAngle(xHat[k][2] - thG[k]);
+      double epos = hypot2(ex, ey);
+      sumPos2 += epos*epos;
+      sumTh2  += eth*eth;
+    }
+
+    double exN = xHat[N-1][0] - xG[N-1];
+    double eyN = xHat[N-1][1] - yG[N-1];
+    double endPos = hypot2(exN, eyN);
+    double endTh = Math.abs(wrapAngle(xHat[N-1][2] - thG[N-1]));
+
+    double sTotal = 0.0;
+    for (int k = 1; k &lt; N; k++) sTotal += hypot2(xG[k]-xG[k-1], yG[k]-yG[k-1]);
+
+    Metrics m = new Metrics();
+    m.trialId = trialId;
+    m.rmsePos = Math.sqrt(sumPos2 / Math.max(1, N));
+    m.rmseTh  = Math.sqrt(sumTh2 / Math.max(1, N));
+    m.endPos  = endPos;
+    m.endTh   = endTh;
+    m.sTotal  = sTotal;
+    m.driftPerM = (sTotal &gt; 1e-12) ? (endPos / sTotal) : Double.NaN;
+    return m;
+  }
+
+  // ----------------------------
+  // Increment residual covariance Q_hat
+  // ----------------------------
+
+  static double[][] estimateIncrementCovariance(List&lt;Row&gt; allRows, double ticksPerRev, Params pHat) {
+    // Build eps_k = inc_pred - inc_gt for k=1..N-1, across all rows (assuming sorted by time per trial)
+    Map&lt;Integer,List&lt;Row&gt;&gt; byTrial = groupByTrial(allRows);
+
+    ArrayList&lt;double[]&gt; epsAll = new ArrayList&lt;&gt;();
+
+    for (Map.Entry&lt;Integer,List&lt;Row&gt;&gt; e : byTrial.entrySet()) {
+      List&lt;Row&gt; v = e.getValue();
+      int N = v.size();
+      if (N &lt; 3) continue;
+
+      double[] nL = new double[N];
+      double[] nR = new double[N];
+      double[] thG = new double[N];
+      double[] xG = new double[N];
+      double[] yG = new double[N];
+      for (int k = 0; k &lt; N; k++) {
+        Row r = v.get(k);
+        nL[k] = r.nL; nR[k] = r.nR;
+        thG[k] = r.thG; xG[k] = r.xG; yG[k] = r.yG;
+      }
+
+      double[] dphiL = ticksToDphi(nL, ticksPerRev);
+      double[] dphiR = ticksToDphi(nR, ticksPerRev);
+
+      double[] thPrev = new double[N];
+      thPrev[0] = thG[0];
+      for (int k = 1; k &lt; N; k++) thPrev[k] = thG[k-1];
+
+      double[][] incPred = predictIncrementFromEnc(thPrev, dphiL, dphiR, pHat);
+
+      for (int k = 1; k &lt; N; k++) {
+        double dxGt = xG[k] - xG[k-1];
+        double dyGt = yG[k] - yG[k-1];
+        double dthGt = wrapAngle(thG[k] - thG[k-1]);
+
+        double ex = incPred[k][0] - dxGt;
+        double ey = incPred[k][1] - dyGt;
+        double eth = wrapAngle(incPred[k][2] - dthGt);
+
+        epsAll.add(new double[]{ ex, ey, eth });
+      }
+    }
+
+    int K = epsAll.size();
+    if (K &lt; 2) return new double[][]{
+      {Double.NaN, Double.NaN, Double.NaN},
+      {Double.NaN, Double.NaN, Double.NaN},
+      {Double.NaN, Double.NaN, Double.NaN}
+    };
+
+    // mean
+    double[] mu = new double[3];
+    for (double[] v : epsAll) { mu[0] += v[0]; mu[1] += v[1]; mu[2] += v[2]; }
+    mu[0] /= K; mu[1] /= K; mu[2] /= K;
+
+    // covariance (unbiased)
+    double[][] Q = new double[3][3];
+    for (double[] v : epsAll) {
+      double a0 = v[0]-mu[0], a1 = v[1]-mu[1], a2 = v[2]-mu[2];
+      Q[0][0] += a0*a0; Q[0][1] += a0*a1; Q[0][2] += a0*a2;
+      Q[1][0] += a1*a0; Q[1][1] += a1*a1; Q[1][2] += a1*a2;
+      Q[2][0] += a2*a0; Q[2][1] += a2*a1; Q[2][2] += a2*a2;
+    }
+    double denom = (K - 1);
+    for (int i = 0; i &lt; 3; i++) for (int j = 0; j &lt; 3; j++) Q[i][j] /= denom;
+    return Q;
+  }
+
+  // ----------------------------
+  // CLI + main
+  // ----------------------------
+
+  static String getArg(Map&lt;String,String&gt; args, String key, String defVal) {
+    return args.containsKey(key) ? args.get(key) : defVal;
+  }
+
+  static Map&lt;String,String&gt; parseArgs(String[] argv) {
+    Map&lt;String,String&gt; m = new HashMap&lt;&gt;();
+    for (int i = 0; i &lt; argv.length; i++) {
+      String a = argv[i];
+      if (a.startsWith("--")) {
+        String key = a.substring(2);
+        String val = "true";
+        if (i+1 &lt; argv.length &amp;&amp; !argv[i+1].startsWith("--")) {
+          val = argv[i+1];
+          i++;
+        }
+        m.put(key, val);
+      }
+    }
+    return m;
+  }
+
+  static void printMetricsTable(List&lt;Metrics&gt; ms, String title) {
+    System.out.println(title);
+    System.out.println("trial_id  rmse_pos(m)  rmse_th(rad)  end_pos(m)  end_th(rad)  s_total(m)  drift_per_m");
+    for (Metrics m : ms) {
+      System.out.printf(Locale.US,
+        "%7d  %10.6f  %11.6f  %9.6f  %10.6f  %9.6f  %11.6f%n",
+        m.trialId, m.rmsePos, m.rmseTh, m.endPos, m.endTh, m.sTotal, m.driftPerM
+      );
+    }
+    System.out.println();
+  }
+
+  public static void main(String[] argv) throws Exception {
+    Map&lt;String,String&gt; args = parseArgs(argv);
+
+    String csv = getArg(args, "csv", null);
+    if (csv == null) {
+      System.err.println("Usage: java Chapter5_Lesson5 --csv log.csv --ticks_per_rev 4096 [--r_nom 0.05 --b_nom 0.30 --w_theta 1.0 --max_iter 15]");
+      System.exit(1);
+    }
+
+    double ticksPerRev = Double.parseDouble(getArg(args, "ticks_per_rev", "4096"));
+    double rNom = Double.parseDouble(getArg(args, "r_nom", "0.05"));
+    double bNom = Double.parseDouble(getArg(args, "b_nom", "0.30"));
+    double wTheta = Double.parseDouble(getArg(args, "w_theta", "1.0"));
+    int maxIter = Integer.parseInt(getArg(args, "max_iter", "15"));
+    double damping = Double.parseDouble(getArg(args, "damping", "1e-9"));
+
+    List&lt;Row&gt; rows = loadCsv(csv);
+    Map&lt;Integer,List&lt;Row&gt;&gt; byTrial = groupByTrial(rows);
+
+    // Metrics on logged odometry
+    ArrayList&lt;Metrics&gt; mLogged = new ArrayList&lt;&gt;();
+    for (Map.Entry&lt;Integer,List&lt;Row&gt;&gt; e : byTrial.entrySet()) {
+      mLogged.add(computeMetricsLogged(e.getValue(), e.getKey()));
+    }
+    printMetricsTable(mLogged, "=== Metrics (logged odometry) per trial ===");
+
+    // Calibrate on all data
+    Params p0 = new Params(rNom, rNom, bNom);
+    Params pHat = gaussNewtonCalibrate(rows, ticksPerRev, p0, wTheta, maxIter, damping);
+
+    System.out.println("=== Calibration Result ===");
+    System.out.printf(Locale.US, "rL_hat = %.10f m%n", pHat.rL);
+    System.out.printf(Locale.US, "rR_hat = %.10f m%n", pHat.rR);
+    System.out.printf(Locale.US, "b_hat  = %.10f m%n%n", pHat.b);
+
+    // Reconstructed metrics from encoders with pHat
+    ArrayList&lt;Metrics&gt; mCal = new ArrayList&lt;&gt;();
+    for (Map.Entry&lt;Integer,List&lt;Row&gt;&gt; e : byTrial.entrySet()) {
+      mCal.add(computeMetricsReconstructed(e.getValue(), e.getKey(), ticksPerRev, pHat));
+    }
+    printMetricsTable(mCal, "=== Metrics (encoder-only reconstruction using calibrated params) per trial ===");
+
+    // Increment covariance Q_hat
+    double[][] Q = estimateIncrementCovariance(rows, ticksPerRev, pHat);
+    System.out.println("=== Increment residual covariance Q_hat (after calibration) ===");
+    for (int i = 0; i &lt; 3; i++) {
+      System.out.printf(Locale.US, "[% .6e  % .6e  % .6e]%n", Q[i][0], Q[i][1], Q[i][2]);
+    }
+  }
+}
+</code></pre>
+
+      <!-- Section 7.4: MATLAB Implementation -->
+      <h3>7.4 MATLAB</h3>
+      <p>
+        The MATLAB implementation uses only core MATLAB functions (tables,
+        linear algebra). If you have Robotics System Toolbox, you can integrate
+        this with ROS bag logs and standard plotting utilities, but the lab
+        logic is independent of ROS.
+      </p>
+      <p><strong>File:</strong> Chapter5_Lesson5.m</p>
+      <pre><code class="language-matlab">% Chapter5_Lesson5.m
+%
+% Lab: Characterizing Odometry Error (Differential Drive)
+%
+% Usage:
+%   results = Chapter5_Lesson5("your_log.csv", 4096, 0.05, 0.30, 1.0, 15);
+%
+% CSV columns (required):
+%   t,nL,nR,x_odom,y_odom,th_odom,x_gt,y_gt,th_gt
+% Optional:
+%   trial_id
+%
+% Notes:
+% - Any literal '&lt;' or '&gt;' symbols appear escaped because this source is embedded in HTML.
+
+function results = Chapter5_Lesson5(csvPath, ticksPerRev, rNom, bNom, wTheta, maxIter)
+
+if nargin &lt; 6, maxIter = 15; end
+if nargin &lt; 5, wTheta = 1.0; end
+
+T = readtable(csvPath);
+
+req = ["t","nL","nR","x_odom","y_odom","th_odom","x_gt","y_gt","th_gt"];
+for i = 1:numel(req)
+  if ~ismember(req(i), string(T.Properties.VariableNames))
+    error("Missing required column: %s", req(i));
+  end
+end
+
+if ~ismember("trial_id", string(T.Properties.VariableNames))
+  T.trial_id = zeros(height(T),1);
+end
+
+T.th_odom = wrapAngle(T.th_odom);
+T.th_gt   = wrapAngle(T.th_gt);
+
+trialIds = unique(T.trial_id);
+trialIds = sort(trialIds);
+
+% 1) Metrics on logged odometry
+metricsLogged = table();
+for i = 1:numel(trialIds)
+  tid = trialIds(i);
+  G = T(T.trial_id == tid, :);
+  m = computeMetrics(G);
+  m.trial_id = tid;
+  metricsLogged = [metricsLogged; struct2table(m)];
+end
+
+% 2) Calibrate on entire dataset
+p0.rL = rNom; p0.rR = rNom; p0.b = bNom;
+pHat = gaussNewtonCalibrate(T, ticksPerRev, p0, wTheta, maxIter);
+
+% 3) Reconstruct encoder-only odom per trial with calibrated params
+metricsCal = table();
+for i = 1:numel(trialIds)
+  tid = trialIds(i);
+  G = T(T.trial_id == tid, :);
+
+  nL = G.nL; nR = G.nR;
+  dphiL = ticksToDphi(nL, ticksPerRev);
+  dphiR = ticksToDphi(nR, ticksPerRev);
+
+  thPrev = [G.th_gt(1); G.th_gt(1:end-1)];
+  inc = predictIncrementFromEnc(thPrev, dphiL, dphiR, pHat);
+
+  x0 = [G.x_gt(1); G.y_gt(1); G.th_gt(1)];
+  Xhat = cumulativeFromIncrements(x0, inc);
+
+  G2 = G;
+  G2.x_odom = Xhat(:,1);
+  G2.y_odom = Xhat(:,2);
+  G2.th_odom = Xhat(:,3);
+
+  m2 = computeMetrics(G2);
+  m2.trial_id = tid;
+  metricsCal = [metricsCal; struct2table(m2)];
+end
+
+% 4) Estimate increment residual covariance Q_hat after calibration
+[epsMean, Qhat] = estimateIncrementCovariance(T, ticksPerRev, pHat);
+
+results = struct();
+results.metrics_logged = metricsLogged;
+results.metrics_calibrated = metricsCal;
+results.p_hat = pHat;
+results.increment_residual_mean = epsMean;
+results.Q_hat = Qhat;
+
+disp("=== Calibration Result ===");
+fprintf("rL_hat = %.10f m\n", pHat.rL);
+fprintf("rR_hat = %.10f m\n", pHat.rR);
+fprintf("b_hat  = %.10f m\n\n", pHat.b);
+
+disp("=== Metrics (logged odometry) per trial ===");
+disp(metricsLogged);
+
+disp("=== Metrics (encoder-only reconstruction using calibrated params) per trial ===");
+disp(metricsCal);
+
+disp("=== Increment residual mean [dx, dy, dth] ===");
+disp(epsMean(:).');
+
+disp("=== Increment residual covariance Q_hat ===");
+disp(Qhat);
+
+end
+
+% -------------------------
+% Helpers
+% -------------------------
+
+function a = wrapAngle(a)
+a = mod(a + pi, 2*pi) - pi;
+end
+
+function dphi = ticksToDphi(n, ticksPerRev)
+dn = [0; diff(n)];
+dphi = (2*pi/ticksPerRev) * dn;
+end
+
+function inc = predictIncrementFromEnc(thPrev, dphiL, dphiR, p)
+sL = p.rL * dphiL;
+sR = p.rR * dphiR;
+ds = 0.5 * (sR + sL);
+dth = (sR - sL) / p.b;
+thMid = wrapAngle(thPrev + 0.5 * dth);
+dx = ds .* cos(thMid);
+dy = ds .* sin(thMid);
+inc = [dx, dy, dth];
+end
+
+function X = cumulativeFromIncrements(x0, inc)
+N = size(inc,1);
+X = zeros(N+1, 3);
+X(1,:) = x0(:).';
+for k = 1:N
+  X(k+1,1) = X(k,1) + inc(k,1);
+  X(k+1,2) = X(k,2) + inc(k,2);
+  X(k+1,3) = wrapAngle(X(k,3) + inc(k,3));
+end
+end
+
+function m = computeMetrics(G)
+ex = G.x_odom - G.x_gt;
+ey = G.y_odom - G.y_gt;
+eth = wrapAngle(G.th_odom - G.th_gt);
+
+epos = sqrt(ex.^2 + ey.^2);
+m.rmse_pos = sqrt(mean(epos.^2));
+m.rmse_th  = sqrt(mean(eth.^2));
+
+m.end_pos = sqrt(ex(end)^2 + ey(end)^2);
+m.end_th  = abs(eth(end));
+
+dxg = diff(G.x_gt);
+dyg = diff(G.y_gt);
+sTotal = sum(sqrt(dxg.^2 + dyg.^2));
+m.s_total = sTotal;
+if sTotal &gt; 1e-12
+  m.drift_per_m = m.end_pos / sTotal;
+else
+  m.drift_per_m = NaN;
+end
+end
+
+function pHat = gaussNewtonCalibrate(T, ticksPerRev, p0, wTheta, maxIter)
+pHat = p0;
+
+nL = T.nL; nR = T.nR;
+dphiL = ticksToDphi(nL, ticksPerRev);
+dphiR = ticksToDphi(nR, ticksPerRev);
+
+thPrev = [T.th_gt(1); T.th_gt(1:end-1)];
+dxGt = [0; diff(T.x_gt)];
+dyGt = [0; diff(T.y_gt)];
+dthGt = [0; wrapAngle(diff(T.th_gt))];
+
+% we skip k=1 (index 1) in residuals because it is zero-by-construction
+idx = (2:height(T))';
+
+lambda = 1e-9;
+
+for it = 1:maxIter
+  % forward pass
+  sL = pHat.rL * dphiL;
+  sR = pHat.rR * dphiR;
+  ds = 0.5 * (sR + sL);
+  dth = (sR - sL) / pHat.b;
+  thMid = wrapAngle(thPrev + 0.5*dth);
+
+  dx = ds .* cos(thMid);
+  dy = ds .* sin(thMid);
+
+  rx = dx - dxGt;
+  ry = dy - dyGt;
+  rth = wrapAngle(dth - dthGt);
+
+  rx = rx(idx); ry = ry(idx); rth = rth(idx);
+
+  % Jacobian pieces for each k in idx
+  dds_drL = 0.5 * dphiL(idx);
+  dds_drR = 0.5 * dphiR(idx);
+
+  ddth_drL = -(dphiL(idx)) / pHat.b;
+  ddth_drR =  (dphiR(idx)) / pHat.b;
+  ddth_db  = -(sR(idx) - sL(idx)) / (pHat.b^2);
+
+  a = thMid(idx);
+  ca = cos(a); sa = sin(a);
+  ds_k = ds(idx);
+
+  da_drL = 0.5 * ddth_drL;
+  da_drR = 0.5 * ddth_drR;
+  da_db  = 0.5 * ddth_db;
+
+  ddx_drL = ca .* dds_drL + ds_k .* (-sa) .* da_drL;
+  ddx_drR = ca .* dds_drR + ds_k .* (-sa) .* da_drR;
+  ddx_db  = ds_k .* (-sa) .* da_db;
+
+  ddy_drL = sa .* dds_drL + ds_k .* ca .* da_drL;
+  ddy_drR = sa .* dds_drR + ds_k .* ca .* da_drR;
+  ddy_db  = ds_k .* ca .* da_db;
+
+  ddth_drL_s = wTheta * ddth_drL;
+  ddth_drR_s = wTheta * ddth_drR;
+  ddth_db_s  = wTheta * ddth_db;
+
+  % Stack residual vector r and J
+  K = numel(rx);
+  r = zeros(3*K,1);
+  J = zeros(3*K,3);
+
+  r(1:3:end) = rx;
+  r(2:3:end) = ry;
+  r(3:3:end) = wTheta * rth;
+
+  J(1:3:end,1) = ddx_drL;   J(1:3:end,2) = ddx_drR;   J(1:3:end,3) = ddx_db;
+  J(2:3:end,1) = ddy_drL;   J(2:3:end,2) = ddy_drR;   J(2:3:end,3) = ddy_db;
+  J(3:3:end,1) = ddth_drL_s;J(3:3:end,2) = ddth_drR_s;J(3:3:end,3) = ddth_db_s;
+
+  A = (J.'*J) + lambda*eye(3);
+  g = (J.'*r);
+  dp = -A \ g;
+
+  if norm(dp) &lt; 1e-12
+    break;
+  end
+
+  % positivity-aware step
+  alpha = 1.0;
+  for ls = 1:12
+    cand = struct("rL", pHat.rL + alpha*dp(1), "rR", pHat.rR + alpha*dp(2), "b", pHat.b + alpha*dp(3));
+    if cand.rL &gt; 0 &amp;&amp; cand.rR &gt; 0 &amp;&amp; cand.b &gt; 0
+      pHat = cand;
+      break;
+    end
+    alpha = 0.5*alpha;
+  end
+end
+
+end
+
+function [epsMean, Qhat] = estimateIncrementCovariance(T, ticksPerRev, pHat)
+trialIds = unique(T.trial_id);
+epsAll = [];
+
+for i = 1:numel(trialIds)
+  tid = trialIds(i);
+  G = T(T.trial_id == tid, :);
+  if height(G) &lt; 3, continue; end
+
+  dphiL = ticksToDphi(G.nL, ticksPerRev);
+  dphiR = ticksToDphi(G.nR, ticksPerRev);
+  thPrev = [G.th_gt(1); G.th_gt(1:end-1)];
+  incPred = predictIncrementFromEnc(thPrev, dphiL, dphiR, pHat);
+
+  dxGt = diff(G.x_gt);
+  dyGt = diff(G.y_gt);
+  dthGt = wrapAngle(diff(G.th_gt));
+
+  % align k=2..N
+  ex = incPred(2:end,1) - dxGt;
+  ey = incPred(2:end,2) - dyGt;
+  eth = wrapAngle(incPred(2:end,3) - dthGt);
+
+  epsAll = [epsAll; [ex, ey, eth]];
+end
+
+if size(epsAll,1) &lt; 2
+  epsMean = [NaN; NaN; NaN];
+  Qhat = NaN(3,3);
+  return;
+end
+
+epsMean = mean(epsAll,1).';
+Qhat = cov(epsAll, 1); % biased by default in MATLAB if second arg is 1 (normalize by N)
+% Convert to unbiased (normalize by N-1):
+K = size(epsAll,1);
+Qhat = Qhat * (K/(K-1));
+
+end
+</code></pre>
+
+      <!-- Section 7.5: MATLAB/Simulink Implementation -->
+      <h3>7.5 MATLAB/Simulink</h3>
+      <p>
+        This script programmatically builds a Simulink model that: (i) converts
+        encoder ticks to wheel angles, (ii) computes
+        <strong>\( \Delta s \)</strong> and <strong>\( \Delta\theta \)</strong>,
+        (iii) performs midpoint projection into
+        <strong>\( \Delta x,\Delta y \)</strong>, and (iv) integrates to produce
+        an odometry pose output. You can feed it with logged encoder signals
+        using <code>From Workspace</code> blocks.
+      </p>
+      <p><strong>File:</strong> Chapter5_Lesson5_SimulinkModel.m</p>
+      <pre><code class="language-matlab">% Chapter5_Lesson5_SimulinkModel.m
+%
+% Programmatically create a Simulink model for differential-drive odometry
+% with midpoint integration. The model is intentionally explicit to match the
+% formulas used in Chapter 5 (Lessons 1-4) and this lab.
+%
+% Usage:
+%   Chapter5_Lesson5_SimulinkModel;
+%
+% Notes:
+% - Requires Simulink.
+% - Any literal '&lt;' or '&gt;' symbols appear escaped because this source is embedded in HTML.
+
+function Chapter5_Lesson5_SimulinkModel()
+
+modelName = "Chapter5_Lesson5_Odometry";
+if bdIsLoaded(modelName)
+  close_system(modelName, 0);
+end
+new_system(modelName);
+open_system(modelName);
+
+% Add workspace parameters (nominal)
+assignin("base","ticks_per_rev", 4096);
+assignin("base","rL", 0.05);
+assignin("base","rR", 0.05);
+assignin("base","b",  0.30);
+
+% Layout helpers
+x0 = 40; y0 = 40; dx = 170; dy = 70;
+
+% Inputs: nL, nR (cumulative ticks), theta (previous heading) optional
+% In practice, theta is from integrator state; we implement full loop.
+add_block("simulink/Sources/From Workspace", modelName + "/nL", "Position",[x0 y0 x0+120 y0+30]);
+add_block("simulink/Sources/From Workspace", modelName + "/nR", "Position",[x0 y0+dy x0+120 y0+dy+30]);
+
+% Compute dnL = diff(nL), dnR = diff(nR): use Discrete Derivative
+add_block("simulink/Discrete/Discrete Derivative", modelName + "/dnL", "Position",[x0+dx y0 x0+dx+120 y0+30]);
+add_block("simulink/Discrete/Discrete Derivative", modelName + "/dnR", "Position",[x0+dx y0+dy x0+dx+120 y0+dy+30]);
+
+% Convert ticks to rad: scale = 2*pi/ticks_per_rev
+add_block("simulink/Math Operations/Gain", modelName + "/scaleL", "Gain","2*pi/ticks_per_rev", "Position",[x0+2*dx y0 x0+2*dx+120 y0+30]);
+add_block("simulink/Math Operations/Gain", modelName + "/scaleR", "Gain","2*pi/ticks_per_rev", "Position",[x0+2*dx y0+dy x0+2*dx+120 y0+dy+30]);
+
+% Wheel arc lengths: sL = rL*dphiL, sR = rR*dphiR
+add_block("simulink/Math Operations/Gain", modelName + "/sL", "Gain","rL", "Position",[x0+3*dx y0 x0+3*dx+120 y0+30]);
+add_block("simulink/Math Operations/Gain", modelName + "/sR", "Gain","rR", "Position",[x0+3*dx y0+dy x0+3*dx+120 y0+dy+30]);
+
+% ds = (sR + sL)/2
+add_block("simulink/Math Operations/Sum", modelName + "/sumSRSL", "Inputs","++", "Position",[x0+4*dx y0+dy/2 x0+4*dx+60 y0+dy/2+40]);
+add_block("simulink/Math Operations/Gain", modelName + "/half", "Gain","0.5", "Position",[x0+4*dx+90 y0+dy/2 x0+4*dx+150 y0+dy/2+40]);
+
+% dtheta = (sR - sL)/b
+add_block("simulink/Math Operations/Sum", modelName + "/diffSRSL", "Inputs","+-", "Position",[x0+4*dx y0+2*dy x0+4*dx+60 y0+2*dy+40]);
+add_block("simulink/Math Operations/Gain", modelName + "/invb", "Gain","1/b", "Position",[x0+4*dx+90 y0+2*dy x0+4*dx+150 y0+2*dy+40]);
+
+% Integrate theta: theta(k) = theta(k-1) + dtheta
+add_block("simulink/Discrete/Discrete-Time Integrator", modelName + "/IntTheta", "Position",[x0+5*dx y0+2*dy x0+5*dx+120 y0+2*dy+50]);
+
+% theta_mid = theta_prev + 0.5*dtheta
+add_block("simulink/Math Operations/Gain", modelName + "/half_dtheta", "Gain","0.5", "Position",[x0+5*dx y0+2*dy+70 x0+5*dx+120 y0+2*dy+100]);
+add_block("simulink/Math Operations/Sum", modelName + "/theta_mid", "Inputs","++", "Position",[x0+6*dx y0+2*dy+40 x0+6*dx+60 y0+2*dy+90]);
+
+% cos(theta_mid), sin(theta_mid)
+add_block("simulink/Math Operations/Trigonometric Function", modelName + "/cos", "Operator","cos", "Position",[x0+7*dx y0+2*dy+35 x0+7*dx+90 y0+2*dy+65]);
+add_block("simulink/Math Operations/Trigonometric Function", modelName + "/sin", "Operator","sin", "Position",[x0+7*dx y0+2*dy+85 x0+7*dx+90 y0+2*dy+115]);
+
+% dx = ds*cos(theta_mid), dy = ds*sin(theta_mid)
+add_block("simulink/Math Operations/Product", modelName + "/dx", "Position",[x0+8*dx y0+2*dy+25 x0+8*dx+60 y0+2*dy+65]);
+add_block("simulink/Math Operations/Product", modelName + "/dy", "Position",[x0+8*dx y0+2*dy+85 x0+8*dx+60 y0+2*dy+125]);
+
+% Integrate x,y
+add_block("simulink/Discrete/Discrete-Time Integrator", modelName + "/IntX", "Position",[x0+9*dx y0+2*dy+10 x0+9*dx+120 y0+2*dy+60]);
+add_block("simulink/Discrete/Discrete-Time Integrator", modelName + "/IntY", "Position",[x0+9*dx y0+2*dy+80 x0+9*dx+120 y0+2*dy+130]);
+
+% Outputs
+add_block("simulink/Sinks/To Workspace", modelName + "/x_out", "VariableName","x_odom_sim", "Position",[x0+10*dx y0+2*dy+15 x0+10*dx+120 y0+2*dy+45]);
+add_block("simulink/Sinks/To Workspace", modelName + "/y_out", "VariableName","y_odom_sim", "Position",[x0+10*dx y0+2*dy+85 x0+10*dx+120 y0+2*dy+115]);
+add_block("simulink/Sinks/To Workspace", modelName + "/th_out", "VariableName","th_odom_sim", "Position",[x0+10*dx y0+2*dy-55 x0+10*dx+120 y0+2*dy-25]);
+
+% Connect lines
+add_line(modelName,"nL/1","dnL/1");
+add_line(modelName,"nR/1","dnR/1");
+add_line(modelName,"dnL/1","scaleL/1");
+add_line(modelName,"dnR/1","scaleR/1");
+add_line(modelName,"scaleL/1","sL/1");
+add_line(modelName,"scaleR/1","sR/1");
+
+add_line(modelName,"sR/1","sumSRSL/1");
+add_line(modelName,"sL/1","sumSRSL/2");
+add_line(modelName,"sumSRSL/1","half/1");
+
+add_line(modelName,"sR/1","diffSRSL/1");
+add_line(modelName,"sL/1","diffSRSL/2");
+add_line(modelName,"diffSRSL/1","invb/1");
+add_line(modelName,"invb/1","IntTheta/1");
+
+% theta_mid inputs: theta_prev is IntTheta state output delayed implicitly by integrator block output
+add_line(modelName,"invb/1","half_dtheta/1");
+add_line(modelName,"half_dtheta/1","theta_mid/2");
+add_line(modelName,"IntTheta/1","theta_mid/1");
+
+add_line(modelName,"theta_mid/1","cos/1");
+add_line(modelName,"theta_mid/1","sin/1");
+
+add_line(modelName,"half/1","dx/1");
+add_line(modelName,"cos/1","dx/2");
+add_line(modelName,"half/1","dy/1");
+add_line(modelName,"sin/1","dy/2");
+
+add_line(modelName,"dx/1","IntX/1");
+add_line(modelName,"dy/1","IntY/1");
+
+add_line(modelName,"IntX/1","x_out/1");
+add_line(modelName,"IntY/1","y_out/1");
+add_line(modelName,"IntTheta/1","th_out/1");
+
+set_param(modelName, "StopTime", "10");
+save_system(modelName);
+disp("Created and saved model: " + modelName);
+
+end
+</code></pre>
+
+      <!-- Section 7.6: Wolfram Mathematica Implementation -->
+      <h3>7.6 Wolfram Mathematica</h3>
+      <p>
+        Mathematica is convenient here because nonlinear least squares and
+        matrix operations are native. The notebook code below: (i) imports the
+        CSV, (ii) computes logged metrics, (iii) performs Gauss–Newton
+        calibration on increment residuals, (iv) reconstructs encoder-only
+        odometry, and (v) estimates
+        <strong>\( \hat{\mathbf{Q}} \)</strong>. Save it as a notebook named
+        <strong>Chapter5_Lesson5.nb</strong>.
+      </p>
+      <p><strong>File:</strong> Chapter5_Lesson5.nb</p>
+      <pre><code class="language-mathematica">(* Chapter5_Lesson5.nb
+
+Lab: Characterizing Odometry Error (Differential Drive)
+
+How to use:
+1) Set:
+   csvPath = "your_log.csv";
+   ticksPerRev = 4096;
+   rNom = 0.05; bNom = 0.30; wTheta = 1.0; maxIter = 15;
+2) Evaluate the notebook.
+
+Notes:
+- Any literal '&lt;' or '&gt;' symbols appear escaped because this source is embedded in HTML.
+*)
+
+ClearAll["Global`*"];
+
+wrapAngle[a_] := Mod[a + Pi, 2 Pi] - Pi;
+
+ticksToDphi[n_List, ticksPerRev_] := Module[{dn},
+  dn = Prepend[Differences[n], 0];
+  (2 Pi/ticksPerRev) dn
+];
+
+predictIncrementFromEnc[thPrev_List, dphiL_List, dphiR_List, rL_, rR_, b_] := Module[
+  {sL, sR, ds, dth, thMid, dx, dy},
+  sL = rL dphiL;
+  sR = rR dphiR;
+  ds = 1/2 (sR + sL);
+  dth = (sR - sL)/b;
+  thMid = wrapAngle /@ (thPrev + 1/2 dth);
+  dx = ds Cos[thMid];
+  dy = ds Sin[thMid];
+  Transpose[{dx, dy, dth}]
+];
+
+cumulativeFromIncrements[x0_, inc_] := Module[{X},
+  X = FoldList[#1 + #2 &amp;, x0, inc];
+  X[[All, 3]] = wrapAngle /@ X[[All, 3]];
+  X
+];
+
+computeMetrics[G_] := Module[
+  {ex, ey, eth, epos, rmsePos, rmseTh, endPos, endTh, dxg, dyg, sTotal, driftPerM},
+  ex = G[All, "x_odom"] - G[All, "x_gt"];
+  ey = G[All, "y_odom"] - G[All, "y_gt"];
+  eth = wrapAngle /@ (G[All, "th_odom"] - G[All, "th_gt"]);
+  epos = Sqrt[ex^2 + ey^2];
+
+  rmsePos = Sqrt[Mean[epos^2]];
+  rmseTh  = Sqrt[Mean[eth^2]];
+
+  endPos = Last[epos];
+  endTh  = Abs[Last[eth]];
+
+  dxg = Differences[G[All, "x_gt"]];
+  dyg = Differences[G[All, "y_gt"]];
+  sTotal = Total[Sqrt[dxg^2 + dyg^2]];
+
+  driftPerM = If[sTotal &gt; 10^-12, endPos/sTotal, Indeterminate];
+
+  &lt;|"rmse_pos" -&gt; rmsePos, "rmse_th" -&gt; rmseTh, "end_pos" -&gt; endPos, "end_th" -&gt; endTh,
+    "s_total" -&gt; sTotal, "drift_per_m" -&gt; driftPerM|&gt;
+];
+
+(* -----------------------------
+   Load CSV
+   ----------------------------- *)
+
+csvPath = "your_log.csv";
+ticksPerRev = 4096;
+rNom = 0.05; bNom = 0.30; wTheta = 1.0; maxIter = 15;
+
+raw = Import[csvPath, "Dataset"];
+
+required = {"t","nL","nR","x_odom","y_odom","th_odom","x_gt","y_gt","th_gt"};
+If[!SubsetQ[raw[1] // Keys, required], Print["Missing required columns."]; Abort[]];
+
+If[!MemberQ[Keys[raw[1]], "trial_id"],
+  data = raw[All, Append[Keys[raw[1]], "trial_id"] -&gt; (0 &amp;) ],
+  data = raw
+];
+
+data = data[All, &lt;|
+   "t" -&gt; #t, "nL" -&gt; #nL, "nR" -&gt; #nR,
+   "x_odom" -&gt; #x_odom, "y_odom" -&gt; #y_odom, "th_odom" -&gt; wrapAngle[#th_odom],
+   "x_gt" -&gt; #x_gt, "y_gt" -&gt; #y_gt, "th_gt" -&gt; wrapAngle[#th_gt],
+   "trial_id" -&gt; #trial_id
+|&gt; &amp;];
+
+trialIds = Sort[Normal@DeleteDuplicates[data[All, "trial_id"]]];
+
+(* Logged metrics per trial *)
+metricsLogged = Association@Table[
+  With[{G = data[Select[#trial_id == tid &amp;]]},
+    tid -&gt; computeMetrics[G]
+  ],
+  {tid, trialIds}
+];
+
+Print["=== Metrics (logged odometry) per trial ==="];
+Print[metricsLogged // Dataset];
+
+(* -----------------------------
+   Gauss-Newton calibration on all data
+   ----------------------------- *)
+
+(* Build residual r and Jacobian J for k=2..N:
+   r_k = [dx_pred - dx_gt, dy_pred - dy_gt, wTheta*(dth_pred - dth_gt)]
+   J = dr/d[rL,rR,b]
+*)
+
+buildRJ[DT_, rL_, rR_, b_, wTheta_, ticksPerRev_] := Module[
+  {nL, nR, thG, xG, yG, dphiL, dphiR, thPrev, dxGt, dyGt, dthGt, N, idx,
+   sL, sR, ds, dth, thMid, ca, sa, rx, ry, rth, rvec,
+   ddsDrL, ddsDrR, ddthDrL, ddthDrR, ddthDb, daDrL, daDrR, daDb,
+   ddxDrL, ddxDrR, ddxDb, ddyDrL, ddyDrR, ddyDb, J
+  },
+
+  nL = Normal@DT[All, "nL"];
+  nR = Normal@DT[All, "nR"];
+  thG = Normal@DT[All, "th_gt"];
+  xG  = Normal@DT[All, "x_gt"];
+  yG  = Normal@DT[All, "y_gt"];
+
+  dphiL = ticksToDphi[nL, ticksPerRev];
+  dphiR = ticksToDphi[nR, ticksPerRev];
+
+  thPrev = Prepend[Most[thG], First[thG]];
+
+  dxGt = Prepend[Differences[xG], 0];
+  dyGt = Prepend[Differences[yG], 0];
+  dthGt = Prepend[wrapAngle /@ Differences[thG], 0];
+
+  N = Length[xG];
+  idx = Range[2, N]; (* skip first increment *)
+
+  sL = rL dphiL;
+  sR = rR dphiR;
+  ds = 1/2 (sR + sL);
+  dth = (sR - sL)/b;
+
+  thMid = wrapAngle /@ (thPrev + 1/2 dth);
+  ca = Cos[thMid[[idx]]];
+  sa = Sin[thMid[[idx]]];
+
+  rx = ds[[idx]] ca - dxGt[[idx]];
+  ry = ds[[idx]] sa - dyGt[[idx]];
+  rth = wrapAngle /@ (dth[[idx]] - dthGt[[idx]]);
+
+  rvec = Flatten@Transpose[{rx, ry, wTheta rth}];
+
+  ddsDrL = 1/2 dphiL[[idx]];
+  ddsDrR = 1/2 dphiR[[idx]];
+
+  ddthDrL = -(dphiL[[idx]])/b;
+  ddthDrR =  (dphiR[[idx]])/b;
+  ddthDb  = -((sR[[idx]] - sL[[idx]])/b^2);
+
+  daDrL = 1/2 ddthDrL;
+  daDrR = 1/2 ddthDrR;
+  daDb  = 1/2 ddthDb;
+
+  ddxDrL = ca ddsDrL + ds[[idx]] (-sa) daDrL;
+  ddxDrR = ca ddsDrR + ds[[idx]] (-sa) daDrR;
+  ddxDb  = ds[[idx]] (-sa) daDb;
+
+  ddyDrL = sa ddsDrL + ds[[idx]] ca daDrL;
+  ddyDrR = sa ddsDrR + ds[[idx]] ca daDrR;
+  ddyDb  = ds[[idx]] ca daDb;
+
+  J = ConstantArray[0.0, {3 Length[idx], 3}];
+  J[[1 ;; ;; 3, 1]] = ddxDrL;   J[[1 ;; ;; 3, 2]] = ddxDrR;   J[[1 ;; ;; 3, 3]] = ddxDb;
+  J[[2 ;; ;; 3, 1]] = ddyDrL;   J[[2 ;; ;; 3, 2]] = ddyDrR;   J[[2 ;; ;; 3, 3]] = ddyDb;
+  J[[3 ;; ;; 3, 1]] = wTheta ddthDrL; J[[3 ;; ;; 3, 2]] = wTheta ddthDrR; J[[3 ;; ;; 3, 3]] = wTheta ddthDb;
+
+  {rvec, J}
+];
+
+gaussNewton[DT_, ticksPerRev_, rNom_, bNom_, wTheta_, maxIter_] := Module[
+  {rL = rNom, rR = rNom, b = bNom, lambda = 10^-9, it, rvec, J, A, g, dp, alpha, cand},
+  For[it = 1, it &lt;= maxIter, it++,
+    {rvec, J} = buildRJ[DT, rL, rR, b, wTheta, ticksPerRev];
+    A = Transpose[J].J + lambda IdentityMatrix[3];
+    g = Transpose[J].rvec;
+    dp = -LinearSolve[A, g];
+
+    If[Norm[dp] &lt; 10^-12, Break[]];
+
+    alpha = 1.0;
+    Do[
+      cand = {rL + alpha dp[[1]], rR + alpha dp[[2]], b + alpha dp[[3]]};
+      If[cand[[1]] &gt; 0 &amp;&amp; cand[[2]] &gt; 0 &amp;&amp; cand[[3]] &gt; 0, Break[]];
+      alpha = 0.5 alpha;
+      ,
+      {12}
+    ];
+
+    rL = cand[[1]]; rR = cand[[2]]; b = cand[[3]];
+  ];
+  &lt;|"rL" -&gt; rL, "rR" -&gt; rR, "b" -&gt; b|&gt;
+];
+
+pHat = gaussNewton[data, ticksPerRev, rNom, bNom, wTheta, maxIter];
+
+Print["=== Calibration Result ==="];
+Print[pHat // Dataset];
+
+(* -----------------------------
+   Encoder-only reconstruction metrics per trial
+   ----------------------------- *)
+
+metricsCal = Association@Table[
+  With[{G = data[Select[#trial_id == tid &amp;]]},
+    Module[{nL, nR, thG, xG, yG, dphiL, dphiR, thPrev, inc, x0, Xhat, G2},
+      nL = Normal@G[All,"nL"];
+      nR = Normal@G[All,"nR"];
+      thG = Normal@G[All,"th_gt"];
+      xG  = Normal@G[All,"x_gt"];
+      yG  = Normal@G[All,"y_gt"];
+
+      dphiL = ticksToDphi[nL, ticksPerRev];
+      dphiR = ticksToDphi[nR, ticksPerRev];
+      thPrev = Prepend[Most[thG], First[thG]];
+
+      inc = predictIncrementFromEnc[thPrev, dphiL, dphiR, pHat["rL"], pHat["rR"], pHat["b"]];
+      x0 = {First[xG], First[yG], First[thG]};
+      Xhat = cumulativeFromIncrements[x0, inc];
+
+      G2 = G[All, &lt;|
+        "t" -&gt; #t, "nL" -&gt; #nL, "nR" -&gt; #nR,
+        "x_odom" -&gt; Xhat[[#Index,1]],
+        "y_odom" -&gt; Xhat[[#Index,2]],
+        "th_odom" -&gt; Xhat[[#Index,3]],
+        "x_gt" -&gt; #x_gt, "y_gt" -&gt; #y_gt, "th_gt" -&gt; #th_gt,
+        "trial_id" -&gt; #trial_id
+      |&gt; &amp;];
+
+      tid -&gt; computeMetrics[G2]
+    ]
+  ],
+  {tid, trialIds}
+];
+
+Print["=== Metrics (encoder-only reconstruction using calibrated params) per trial ==="];
+Print[metricsCal // Dataset];
+
+(* -----------------------------
+   Increment residual covariance Q_hat
+   ----------------------------- *)
+
+epsAll = Flatten@Table[
+  With[{G = data[Select[#trial_id == tid &amp;]]},
+    Module[{nL, nR, thG, xG, yG, dphiL, dphiR, thPrev, incPred, dxGt, dyGt, dthGt, ex, ey, eth},
+      If[Length[G] &lt; 3, Return[{}]];
+      nL = Normal@G[All,"nL"]; nR = Normal@G[All,"nR"];
+      thG = Normal@G[All,"th_gt"]; xG = Normal@G[All,"x_gt"]; yG = Normal@G[All,"y_gt"];
+
+      dphiL = ticksToDphi[nL, ticksPerRev];
+      dphiR = ticksToDphi[nR, ticksPerRev];
+      thPrev = Prepend[Most[thG], First[thG]];
+      incPred = predictIncrementFromEnc[thPrev, dphiL, dphiR, pHat["rL"], pHat["rR"], pHat["b"]];
+
+      dxGt = Differences[xG];
+      dyGt = Differences[yG];
+      dthGt = wrapAngle /@ Differences[thG];
+
+      ex = incPred[[2 ;;, 1]] - dxGt;
+      ey = incPred[[2 ;;, 2]] - dyGt;
+      eth = wrapAngle /@ (incPred[[2 ;;, 3]] - dthGt);
+
+      Transpose[{ex, ey, eth}]
+    ]
+  ],
+  {tid, trialIds}
+], 1];
+
+If[Length[epsAll] &lt; 2,
+  Print["Not enough increments for covariance."],
+  epsMean = Mean[epsAll];
+  Qhat = Covariance[epsAll]; (* unbiased by default *)
+  Print["=== Increment residual mean [dx, dy, dth] ==="]; Print[epsMean];
+  Print["=== Increment residual covariance Q_hat ==="]; Print[Qhat];
+];
+</code></pre>
+
+      <p>
+        If you prefer the complete code in-page (rather than via ZIP), you can
+        paste each full source file from the ZIP into the corresponding blocks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (RMSE vs endpoint):</strong>
+        Show that \( \mathrm{RMSE}_{pos} \le \max_{1\le k \le N} e^{pos}_k \),
+        and explain why RMSE can decrease after calibration even if one
+        localized segment has large slip.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Since \( \mathrm{RMSE}_{pos}^2 = \frac{1}{N}\sum_{k=1}^{N}(e^{pos}_k)^2
+        \le \frac{1}{N}\sum_{k=1}^{N}(\max_k e^{pos}_k)^2 = (\max_k e^{pos}_k)^2
+        \), taking square roots gives the inequality. Calibration reduces
+        systematic bias over most of the trajectory, lowering the average
+        squared error, even if an isolated slip event dominates a few samples.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Bias–variance interpretation):</strong>
+        Suppose you compute \( \bar{\mathbf{e}} \) and \(
+        \hat{\boldsymbol{\Sigma}}_e \) across repeated trials. Explain how to
+        distinguish “repeatable drift” from “random variability” using these two
+        estimates.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A large mean vector \( \bar{\mathbf{e}} \) indicates repeatable bias
+        (systematic calibration or consistent slip direction), while a large
+        covariance \( \hat{\boldsymbol{\Sigma}}_e \) with small mean indicates
+        trial-to-trial variability (stochastic effects). A practical diagnostic
+        is to compare \( \|\bar{\mathbf{e}}\| \) against typical standard
+        deviations \( \sqrt{\mathrm{diag}(\hat{\boldsymbol{\Sigma}}_e)} \).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Identifiability intuition):</strong>
+        Consider a dataset containing only straight-line motion (approximately
+        \( \Delta\theta_k \approx 0 \)). Discuss why estimating \( b \) becomes
+        poorly conditioned compared with a dataset that includes turns.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        If the robot rarely turns, then \( \Delta s_{R,k}-\Delta s_{L,k} \) is
+        near zero, so \( \Delta\theta_k = (\Delta s_{R,k}-\Delta s_{L,k})/b \)
+        carries little information about \( b \). In Gauss–Newton terms, the
+        columns of \( \mathbf{J} \) associated with \( b \) have small
+        magnitude, making \( \mathbf{J}^{\mathsf{T}}\mathbf{J} \)
+        ill-conditioned. Adding turning maneuvers increases heading excitation,
+        improving identifiability.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Damped normal equations):</strong>
+        Prove that \( \mathbf{J}^{\mathsf{T}}\mathbf{J} + \lambda\mathbf{I} \)
+        is positive definite for any \( \lambda &gt; 0 \), regardless of rank of
+        \( \mathbf{J} \).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        For any nonzero vector \( \mathbf{z} \), \(
+        \mathbf{z}^{\mathsf{T}}(\mathbf{J}^{\mathsf{T}}\mathbf{J} +
+        \lambda\mathbf{I})\mathbf{z} = \|\mathbf{J}\mathbf{z}\|_2^2 +
+        \lambda\|\mathbf{z}\|_2^2 \). The first term is nonnegative and the
+        second term is strictly positive for \( \mathbf{z}\neq \mathbf{0} \)
+        when \( \lambda &gt; 0 \). Hence the sum is strictly positive, proving
+        positive definiteness.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Increment covariance interpretation):</strong>
+        Let \( \hat{\mathbf{Q}} \) be the covariance of increment residuals \(
+        \boldsymbol{\varepsilon}_k \). Explain what it means if the off-diagonal
+        term \( \hat{Q}_{12} \) (between \( \Delta x \) and \( \Delta y \)) is
+        consistently nonzero.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        A nonzero \( \hat{Q}_{12} \) indicates correlated lateral and
+        longitudinal increment errors, often due to direction-dependent slip or
+        systematic heading perturbations that project into both axes. For
+        example, small yaw disturbances during forward motion can couple \(
+        \Delta x \) and \( \Delta y \) residuals through the trigonometric
+        projection in midpoint integration.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        You established a complete characterization workflow: (i) compute
+        trajectory and endpoint metrics; (ii) estimate across-trial mean and
+        covariance; (iii) reduce systematic drift by fitting
+        <strong>\( (r_L,r_R,b) \)</strong> using nonlinear least squares; and
+        (iv) estimate an empirical increment covariance
+        <strong>\( \hat{\mathbf{Q}} \)</strong> to summarize stochastic residual
+        motion errors. These outputs become engineering artifacts: calibrated
+        parameters and error statistics that can be used for system validation
+        and later probabilistic localization modules.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Borenstein, J., Feng, L., &amp; Wehe, D. (1997). Mobile robot
+        positioning: Sensors and techniques.
+        <em>Journal of Robotic Systems</em>, 14(4), 231–249.
+      </li>
+      <li>
+        Borenstein, J., Everett, H.R., &amp; Feng, L. (1996). Where am I?
+        Sensors and methods for mobile robot positioning.
+        <em>University of Michigan</em>
+        (survey monograph; widely cited).
+      </li>
+      <li>
+        Kelly, A. (2004). Linearized error propagation in odometry and scanning
+        localization. <em>The International Journal of Robotics Research</em>,
+        23(2), 179–218.
+      </li>
+      <li>
+        Antonelli, G., Chiaverini, S., &amp; Fusco, G. (2003). A calibration
+        method for odometry of mobile robots based on the least-squares
+        technique.
+        <em>IEEE Transactions on Robotics and Automation</em>, 19(5), 974–980.
+      </li>
+      <li>
+        Chong, E.K.P., &amp; Zak, S.H. (2013).
+        <em>An Introduction to Optimization</em>
+        (4th ed.). Wiley. (Gauss–Newton and damped least squares foundations).
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter5/Lesson4.html">
+          Lesson 4: Practical Odometry Filtering
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter6/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Belief as a Probability Distribution Over Pose
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="active-lesson" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

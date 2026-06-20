@@ -1,0 +1,2553 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 15: Local Motion Generation (Mobile-Specific) - Lesson 4: Timed-Elastic-Band (TEB) Local Planning | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 15: Local Motion Generation (Mobile-Specific)</h1>
+    <h3><strong>Lesson 4: Timed-Elastic-Band (TEB) Local Planning</strong></h3>
+    <p>
+      This lesson develops the Timed-Elastic-Band (TEB) method as a <em>local</em> trajectory optimizer that
+      deforms an incoming global path into a time-parameterized, dynamically feasible trajectory for a mobile base.
+      Unlike sampling-style local planners (e.g., DWA), TEB represents the trajectory as a sparse sequence of poses
+      and time intervals and solves a structured nonlinear least-squares problem in real time. We focus on the mobile
+      (SE(2)) setting and derive the discrete residuals that encode obstacle clearance, smoothness, nonholonomic
+      feasibility proxies, and kinodynamic bounds.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        A TEB trajectory is a discrete, time-stamped curve
+        <strong>\( \mathcal{B} = \{ (\boldsymbol{\xi}_0, \Delta t_0), (\boldsymbol{\xi}_1, \Delta t_1), \dots, (\boldsymbol{\xi}_N) \} \)</strong>
+        where each pose
+        <strong>\( \boldsymbol{\xi}_i = (x_i, y_i, \theta_i) \in \mathbb{R}^2 \times (-\pi,\pi] \)</strong>
+        and each <strong>\( \Delta t_i &gt; 0 \)</strong> is the traversal time between consecutive poses.
+        The planner receives a coarse path (from the global planner) and refines it by minimizing a weighted sum of
+        objectives while softly enforcing feasibility (speed, acceleration, curvature/turning constraints) and
+        safety (clearance from obstacles).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  GP["Global path (waypoints in map frame)"] --> INIT["Initialize band (poses + nominal time gaps)"]
+  INIT --> G["Build sparse objective (edges between neighbors + obstacle edges)"]
+  G --> OPT["Iterative solve (linearize + update)"]
+  OPT --> CHK["Check constraints (v,w,a) and clearance"]
+  CHK -->|ok| CMD["Output short-horizon command (v,w)"]
+  CHK -->|not ok| RET["Retiming / adjust weights / reinitialize"]
+  CMD --> FB["Robot executes; new odom + costmap"]
+  FB --> INIT
+        </pre>
+      </div>
+
+      <p>
+        Intuition: classic “elastic bands” treat a path like a string under tension that is repelled by obstacles.
+        TEB adds <strong>time elasticity</strong> so that the optimizer can stretch/compress time to satisfy bounds
+        such as <strong>\( |v| &lt; v_{\max} \)</strong> and <strong>\( |\omega| &lt; \omega_{\max} \)</strong>
+        while also seeking short traversal time.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Discretization, Kinematics, and the Optimization Variables -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Discretization, Kinematics, and the Optimization Variables</h2>
+    <div class="down-content">
+      <p>
+        For adjacent poses, define the displacement and heading increment:
+        <strong>\( \Delta x_i = x_{i+1}-x_i \)</strong>,
+        <strong>\( \Delta y_i = y_{i+1}-y_i \)</strong>,
+        <strong>\( \Delta \theta_i = \mathrm{wrap}(\theta_{i+1}-\theta_i) \)</strong>.
+        Using the time gap <strong>\( \Delta t_i \)</strong>, the discrete body speed and yaw-rate proxies are
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          v_i \;=\; \frac{\sqrt{(\Delta x_i)^2 + (\Delta y_i)^2} }{\Delta t_i}, \qquad
+          \omega_i \;=\; \frac{\Delta \theta_i}{\Delta t_i}, \qquad i=0,\dots,N-1.
+        \]
+      </h4>
+
+      <p>
+        These are not a full dynamics model; they are the local-planning quantities we can constrain without
+        re-deriving robot dynamics (already known from robotics dynamics). In TEB we primarily impose:
+        <strong>\( |v_i| &lt; v_{\max} \)</strong>, <strong>\( |\omega_i| &lt; \omega_{\max} \)</strong>,
+        and discrete acceleration limits. A common symmetric discrete acceleration is
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          a_i \;=\; \frac{v_{i+1}-v_i}{\tfrac{1}{2}(\Delta t_i + \Delta t_{i+1})}, \qquad
+          \alpha_i \;=\; \frac{\omega_{i+1}-\omega_i}{\tfrac{1}{2}(\Delta t_i + \Delta t_{i+1})},
+          \qquad i=0,\dots,N-2.
+        \]
+      </h4>
+
+      <p>
+        To encode nonholonomic consistency without introducing a full control sequence, a useful residual aligns the
+        pose orientation <strong>\( \theta_i \)</strong> with the segment direction:
+        let <strong>\( \varphi_i = \mathrm{atan2}(\Delta y_i, \Delta x_i) \)</strong>.
+        Then penalize <strong>\( \sin(\theta_i - \varphi_i) \)</strong> (zero when aligned).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Cost Terms as Residuals (Nonlinear Least Squares View) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Cost Terms as Residuals (Nonlinear Least Squares View)</h2>
+    <div class="down-content">
+      <p>
+        TEB is commonly implemented as a sparse nonlinear least-squares problem:
+        find decision vector <strong>\( \mathbf{z} \)</strong> (stacking all free poses and time intervals)
+        that minimizes
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \min_{\mathbf{z} } \; \frac{1}{2}\,\|\mathbf{r}(\mathbf{z})\|^2
+          \;=\; \frac{1}{2}\sum_{k} r_k(\mathbf{z})^2,
+        \]
+      </h4>
+
+      <p>
+        where each residual <strong>\( r_k \)</strong> corresponds to a “constraint” or “objective” term.
+        The key advantage is that the Jacobian is sparse because most terms only couple neighboring poses and
+        time intervals.
+      </p>
+
+      <h3>3.1 Smoothness (Elasticity) Residuals</h3>
+      <p>
+        The band should not be jagged. A standard discrete approximation of curvature/smoothness uses a second
+        difference (“discrete Laplacian”) on positions:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \Delta^2 \mathbf{p}_i \;=\; \mathbf{p}_{i+1} - 2\mathbf{p}_i + \mathbf{p}_{i-1},
+          \quad \mathbf{p}_i = (x_i, y_i).
+        \]
+      </h4>
+      <p>
+        Residuals: <strong>\( r^{\text{smooth} }_{i,x} = \sqrt{w_s}\, (\Delta^2 x_i) \)</strong>,
+        <strong>\( r^{\text{smooth} }_{i,y} = \sqrt{w_s}\, (\Delta^2 y_i) \)</strong>.
+      </p>
+
+      <h3>3.2 Time-Optimality and Retiming</h3>
+      <p>
+        A simple time objective minimizes traversal time:
+        <strong>\( J_{\text{time} } = w_t \sum_i \Delta t_i \)</strong>.
+        In residual form: <strong>\( r^{\text{time} }_i = \sqrt{w_t}\,\Delta t_i \)</strong>.
+        Additionally, time gaps are bounded: <strong>\( \Delta t_i &gt; 0 \)</strong> and
+        <strong>\( \Delta t_{\min} &lt; \Delta t_i &lt; \Delta t_{\max} \)</strong>,
+        typically encoded softly with hinge penalties.
+      </p>
+
+      <h3>3.3 Obstacle Clearance via Distance-to-Obstacle</h3>
+      <p>
+        Let <strong>\( d(\mathbf{p}_i) \)</strong> be the distance from pose position
+        <strong>\( \mathbf{p}_i \)</strong> to the nearest obstacle boundary, computed from a distance
+        transform (or from geometric primitives in a demo). For robot radius <strong>\( r_{\text{rob} } \)</strong>,
+        we define effective clearance
+        <strong>\( \bar{d}(\mathbf{p}_i)=d(\mathbf{p}_i)-r_{\text{rob} } \)</strong>.
+        Enforce a minimum safety distance <strong>\( d_{\min} \)</strong> with a hinge:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          r^{\text{obst} }_i \;=\; \sqrt{w_o}\,\max\big(0,\; d_{\min} - \bar{d}(\mathbf{p}_i)\big).
+        \]
+      </h4>
+
+      <h3>3.4 Kinodynamic Soft Constraints (Bounds on v, ω, a, α)</h3>
+      <p>
+        With the discrete proxies from Section 2, enforce bounds using hinge residuals, e.g.
+        <strong>\( r^{v}_i = \sqrt{w_v}\,\max(0, v_i - v_{\max}) \)</strong>,
+        <strong>\( r^{\omega}_i = \sqrt{w_\omega}\,\max(0, |\omega_i| - \omega_{\max}) \)</strong>,
+        and similarly for <strong>\( |a_i| &lt; a_{\max} \)</strong> and
+        <strong>\( |\alpha_i| &lt; \alpha_{\max} \)</strong>.
+      </p>
+
+      <h3>3.5 Nonholonomic Consistency Proxy</h3>
+      <p>
+        For wheeled robots, sideways velocity should be small. In a purely geometric discretization, we can penalize
+        misalignment between pose orientation and segment direction:
+        <strong>\( r^{\text{align} }_i = \sqrt{w_\text{align} }\,\sin(\theta_i - \varphi_i) \)</strong>.
+        This enforces <strong>\( \theta_i \approx \varphi_i \)</strong> up to <strong>\( \pi \)</strong> wrapping.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  P0["Pose 0"] --- DT0["dt 0"] --- P1["Pose 1"] --- DT1["dt 1"] --- P2["Pose 2"] --- DT2["dt 2"] --- P3["Pose 3"]
+  P1 --> ESM1["smoothness edge"]
+  P2 --> ESM2["smoothness edge"]
+  P1 --> EOB1["obstacle edge"]
+  P2 --> EOB2["obstacle edge"]
+  P1 --> EK1["v,w,a bounds edge"]
+  P2 --> EK2["v,w,a bounds edge"]
+        </pre>
+      </div>
+
+      <p>
+        The sparse chain structure is why TEB can run online: each edge touches only a few variables (local coupling),
+        yielding a sparse normal matrix.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Gauss-Newton / Levenberg-Marquardt and a Key Derivation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Gauss-Newton / Levenberg-Marquardt and a Key Derivation</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( \mathbf{r}(\mathbf{z}) \in \mathbb{R}^m \)</strong> be the stacked residual vector.
+        Around a current iterate <strong>\( \mathbf{z} \)</strong>, linearize:
+        <strong>\( \mathbf{r}(\mathbf{z}+\delta) \approx \mathbf{r}(\mathbf{z}) + \mathbf{J}\delta \)</strong>,
+        where <strong>\( \mathbf{J} = \tfrac{\partial \mathbf{r} }{\partial \mathbf{z} } \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \delta^* \;=\; \arg\min_\delta \; \frac{1}{2}\|\mathbf{r} + \mathbf{J}\delta\|^2.
+        \]
+      </h4>
+
+      <p>
+        <strong>Proposition (Normal Equations).</strong> The minimizer of the linearized problem satisfies
+        <strong>\( (\mathbf{J}^\top\mathbf{J})\delta^* = -\mathbf{J}^\top \mathbf{r} \)</strong>.
+      </p>
+
+      <p><strong>Proof:</strong> Expand the quadratic objective:
+        <strong>\( \tfrac{1}{2}(\mathbf{r}+\mathbf{J}\delta)^\top(\mathbf{r}+\mathbf{J}\delta) \)</strong>.
+        Differentiate w.r.t. <strong>\( \delta \)</strong> and set to zero:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \nabla_\delta \Big( \tfrac{1}{2}\|\mathbf{r}+\mathbf{J}\delta\|^2 \Big)
+          = \mathbf{J}^\top(\mathbf{r}+\mathbf{J}\delta) = \mathbf{0}
+          \;\;\Longrightarrow\;\;
+          \mathbf{J}^\top\mathbf{J}\,\delta = -\mathbf{J}^\top\mathbf{r}. \quad \blacksquare
+        \]
+      </h4>
+
+      <p>
+        <strong>Levenberg–Marquardt damping.</strong> To improve robustness (especially when far from a good solution),
+        solve the damped system
+        <strong>\( (\mathbf{J}^\top\mathbf{J} + \lambda\mathbf{I})\delta = -\mathbf{J}^\top\mathbf{r} \)</strong>
+        with <strong>\( \lambda &gt; 0 \)</strong>. This is the backbone of many TEB implementations, often via a
+        graph-optimization backend.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Practical Integration Notes (Mobile Navigation Stack Context) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Practical Integration Notes (Mobile Navigation Stack Context)</h2>
+    <div class="down-content">
+      <p>
+        In a navigation stack, TEB sits between the global planner and the low-level controller:
+        it consumes (i) a global plan, (ii) a local costmap / obstacle list, and (iii) robot limits.
+        Each cycle, it optimizes a short horizon and outputs a velocity command
+        <strong>\( (v,\omega) \)</strong> or a short trajectory segment.
+      </p>
+      <ul>
+        <li>
+          <strong>Initialization:</strong> TEB performance depends on the initial band. A common strategy is to
+          resample the global path to match a desired spatial resolution and assign a nominal
+          <strong>\( \Delta t \)</strong>.
+        </li>
+        <li>
+          <strong>Retiming:</strong> If obstacle avoidance requires detours, time gaps stretch; if the path is clear,
+          the time objective shrinks them, but bounds
+          <strong>\( \Delta t_{\min} &lt; \Delta t_i &lt; \Delta t_{\max} \)</strong> keep numerics stable.
+        </li>
+        <li>
+          <strong>Topologies:</strong> Practical TEB variants maintain multiple homotopy classes (distinct ways around
+          obstacles) and optimize each, selecting the lowest-cost feasible solution.
+        </li>
+        <li>
+          <strong>Soft vs hard constraints:</strong> Most constraints are “soft” residuals; if a strict safety guarantee
+          is needed, you add conservative inflation in the costmap and enforce tighter
+          <strong>\( d_{\min} \)</strong>.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementations (Python, C++, Java, MATLAB, Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following educational implementations solve a small TEB problem with circular obstacles, using a damped
+        Gauss-Newton solver with a numerical Jacobian. They are designed to match the residual definitions in Sections
+        2–4. In real robots, you typically use sparse analytic Jacobians and a graph-optimization library.
+      </p>
+
+      <h3>6.1 Python Implementation</h3>
+      <p><strong>File:</strong> Chapter15_Lesson4.py</p>
+      <pre><code class="language-python">
+# Chapter15_Lesson4.py
+# Timed-Elastic-Band (TEB) local planning — educational implementation (2D, SE(2))
+# Author: Abolfazl Mohammadijoo (course scaffold)
+#
+# This script builds a small TEB optimization problem:
+#   - Variables: poses (x_i, y_i, theta_i) and time gaps dt_i
+#   - Residuals: smoothness, time, obstacle clearance, speed bounds, yaw-rate bounds, accel bounds, nonholonomic alignment
+#   - Solver: damped Gauss-Newton (Levenberg–Marquardt style) with numerical Jacobian
+#
+# NOTE: This is a teaching implementation. Real TEB uses sparse analytic Jacobians and a graph-optimizer backend.
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Callable, Optional
+import math
+import numpy as np
+
+
+def wrap_angle(a: float) -> float:
+    """Wrap angle to (-pi, pi]."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+@dataclass
+class CircleObstacle:
+    cx: float
+    cy: float
+    r: float
+
+
+@dataclass
+class Limits:
+    v_max: float = 0.7          # m/s
+    w_max: float = 1.2          # rad/s
+    a_max: float = 0.8          # m/s^2
+    alpha_max: float = 2.0      # rad/s^2
+    dt_min: float = 0.05        # s
+    dt_max: float = 0.60        # s
+
+
+@dataclass
+class Weights:
+    smooth: float = 2.0
+    time: float = 0.5
+    obst: float = 4.0
+    v_bound: float = 2.0
+    w_bound: float = 1.5
+    a_bound: float = 1.0
+    alpha_bound: float = 0.8
+    align: float = 0.6
+    dt_bound: float = 2.0
+
+
+def distance_to_nearest_obstacle(px: float, py: float, obstacles: List[CircleObstacle]) -> float:
+    """Distance from point to nearest obstacle boundary (positive outside)."""
+    d_min = float("inf")
+    for ob in obstacles:
+        d = math.hypot(px - ob.cx, py - ob.cy) - ob.r
+        d_min = min(d_min, d)
+    return d_min
+
+
+def unpack_z(z: np.ndarray, N: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    z packs: [x0..xN, y0..yN, th0..thN, dt0..dt_{N-1}]
+    returns (x,y,th,dt)
+    """
+    x = z[0:N+1]
+    y = z[N+1:2*(N+1)]
+    th = z[2*(N+1):3*(N+1)]
+    dt = z[3*(N+1):3*(N+1) + N]
+    return x, y, th, dt
+
+
+def pack_z(x: np.ndarray, y: np.ndarray, th: np.ndarray, dt: np.ndarray) -> np.ndarray:
+    return np.concatenate([x, y, th, dt], axis=0)
+
+
+def build_residuals(
+    z: np.ndarray,
+    N: int,
+    obstacles: List[CircleObstacle],
+    robot_radius: float,
+    d_min: float,
+    limits: Limits,
+    weights: Weights,
+) -> np.ndarray:
+    """
+    Build stacked residual vector r(z). Each residual includes sqrt(weight).
+    """
+    x, y, th, dt = unpack_z(z, N)
+
+    r_list: List[float] = []
+
+    # --- Smoothness: second differences on x,y (i = 1..N-1)
+    ws = math.sqrt(weights.smooth)
+    for i in range(1, N):
+        ddx = x[i+1] - 2.0*x[i] + x[i-1]
+        ddy = y[i+1] - 2.0*y[i] + y[i-1]
+        r_list.append(ws * ddx)
+        r_list.append(ws * ddy)
+
+    # --- Time objective: sum dt_i
+    wt = math.sqrt(weights.time)
+    for i in range(N):
+        r_list.append(wt * dt[i])
+
+    # --- dt bounds as hinge penalties
+    wdt = math.sqrt(weights.dt_bound)
+    for i in range(N):
+        # dt_min < dt < dt_max
+        r_list.append(wdt * max(0.0, limits.dt_min - dt[i]))
+        r_list.append(wdt * max(0.0, dt[i] - limits.dt_max))
+
+    # --- Segment kinematics: v_i, w_i
+    v = np.zeros(N)
+    w = np.zeros(N)
+    for i in range(N):
+        dx = x[i+1] - x[i]
+        dy = y[i+1] - y[i]
+        dth = wrap_angle(th[i+1] - th[i])
+        seg = math.hypot(dx, dy)
+        v[i] = seg / max(1e-9, dt[i])
+        w[i] = dth / max(1e-9, dt[i])
+
+    # --- Speed bound residuals (hinge)
+    wv = math.sqrt(weights.v_bound)
+    for i in range(N):
+        r_list.append(wv * max(0.0, v[i] - limits.v_max))
+
+    # --- Yaw-rate bound residuals (hinge on |w|)
+    ww = math.sqrt(weights.w_bound)
+    for i in range(N):
+        r_list.append(ww * max(0.0, abs(w[i]) - limits.w_max))
+
+    # --- Acceleration bounds (i = 0..N-2), symmetric dt average
+    wa = math.sqrt(weights.a_bound)
+    wal = math.sqrt(weights.alpha_bound)
+    for i in range(N-1):
+        dt_avg = 0.5 * (dt[i] + dt[i+1])
+        dt_avg = max(1e-9, dt_avg)
+        a_i = (v[i+1] - v[i]) / dt_avg
+        alpha_i = (w[i+1] - w[i]) / dt_avg
+        r_list.append(wa * max(0.0, abs(a_i) - limits.a_max))
+        r_list.append(wal * max(0.0, abs(alpha_i) - limits.alpha_max))
+
+    # --- Obstacle clearance: hinge on (d_min - (dist - robot_radius))
+    wo = math.sqrt(weights.obst)
+    for i in range(N+1):
+        dist = distance_to_nearest_obstacle(x[i], y[i], obstacles)
+        clearance = dist - robot_radius
+        r_list.append(wo * max(0.0, d_min - clearance))
+
+    # --- Nonholonomic alignment proxy: sin(theta_i - atan2(dy,dx))
+    wa2 = math.sqrt(weights.align)
+    for i in range(N):
+        dx = x[i+1] - x[i]
+        dy = y[i+1] - y[i]
+        phi = math.atan2(dy, dx)
+        r_list.append(wa2 * math.sin(wrap_angle(th[i] - phi)))
+
+    return np.array(r_list, dtype=float)
+
+
+def numerical_jacobian(fun: Callable[[np.ndarray], np.ndarray], z: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Dense numerical Jacobian by forward differences (teaching simplicity)."""
+    r0 = fun(z)
+    m = r0.size
+    n = z.size
+    J = np.zeros((m, n), dtype=float)
+    for j in range(n):
+        zp = z.copy()
+        zp[j] += eps
+        rp = fun(zp)
+        J[:, j] = (rp - r0) / eps
+    return J
+
+
+def solve_lm(
+    fun: Callable[[np.ndarray], np.ndarray],
+    z0: np.ndarray,
+    max_iters: int = 20,
+    lam0: float = 1e-2,
+    verbose: bool = True
+) -> Tuple[np.ndarray, Dict[str, List[float]]]:
+    """
+    Simple Levenberg–Marquardt: (J^T J + lam I) d = -J^T r
+    Accept step if it decreases cost; otherwise increase lam.
+    """
+    z = z0.copy()
+    lam = lam0
+    hist = {"cost": [], "lam": []}
+
+    for it in range(max_iters):
+        r = fun(z)
+        cost = 0.5 * float(r @ r)
+        hist["cost"].append(cost)
+        hist["lam"].append(lam)
+
+        if verbose:
+            print(f"iter={it:02d}  cost={cost:.6f}  lam={lam:.3e}")
+
+        J = numerical_jacobian(fun, z)
+        A = J.T @ J + lam * np.eye(z.size)
+        b = -J.T @ r
+
+        try:
+            d = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            # Increase damping and continue
+            lam *= 10.0
+            continue
+
+        z_new = z + d
+        r_new = fun(z_new)
+        cost_new = 0.5 * float(r_new @ r_new)
+
+        if cost_new < cost:
+            z = z_new
+            lam = max(lam / 2.0, 1e-9)
+        else:
+            lam = min(lam * 5.0, 1e6)
+
+        # crude stop
+        if np.linalg.norm(d) < 1e-6:
+            break
+
+    return z, hist
+
+
+def initialize_band_from_waypoints(waypoints: List[Tuple[float, float]], dt_nominal: float = 0.2) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Initialize x,y from waypoints; theta from segment headings; dt all dt_nominal.
+    """
+    pts = np.array(waypoints, dtype=float)
+    x = pts[:, 0].copy()
+    y = pts[:, 1].copy()
+    N = len(waypoints) - 1
+    th = np.zeros(N + 1, dtype=float)
+    for i in range(N):
+        th[i] = math.atan2(y[i+1] - y[i], x[i+1] - x[i])
+    th[N] = th[N-1]
+    dt = np.full(N, dt_nominal, dtype=float)
+    return x, y, th, dt
+
+
+def optimize_teb_demo() -> None:
+    """
+    Demo scenario: start -> goal, with two circular obstacles.
+    """
+    # Global path (coarse). In real stacks, this comes from the global planner.
+    waypoints = [
+        (0.0, 0.0),
+        (0.7, 0.1),
+        (1.5, 0.2),
+        (2.2, 0.1),
+        (3.0, 0.0),
+        (3.8, 0.1),
+        (4.6, 0.0),
+        (5.2, 0.0),
+    ]
+    x, y, th, dt = initialize_band_from_waypoints(waypoints, dt_nominal=0.25)
+    N = len(waypoints) - 1
+
+    obstacles = [
+        CircleObstacle(cx=2.2, cy=0.15, r=0.35),
+        CircleObstacle(cx=3.9, cy=-0.10, r=0.35),
+    ]
+
+    robot_radius = 0.22
+    d_min = 0.15
+    limits = Limits(v_max=0.8, w_max=1.4, a_max=1.0, alpha_max=2.5, dt_min=0.05, dt_max=0.60)
+    weights = Weights(
+        smooth=2.0, time=0.4, obst=6.0, v_bound=3.0, w_bound=2.0, a_bound=1.0, alpha_bound=0.8, align=0.6, dt_bound=2.0
+    )
+
+    # Fix endpoints (start and goal) by not optimizing them: simplest method is to keep them in z but
+    # overwrite after each update. This is a teaching shortcut.
+    z0 = pack_z(x, y, th, dt)
+
+    def residual_fun(z: np.ndarray) -> np.ndarray:
+        # enforce dt positivity by clipping for numerical stability (still penalized by dt bounds)
+        x_, y_, th_, dt_ = unpack_z(z, N)
+        dt_clipped = np.clip(dt_, 1e-3, 10.0)
+        zc = pack_z(x_, y_, th_, dt_clipped)
+        r = build_residuals(zc, N, obstacles, robot_radius, d_min, limits, weights)
+        return r
+
+    z_opt, hist = solve_lm(residual_fun, z0, max_iters=18, lam0=1e-2, verbose=True)
+
+    x_opt, y_opt, th_opt, dt_opt = unpack_z(z_opt, N)
+
+    print("\nOptimized dt stats:", float(np.min(dt_opt)), float(np.max(dt_opt)), "sum=", float(np.sum(dt_opt)))
+
+    # Produce an approximate first command (v0, w0) from the first segment
+    dx0 = x_opt[1] - x_opt[0]
+    dy0 = y_opt[1] - y_opt[0]
+    dth0 = wrap_angle(th_opt[1] - th_opt[0])
+    seg0 = math.hypot(dx0, dy0)
+    v0 = seg0 / max(1e-9, dt_opt[0])
+    w0 = dth0 / max(1e-9, dt_opt[0])
+    print("Approx first cmd (v,w):", v0, w0)
+
+    # Optional visualization (requires matplotlib)
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.figure()
+        plt.plot(x, y, "o--", label="init band")
+        plt.plot(x_opt, y_opt, "o-", label="optimized band")
+        for ob in obstacles:
+            ang = np.linspace(0, 2*np.pi, 200)
+            plt.plot(ob.cx + ob.r*np.cos(ang), ob.cy + ob.r*np.sin(ang), "--")
+            # also plot clearance ring
+            rr = ob.r + robot_radius + d_min
+            plt.plot(ob.cx + rr*np.cos(ang), ob.cy + rr*np.sin(ang), ":")
+        plt.axis("equal")
+        plt.grid(True)
+        plt.legend()
+        plt.title("TEB demo (educational)")
+        plt.show()
+    except Exception as e:
+        print("Plot skipped:", e)
+
+
+if __name__ == "__main__":
+    optimize_teb_demo()
+      </code></pre>
+
+      <p><strong>File:</strong> Chapter15_Lesson4_Ex1.py</p>
+      <pre><code class="language-python">
+# Chapter15_Lesson4_Ex1.py
+# Exercise: Change weights/limits and observe how the optimized band changes.
+#
+# Task:
+#   1) Increase weights.obst (e.g., from 6.0 to 15.0) and re-run.
+#   2) Decrease limits.v_max and re-run.
+#   3) Explain (in your report) how dt_i and the path deformation respond.
+
+from Chapter15_Lesson4 import optimize_teb_demo
+
+if __name__ == "__main__":
+    optimize_teb_demo()
+      </code></pre>
+
+      <h3>6.2 C++ Implementation (Eigen)</h3>
+      <p><strong>File:</strong> Chapter15_Lesson4.cpp</p>
+      <pre><code class="language-cpp">
+// Chapter15_Lesson4.cpp
+// Timed-Elastic-Band (TEB) local planning — educational implementation (2D, SE(2))
+// Dense numerical Jacobian + Levenberg–Marquardt (teaching simplicity).
+//
+// Build:
+//   g++ -O2 -std=c++17 Chapter15_Lesson4.cpp -I /path/to/eigen -o teb_demo
+//
+// Run:
+//   ./teb_demo
+//
+// NOTE: This is not a production TEB; it is a didactic optimizer consistent with the lesson math.
+
+#include <Eigen/Dense>
+#include <cmath>
+#include <iostream>
+#include <vector>
+#include <limits>
+#include <algorithm>
+
+struct CircleObstacle {
+  double cx, cy, r;
+};
+
+static double wrap_angle(double a) {
+  a = std::fmod(a + M_PI, 2.0 * M_PI);
+  if (a < 0) a += 2.0 * M_PI;
+  return a - M_PI;
+}
+
+struct Limits {
+  double v_max = 0.8;
+  double w_max = 1.4;
+  double a_max = 1.0;
+  double alpha_max = 2.5;
+  double dt_min = 0.05;
+  double dt_max = 0.60;
+};
+
+struct Weights {
+  double smooth = 2.0;
+  double time = 0.4;
+  double obst = 6.0;
+  double v_bound = 3.0;
+  double w_bound = 2.0;
+  double a_bound = 1.0;
+  double alpha_bound = 0.8;
+  double align = 0.6;
+  double dt_bound = 2.0;
+};
+
+static double dist_to_nearest_obstacle(double px, double py, const std::vector<CircleObstacle>& obs) {
+  double dmin = std::numeric_limits<double>::infinity();
+  for (const auto& o : obs) {
+    double d = std::hypot(px - o.cx, py - o.cy) - o.r;
+    dmin = std::min(dmin, d);
+  }
+  return dmin;
+}
+
+// z packs: [x0..xN, y0..yN, th0..thN, dt0..dt_{N-1}]
+static void unpack(const Eigen::VectorXd& z, int N,
+                   Eigen::VectorXd& x, Eigen::VectorXd& y, Eigen::VectorXd& th, Eigen::VectorXd& dt) {
+  x = z.segment(0, N+1);
+  y = z.segment(N+1, N+1);
+  th = z.segment(2*(N+1), N+1);
+  dt = z.segment(3*(N+1), N);
+}
+
+static Eigen::VectorXd residuals(
+  const Eigen::VectorXd& z_in,
+  int N,
+  const std::vector<CircleObstacle>& obstacles,
+  double robot_radius,
+  double d_min,
+  const Limits& lim,
+  const Weights& w
+) {
+  Eigen::VectorXd x, y, th, dt;
+  unpack(z_in, N, x, y, th, dt);
+
+  // clip dt for numerical stability (still penalized by hinge bounds)
+  for (int i = 0; i < N; ++i) dt[i] = std::clamp(dt[i], 1e-3, 10.0);
+
+  std::vector<double> r;
+  r.reserve(1000);
+
+  // smoothness (i=1..N-1)
+  double ws = std::sqrt(w.smooth);
+  for (int i = 1; i < N; ++i) {
+    double ddx = x[i+1] - 2.0*x[i] + x[i-1];
+    double ddy = y[i+1] - 2.0*y[i] + y[i-1];
+    r.push_back(ws * ddx);
+    r.push_back(ws * ddy);
+  }
+
+  // time
+  double wt = std::sqrt(w.time);
+  for (int i = 0; i < N; ++i) r.push_back(wt * dt[i]);
+
+  // dt bounds
+  double wdt = std::sqrt(w.dt_bound);
+  for (int i = 0; i < N; ++i) {
+    r.push_back(wdt * std::max(0.0, lim.dt_min - dt[i]));
+    r.push_back(wdt * std::max(0.0, dt[i] - lim.dt_max));
+  }
+
+  // v,w
+  Eigen::VectorXd v(N), om(N);
+  for (int i = 0; i < N; ++i) {
+    double dx = x[i+1] - x[i];
+    double dy = y[i+1] - y[i];
+    double dth = wrap_angle(th[i+1] - th[i]);
+    double seg = std::hypot(dx, dy);
+    v[i] = seg / std::max(1e-9, dt[i]);
+    om[i] = dth / std::max(1e-9, dt[i]);
+  }
+
+  // v bound
+  double wv = std::sqrt(w.v_bound);
+  for (int i = 0; i < N; ++i) r.push_back(wv * std::max(0.0, v[i] - lim.v_max));
+
+  // w bound
+  double ww = std::sqrt(w.w_bound);
+  for (int i = 0; i < N; ++i) r.push_back(ww * std::max(0.0, std::abs(om[i]) - lim.w_max));
+
+  // accel bounds
+  double wa = std::sqrt(w.a_bound);
+  double wal = std::sqrt(w.alpha_bound);
+  for (int i = 0; i < N-1; ++i) {
+    double dt_avg = 0.5 * (dt[i] + dt[i+1]);
+    dt_avg = std::max(1e-9, dt_avg);
+    double a_i = (v[i+1] - v[i]) / dt_avg;
+    double al_i = (om[i+1] - om[i]) / dt_avg;
+    r.push_back(wa * std::max(0.0, std::abs(a_i) - lim.a_max));
+    r.push_back(wal * std::max(0.0, std::abs(al_i) - lim.alpha_max));
+  }
+
+  // obstacle clearance
+  double wo = std::sqrt(w.obst);
+  for (int i = 0; i < N+1; ++i) {
+    double dist = dist_to_nearest_obstacle(x[i], y[i], obstacles);
+    double clearance = dist - robot_radius;
+    r.push_back(wo * std::max(0.0, d_min - clearance));
+  }
+
+  // alignment proxy
+  double wa2 = std::sqrt(w.align);
+  for (int i = 0; i < N; ++i) {
+    double dx = x[i+1] - x[i];
+    double dy = y[i+1] - y[i];
+    double phi = std::atan2(dy, dx);
+    r.push_back(wa2 * std::sin(wrap_angle(th[i] - phi)));
+  }
+
+  Eigen::VectorXd rv((int)r.size());
+  for (int i = 0; i < (int)r.size(); ++i) rv[i] = r[i];
+  return rv;
+}
+
+static Eigen::MatrixXd numerical_jacobian(
+  const std::function<Eigen::VectorXd(const Eigen::VectorXd&)>& fun,
+  const Eigen::VectorXd& z,
+  double eps = 1e-6
+) {
+  Eigen::VectorXd r0 = fun(z);
+  int m = (int)r0.size();
+  int n = (int)z.size();
+  Eigen::MatrixXd J(m, n);
+  for (int j = 0; j < n; ++j) {
+    Eigen::VectorXd zp = z;
+    zp[j] += eps;
+    Eigen::VectorXd rp = fun(zp);
+    J.col(j) = (rp - r0) / eps;
+  }
+  return J;
+}
+
+static Eigen::VectorXd solve_lm(
+  const std::function<Eigen::VectorXd(const Eigen::VectorXd&)>& fun,
+  const Eigen::VectorXd& z0,
+  int max_iters,
+  double lam0
+) {
+  Eigen::VectorXd z = z0;
+  double lam = lam0;
+
+  for (int it = 0; it < max_iters; ++it) {
+    Eigen::VectorXd r = fun(z);
+    double cost = 0.5 * r.squaredNorm();
+    std::cout << "iter=" << it << " cost=" << cost << " lam=" << lam << "\n";
+
+    Eigen::MatrixXd J = numerical_jacobian(fun, z);
+    Eigen::MatrixXd A = J.transpose() * J + lam * Eigen::MatrixXd::Identity(z.size(), z.size());
+    Eigen::VectorXd b = -J.transpose() * r;
+
+    Eigen::VectorXd d = A.ldlt().solve(b);
+    Eigen::VectorXd z_new = z + d;
+    Eigen::VectorXd r_new = fun(z_new);
+    double cost_new = 0.5 * r_new.squaredNorm();
+
+    if (cost_new < cost) {
+      z = z_new;
+      lam = std::max(lam / 2.0, 1e-9);
+    } else {
+      lam = std::min(lam * 5.0, 1e6);
+    }
+
+    if (d.norm() < 1e-6) break;
+  }
+
+  return z;
+}
+
+int main() {
+  // Coarse global path waypoints
+  std::vector<std::pair<double,double>> wp = {
+    {0.0, 0.0},
+    {0.7, 0.1},
+    {1.5, 0.2},
+    {2.2, 0.1},
+    {3.0, 0.0},
+    {3.8, 0.1},
+    {4.6, 0.0},
+    {5.2, 0.0},
+  };
+  int N = (int)wp.size() - 1;
+
+  // initialize x,y,theta,dt
+  Eigen::VectorXd x(N+1), y(N+1), th(N+1), dt(N);
+  for (int i = 0; i < N+1; ++i) { x[i] = wp[i].first; y[i] = wp[i].second; }
+  for (int i = 0; i < N; ++i) th[i] = std::atan2(y[i+1] - y[i], x[i+1] - x[i]);
+  th[N] = th[N-1];
+  dt.setConstant(0.25);
+
+  // pack z
+  Eigen::VectorXd z0(3*(N+1) + N);
+  z0 << x, y, th, dt;
+
+  std::vector<CircleObstacle> obstacles = {
+    {2.2, 0.15, 0.35},
+    {3.9, -0.10, 0.35},
+  };
+
+  double robot_radius = 0.22;
+  double d_min = 0.15;
+  Limits lim;
+  Weights w;
+
+  auto fun = [&](const Eigen::VectorXd& z) {
+    return residuals(z, N, obstacles, robot_radius, d_min, lim, w);
+  };
+
+  Eigen::VectorXd z_opt = solve_lm(fun, z0, 18, 1e-2);
+
+  Eigen::VectorXd xo, yo, tho, dto;
+  unpack(z_opt, N, xo, yo, tho, dto);
+
+  std::cout << "\nOptimized dt sum: " << dto.sum()
+            << "  min: " << dto.minCoeff()
+            << "  max: " << dto.maxCoeff() << "\n";
+
+  // approximate first cmd
+  double dx0 = xo[1] - xo[0];
+  double dy0 = yo[1] - yo[0];
+  double dth0 = wrap_angle(tho[1] - tho[0]);
+  double seg0 = std::hypot(dx0, dy0);
+  double v0 = seg0 / std::max(1e-9, dto[0]);
+  double w0 = dth0 / std::max(1e-9, dto[0]);
+  std::cout << "Approx first cmd (v,w): " << v0 << " " << w0 << "\n";
+
+  return 0;
+}
+      </code></pre>
+
+      <h3>6.3 Java Implementation (EJML)</h3>
+      <p><strong>File:</strong> Chapter15_Lesson4.java</p>
+      <pre><code class="language-java">
+// Chapter15_Lesson4.java
+// Timed-Elastic-Band (TEB) local planning — educational implementation (2D, SE(2))
+// Dense numerical Jacobian + Levenberg–Marquardt using EJML.
+//
+// Dependencies (Gradle/Maven): org.ejml:ejml-simple
+//
+// Run (conceptual):
+//   javac -cp ejml-simple.jar Chapter15_Lesson4.java
+//   java  -cp .:ejml-simple.jar Chapter15_Lesson4
+//
+// NOTE: Teaching implementation; not a production ROS TEB planner.
+
+import org.ejml.simple.SimpleMatrix;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Chapter15_Lesson4 {
+
+    static class CircleObstacle {
+        double cx, cy, r;
+        CircleObstacle(double cx, double cy, double r) { this.cx=cx; this.cy=cy; this.r=r; }
+    }
+
+    static double wrapAngle(double a) {
+        double twoPi = 2.0*Math.PI;
+        a = (a + Math.PI) % twoPi;
+        if (a < 0) a += twoPi;
+        return a - Math.PI;
+    }
+
+    static class Limits {
+        double vMax=0.8, wMax=1.4, aMax=1.0, alphaMax=2.5, dtMin=0.05, dtMax=0.60;
+    }
+
+    static class Weights {
+        double smooth=2.0, time=0.4, obst=6.0, vBound=3.0, wBound=2.0, aBound=1.0, alphaBound=0.8, align=0.6, dtBound=2.0;
+    }
+
+    // z packs: [x0..xN, y0..yN, th0..thN, dt0..dt_{N-1}]
+    static double[] residuals(double[] z, int N, List<CircleObstacle> obstacles, double robotRadius, double dMin, Limits lim, Weights w) {
+        int nPose = N+1;
+        double[] x = new double[nPose];
+        double[] y = new double[nPose];
+        double[] th = new double[nPose];
+        double[] dt = new double[N];
+
+        System.arraycopy(z, 0, x, 0, nPose);
+        System.arraycopy(z, nPose, y, 0, nPose);
+        System.arraycopy(z, 2*nPose, th, 0, nPose);
+        System.arraycopy(z, 3*nPose, dt, 0, N);
+
+        // clip dt
+        for (int i=0;i<N;i++) dt[i] = Math.max(1e-3, Math.min(10.0, dt[i]));
+
+        ArrayList<Double> r = new ArrayList<>();
+
+        // smoothness
+        double ws = Math.sqrt(w.smooth);
+        for (int i=1;i<N;i++){
+            double ddx = x[i+1] - 2.0*x[i] + x[i-1];
+            double ddy = y[i+1] - 2.0*y[i] + y[i-1];
+            r.add(ws*ddx); r.add(ws*ddy);
+        }
+
+        // time
+        double wt = Math.sqrt(w.time);
+        for (int i=0;i<N;i++) r.add(wt*dt[i]);
+
+        // dt bounds
+        double wdt = Math.sqrt(w.dtBound);
+        for (int i=0;i<N;i++){
+            r.add(wdt*Math.max(0.0, lim.dtMin - dt[i]));
+            r.add(wdt*Math.max(0.0, dt[i] - lim.dtMax));
+        }
+
+        // v,w
+        double[] v = new double[N];
+        double[] om = new double[N];
+        for (int i=0;i<N;i++){
+            double dx = x[i+1]-x[i];
+            double dy = y[i+1]-y[i];
+            double dth = wrapAngle(th[i+1]-th[i]);
+            double seg = Math.hypot(dx, dy);
+            v[i] = seg/Math.max(1e-9, dt[i]);
+            om[i] = dth/Math.max(1e-9, dt[i]);
+        }
+
+        // v bound
+        double wv = Math.sqrt(w.vBound);
+        for (int i=0;i<N;i++) r.add(wv*Math.max(0.0, v[i]-lim.vMax));
+
+        // w bound
+        double ww = Math.sqrt(w.wBound);
+        for (int i=0;i<N;i++) r.add(ww*Math.max(0.0, Math.abs(om[i])-lim.wMax));
+
+        // accel bounds
+        double wa = Math.sqrt(w.aBound);
+        double wal = Math.sqrt(w.alphaBound);
+        for (int i=0;i<N-1;i++){
+            double dtAvg = 0.5*(dt[i]+dt[i+1]);
+            dtAvg = Math.max(1e-9, dtAvg);
+            double a = (v[i+1]-v[i])/dtAvg;
+            double alpha = (om[i+1]-om[i])/dtAvg;
+            r.add(wa*Math.max(0.0, Math.abs(a)-lim.aMax));
+            r.add(wal*Math.max(0.0, Math.abs(alpha)-lim.alphaMax));
+        }
+
+        // obstacle clearance
+        double wo = Math.sqrt(w.obst);
+        for (int i=0;i<nPose;i++){
+            double dist = distToNearestObstacle(x[i], y[i], obstacles);
+            double clearance = dist - robotRadius;
+            r.add(wo*Math.max(0.0, dMin - clearance));
+        }
+
+        // alignment proxy
+        double wa2 = Math.sqrt(w.align);
+        for (int i=0;i<N;i++){
+            double dx = x[i+1]-x[i];
+            double dy = y[i+1]-y[i];
+            double phi = Math.atan2(dy, dx);
+            r.add(wa2*Math.sin(wrapAngle(th[i]-phi)));
+        }
+
+        double[] out = new double[r.size()];
+        for (int i=0;i<r.size();i++) out[i] = r.get(i);
+        return out;
+    }
+
+    static double distToNearestObstacle(double px, double py, List<CircleObstacle> obstacles){
+        double dmin = Double.POSITIVE_INFINITY;
+        for (CircleObstacle ob: obstacles){
+            double d = Math.hypot(px-ob.cx, py-ob.cy) - ob.r;
+            if (d < dmin) dmin = d;
+        }
+        return dmin;
+    }
+
+    static SimpleMatrix numericalJacobian(java.util.function.Function<double[], double[]> fun, double[] z, double eps){
+        double[] r0 = fun.apply(z);
+        int m = r0.length;
+        int n = z.length;
+        SimpleMatrix J = new SimpleMatrix(m, n);
+
+        for (int j=0;j<n;j++){
+            double[] zp = z.clone();
+            zp[j] += eps;
+            double[] rp = fun.apply(zp);
+            for (int i=0;i<m;i++){
+                J.set(i, j, (rp[i]-r0[i])/eps);
+            }
+        }
+        return J;
+    }
+
+    static double cost(double[] r){
+        double s=0;
+        for(double v: r) s += v*v;
+        return 0.5*s;
+    }
+
+    static double[] solveLM(java.util.function.Function<double[], double[]> fun, double[] z0, int maxIters, double lam0){
+        double[] z = z0.clone();
+        double lam = lam0;
+
+        for(int it=0; it<maxIters; it++){
+            double[] r = fun.apply(z);
+            double c = cost(r);
+            System.out.printf("iter=%02d cost=%.6f lam=%.3e%n", it, c, lam);
+
+            SimpleMatrix J = numericalJacobian(fun, z, 1e-6);
+            SimpleMatrix rVec = new SimpleMatrix(r.length,1,true,r);
+            SimpleMatrix A = J.transpose().mult(J).plus(SimpleMatrix.identity(z.length).scale(lam));
+            SimpleMatrix b = J.transpose().mult(rVec).scale(-1.0);
+
+            SimpleMatrix d = A.solve(b);
+            double[] zNew = z.clone();
+            for(int i=0;i<z.length;i++) zNew[i] += d.get(i,0);
+
+            double cNew = cost(fun.apply(zNew));
+            if (cNew < c){
+                z = zNew;
+                lam = Math.max(lam/2.0, 1e-9);
+            } else {
+                lam = Math.min(lam*5.0, 1e6);
+            }
+
+            double norm = 0;
+            for(int i=0;i<z.length;i++) norm += d.get(i,0)*d.get(i,0);
+            if (Math.sqrt(norm) < 1e-6) break;
+        }
+
+        return z;
+    }
+
+    public static void main(String[] args) {
+        double[][] wp = new double[][]{
+                {0.0,0.0},
+                {0.7,0.1},
+                {1.5,0.2},
+                {2.2,0.1},
+                {3.0,0.0},
+                {3.8,0.1},
+                {4.6,0.0},
+                {5.2,0.0},
+        };
+        int N = wp.length - 1;
+        int nPose = N+1;
+
+        double[] x = new double[nPose];
+        double[] y = new double[nPose];
+        double[] th = new double[nPose];
+        double[] dt = new double[N];
+
+        for(int i=0;i<nPose;i++){ x[i]=wp[i][0]; y[i]=wp[i][1]; }
+        for(int i=0;i<N;i++) th[i] = Math.atan2(y[i+1]-y[i], x[i+1]-x[i]);
+        th[N] = th[N-1];
+        for(int i=0;i<N;i++) dt[i] = 0.25;
+
+        double[] z0 = new double[3*nPose + N];
+        System.arraycopy(x,0,z0,0,nPose);
+        System.arraycopy(y,0,z0,nPose,nPose);
+        System.arraycopy(th,0,z0,2*nPose,nPose);
+        System.arraycopy(dt,0,z0,3*nPose,N);
+
+        ArrayList<CircleObstacle> obstacles = new ArrayList<>();
+        obstacles.add(new CircleObstacle(2.2, 0.15, 0.35));
+        obstacles.add(new CircleObstacle(3.9,-0.10, 0.35));
+
+        double robotRadius=0.22, dMin=0.15;
+        Limits lim = new Limits();
+        Weights w = new Weights();
+
+        java.util.function.Function<double[], double[]> fun = (zz) -> residuals(zz, N, obstacles, robotRadius, dMin, lim, w);
+
+        double[] zOpt = solveLM(fun, z0, 18, 1e-2);
+
+        // compute first cmd
+        double x0 = zOpt[0], y0p = zOpt[nPose];
+        double x1 = zOpt[1], y1p = zOpt[nPose+1];
+        double th0 = zOpt[2*nPose], th1 = zOpt[2*nPose+1];
+        double dt0 = zOpt[3*nPose];
+
+        double seg0 = Math.hypot(x1-x0, y1p-y0p);
+        double v0 = seg0/Math.max(1e-9, dt0);
+        double w0 = wrapAngle(th1-th0)/Math.max(1e-9, dt0);
+        System.out.println("Approx first cmd (v,w): " + v0 + " " + w0);
+    }
+}
+      </code></pre>
+
+      <h3>6.4 MATLAB Implementation</h3>
+      <p><strong>File:</strong> Chapter15_Lesson4.m</p>
+      <pre><code class="language-matlab">
+% Chapter15_Lesson4.m
+% Timed-Elastic-Band (TEB) local planning — educational implementation (2D, SE(2))
+% Dense numerical Jacobian + damped Gauss-Newton (LM-style).
+%
+% Run:
+%   Chapter15_Lesson4
+%
+% NOTE: Teaching implementation; not a production ROS TEB planner.
+
+function Chapter15_Lesson4()
+    waypoints = [ ...
+        0.0 0.0; ...
+        0.7 0.1; ...
+        1.5 0.2; ...
+        2.2 0.1; ...
+        3.0 0.0; ...
+        3.8 0.1; ...
+        4.6 0.0; ...
+        5.2 0.0 ];
+
+    N = size(waypoints,1) - 1;
+    x = waypoints(:,1); y = waypoints(:,2);
+    th = zeros(N+1,1);
+    for i=1:N
+        th(i) = atan2(y(i+1)-y(i), x(i+1)-x(i));
+    end
+    th(N+1) = th(N);
+    dt = 0.25*ones(N,1);
+
+    obstacles = [2.2 0.15 0.35;
+                3.9 -0.10 0.35];
+
+    robot_radius = 0.22;
+    d_min = 0.15;
+
+    limits.v_max = 0.8;
+    limits.w_max = 1.4;
+    limits.a_max = 1.0;
+    limits.alpha_max = 2.5;
+    limits.dt_min = 0.05;
+    limits.dt_max = 0.60;
+
+    weights.smooth = 2.0;
+    weights.time = 0.4;
+    weights.obst = 6.0;
+    weights.v_bound = 3.0;
+    weights.w_bound = 2.0;
+    weights.a_bound = 1.0;
+    weights.alpha_bound = 0.8;
+    weights.align = 0.6;
+    weights.dt_bound = 2.0;
+
+    z0 = pack_z(x,y,th,dt);
+
+    fun = @(z) residuals(z,N,obstacles,robot_radius,d_min,limits,weights);
+
+    [z_opt, hist] = solve_lm(fun, z0, 18, 1e-2);
+
+    [xo,yo,tho,dto] = unpack_z(z_opt,N);
+    fprintf('Optimized dt sum=%.4f min=%.4f max=%.4f\n', sum(dto), min(dto), max(dto));
+
+    % First cmd approx
+    dx0 = xo(2)-xo(1); dy0 = yo(2)-yo(1);
+    dth0 = wrap_angle(tho(2)-tho(1));
+    seg0 = hypot(dx0, dy0);
+    v0 = seg0 / max(1e-9, dto(1));
+    w0 = dth0 / max(1e-9, dto(1));
+    fprintf('Approx first cmd (v,w) = (%.4f, %.4f)\n', v0, w0);
+
+    % Plot
+    figure; hold on; grid on; axis equal;
+    plot(x,y,'o--','DisplayName','init band');
+    plot(xo,yo,'o-','DisplayName','optimized band');
+
+    thv = linspace(0, 2*pi, 200);
+    for k = 1:size(obstacles,1)
+        cx = obstacles(k,1); cy = obstacles(k,2); rr = obstacles(k,3);
+        plot(cx + rr*cos(thv), cy + rr*sin(thv), '--');
+    end
+
+    legend; title('TEB demo (educational)');
+end
+
+function a = wrap_angle(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+
+function z = pack_z(x,y,th,dt)
+    z = [x; y; th; dt];
+end
+
+function [x,y,th,dt] = unpack_z(z,N)
+    x = z(1:N+1);
+    y = z(N+2:2*(N+1));
+    th = z(2*(N+1)+1:3*(N+1));
+    dt = z(3*(N+1)+1:3*(N+1)+N);
+end
+
+function dmin = dist_to_nearest(px,py,obstacles)
+    dmin = inf;
+    for k=1:size(obstacles,1)
+        cx=obstacles(k,1); cy=obstacles(k,2); r=obstacles(k,3);
+        d = hypot(px-cx, py-cy) - r;
+        dmin = min(dmin, d);
+    end
+end
+
+function r = residuals(z,N,obstacles,robot_radius,d_min,limits,weights)
+    [x,y,th,dt] = unpack_z(z,N);
+
+    % clip dt for stability
+    dt = max(dt, 1e-3);
+    dt = min(dt, 10.0);
+
+    r = [];
+
+    % smoothness
+    ws = sqrt(weights.smooth);
+    for i=2:N
+        ddx = x(i+1) - 2*x(i) + x(i-1);
+        ddy = y(i+1) - 2*y(i) + y(i-1);
+        r(end+1,1) = ws*ddx;
+        r(end+1,1) = ws*ddy;
+    end
+
+    % time
+    wt = sqrt(weights.time);
+    for i=1:N
+        r(end+1,1) = wt*dt(i);
+    end
+
+    % dt bounds
+    wdt = sqrt(weights.dt_bound);
+    for i=1:N
+        r(end+1,1) = wdt*max(0, limits.dt_min - dt(i));
+        r(end+1,1) = wdt*max(0, dt(i) - limits.dt_max);
+    end
+
+    % v,w
+    v = zeros(N,1); om = zeros(N,1);
+    for i=1:N
+        dx = x(i+1)-x(i);
+        dy = y(i+1)-y(i);
+        dth = wrap_angle(th(i+1)-th(i));
+        seg = hypot(dx,dy);
+        v(i) = seg / max(1e-9, dt(i));
+        om(i) = dth / max(1e-9, dt(i));
+    end
+
+    % v bound
+    wv = sqrt(weights.v_bound);
+    for i=1:N
+        r(end+1,1) = wv*max(0, v(i) - limits.v_max);
+    end
+
+    % w bound
+    ww = sqrt(weights.w_bound);
+    for i=1:N
+        r(end+1,1) = ww*max(0, abs(om(i)) - limits.w_max);
+    end
+
+    % accel bounds
+    wa = sqrt(weights.a_bound);
+    wal = sqrt(weights.alpha_bound);
+    for i=1:N-1
+        dtavg = 0.5*(dt(i)+dt(i+1));
+        dtavg = max(1e-9, dtavg);
+        a = (v(i+1)-v(i))/dtavg;
+        alpha = (om(i+1)-om(i))/dtavg;
+        r(end+1,1) = wa*max(0, abs(a) - limits.a_max);
+        r(end+1,1) = wal*max(0, abs(alpha) - limits.alpha_max);
+    end
+
+    % obstacle clearance
+    wo = sqrt(weights.obst);
+    for i=1:N+1
+        dist = dist_to_nearest(x(i),y(i),obstacles);
+        clearance = dist - robot_radius;
+        r(end+1,1) = wo*max(0, d_min - clearance);
+    end
+
+    % alignment
+    wa2 = sqrt(weights.align);
+    for i=1:N
+        dx = x(i+1)-x(i);
+        dy = y(i+1)-y(i);
+        phi = atan2(dy,dx);
+        r(end+1,1) = wa2*sin(wrap_angle(th(i) - phi));
+    end
+end
+
+function J = numerical_jacobian(fun, z, eps)
+    if nargin < 3, eps = 1e-6; end
+    r0 = fun(z);
+    m = length(r0);
+    n = length(z);
+    J = zeros(m,n);
+    for j=1:n
+        zp = z; zp(j) = zp(j) + eps;
+        rp = fun(zp);
+        J(:,j) = (rp - r0)/eps;
+    end
+end
+
+function [z, hist] = solve_lm(fun, z0, max_iters, lam0)
+    z = z0;
+    lam = lam0;
+    hist.cost = zeros(max_iters,1);
+    hist.lam  = zeros(max_iters,1);
+
+    for it=1:max_iters
+        r = fun(z);
+        cost = 0.5*(r'*r);
+        hist.cost(it) = cost;
+        hist.lam(it) = lam;
+        fprintf('iter=%02d cost=%.6f lam=%.3e\n', it-1, cost, lam);
+
+        J = numerical_jacobian(fun, z, 1e-6);
+        A = J'*J + lam*eye(length(z));
+        b = -J'*r;
+
+        d = A \ b;
+        z_new = z + d;
+        r_new = fun(z_new);
+        cost_new = 0.5*(r_new'*r_new);
+
+        if cost_new < cost
+            z = z_new;
+            lam = max(lam/2, 1e-9);
+        else
+            lam = min(lam*5, 1e6);
+        end
+
+        if norm(d) < 1e-6
+            break;
+        end
+    end
+end
+      </code></pre>
+
+      <h3>6.5 Wolfram Mathematica Implementation</h3>
+      <p><strong>File:</strong> Chapter15_Lesson4.nb</p>
+      <pre><code class="language-mathematica">
+(* Chapter15_Lesson4.nb
+   Timed-Elastic-Band (TEB) local planning — educational implementation (2D, SE(2))
+   Nonlinear least squares with numerical Jacobian + LM damping (dense, for teaching).
+*)
+
+ClearAll["Global`*"];
+
+wrapAngle[a_] := Module[{x = Mod[a + Pi, 2 Pi] - Pi}, x];
+
+(* Pack/unpack z = [x0..xN, y0..yN, th0..thN, dt0..dt_{N-1}] *)
+packZ[x_, y_, th_, dt_] := Join[x, y, th, dt];
+
+unpackZ[z_, N_] := Module[{nPose = N + 1},
+  {
+    z[[1 ;; nPose]],
+    z[[nPose + 1 ;; 2 nPose]],
+    z[[2 nPose + 1 ;; 3 nPose]],
+    z[[3 nPose + 1 ;; 3 nPose + N]]
+  }
+];
+
+distToNearest[px_, py_, obstacles_] := Module[{dmin = Infinity},
+  Do[
+    With[{cx = obstacles[[k, 1]], cy = obstacles[[k, 2]], r = obstacles[[k, 3]]},
+      dmin = Min[dmin, Sqrt[(px - cx)^2 + (py - cy)^2] - r]
+    ],
+    {k, 1, Length[obstacles]}
+  ];
+  dmin
+];
+
+residuals[z_, N_, obstacles_, robotRadius_, dMin_, limits_, weights_] := Module[
+  {x, y, th, dt, ws, wt, wdt, wv, ww, wa, wal, wo, wa2, r = {}, v, om, nPose = N + 1},
+  {x, y, th, dt} = unpackZ[z, N];
+
+  dt = Clip[dt, {10^-3, 10}];
+
+  (* smoothness *)
+  ws = Sqrt[weights["smooth"]];
+  Do[
+    AppendTo[r, ws*(x[[i + 1]] - 2 x[[i]] + x[[i - 1]])];
+    AppendTo[r, ws*(y[[i + 1]] - 2 y[[i]] + y[[i - 1]])];
+    ,
+    {i, 2, N}
+  ];
+
+  (* time *)
+  wt = Sqrt[weights["time"]];
+  Do[AppendTo[r, wt*dt[[i]]], {i, 1, N}];
+
+  (* dt bounds *)
+  wdt = Sqrt[weights["dtBound"]];
+  Do[
+    AppendTo[r, wdt*Max[0, limits["dtMin"] - dt[[i]]]];
+    AppendTo[r, wdt*Max[0, dt[[i]] - limits["dtMax"]]];
+    ,
+    {i, 1, N}
+  ];
+
+  (* v, w *)
+  v = Table[
+    With[{dx = x[[i + 1]] - x[[i]], dy = y[[i + 1]] - y[[i]]},
+      Sqrt[dx^2 + dy^2]/Max[10^-9, dt[[i]]]
+    ],
+    {i, 1, N}
+  ];
+  om = Table[
+    wrapAngle[th[[i + 1]] - th[[i]]]/Max[10^-9, dt[[i]]],
+    {i, 1, N}
+  ];
+
+  (* bounds *)
+  wv = Sqrt[weights["vBound"]];
+  Do[AppendTo[r, wv*Max[0, v[[i]] - limits["vMax"]]], {i, 1, N}];
+
+  ww = Sqrt[weights["wBound"]];
+  Do[AppendTo[r, ww*Max[0, Abs[om[[i]]] - limits["wMax"]]], {i, 1, N}];
+
+  wa = Sqrt[weights["aBound"]];
+  wal = Sqrt[weights["alphaBound"]];
+  Do[
+    With[{dtavg = Max[10^-9, 0.5 (dt[[i]] + dt[[i + 1]])],
+          a = (v[[i + 1]] - v[[i]])/Max[10^-9, 0.5 (dt[[i]] + dt[[i + 1]])],
+          al = (om[[i + 1]] - om[[i]])/Max[10^-9, 0.5 (dt[[i]] + dt[[i + 1]])]
+         },
+      AppendTo[r, wa*Max[0, Abs[a] - limits["aMax"]]];
+      AppendTo[r, wal*Max[0, Abs[al] - limits["alphaMax"]]];
+    ],
+    {i, 1, N - 1}
+  ];
+
+  (* obstacle clearance *)
+  wo = Sqrt[weights["obst"]];
+  Do[
+    With[{dist = distToNearest[x[[i]], y[[i]], obstacles], clearance = dist - robotRadius},
+      AppendTo[r, wo*Max[0, dMin - clearance]];
+    ],
+    {i, 1, nPose}
+  ];
+
+  (* alignment *)
+  wa2 = Sqrt[weights["align"]];
+  Do[
+    With[{dx = x[[i + 1]] - x[[i]], dy = y[[i + 1]] - y[[i]], phi = ArcTan[dx, dy]},
+      AppendTo[r, wa2*Sin[wrapAngle[th[[i]] - phi]]];
+    ],
+    {i, 1, N}
+  ];
+
+  r
+];
+
+numericalJacobian[fun_, z_, eps_: 10^-6] := Module[{r0 = fun[z], m, n, J, zp, rp},
+  m = Length[r0]; n = Length[z];
+  J = ConstantArray[0., {m, n}];
+  Do[
+    zp = z; zp[[j]] += eps;
+    rp = fun[zp];
+    J[[All, j]] = (rp - r0)/eps;
+    ,
+    {j, 1, n}
+  ];
+  J
+];
+
+solveLM[fun_, z0_, maxIters_: 18, lam0_: 10^-2] := Module[
+  {z = z0, lam = lam0, it, r, cost, J, A, b, d, znew, costNew},
+  For[it = 0, it < maxIters, it++,
+    r = fun[z];
+    cost = 0.5 (r.r);
+    Print["iter=", it, " cost=", NumberForm[cost, {8, 6}], " lam=", ScientificForm[lam]];
+
+    J = numericalJacobian[fun, z, 10^-6];
+    A = Transpose[J].J + lam IdentityMatrix[Length[z]];
+    b = -Transpose[J].r;
+
+    d = LinearSolve[A, b];
+    znew = z + d;
+    costNew = 0.5 (fun[znew].fun[znew]);
+
+    If[costNew < cost,
+      z = znew; lam = Max[lam/2, 10^-9],
+      lam = Min[lam*5, 10^6]
+    ];
+
+    If[Norm[d] < 10^-6, Break[]];
+  ];
+  z
+];
+
+(* Demo *)
+waypoints = { {0, 0}, {0.7, 0.1}, {1.5, 0.2}, {2.2, 0.1}, {3.0, 0.0}, {3.8, 0.1}, {4.6, 0.0}, {5.2, 0.0} };
+N = Length[waypoints] - 1;
+
+x = waypoints[[All, 1]];
+y = waypoints[[All, 2]];
+th = Table[ArcTan[waypoints[[i + 1, 1]] - waypoints[[i, 1]], waypoints[[i + 1, 2]] - waypoints[[i, 2]]], {i, 1, N}];
+th = Append[th, th[[-1]]];
+dt = ConstantArray[0.25, N];
+
+obstacles = { {2.2, 0.15, 0.35}, {3.9, -0.10, 0.35} };
+robotRadius = 0.22; dMin = 0.15;
+
+limits = <|"vMax" -> 0.8, "wMax" -> 1.4, "aMax" -> 1.0, "alphaMax" -> 2.5, "dtMin" -> 0.05, "dtMax" -> 0.60|>;
+weights = <|"smooth" -> 2.0, "time" -> 0.4, "obst" -> 6.0, "vBound" -> 3.0, "wBound" -> 2.0, "aBound" -> 1.0,
+            "alphaBound" -> 0.8, "align" -> 0.6, "dtBound" -> 2.0|>;
+
+z0 = packZ[x, y, th, dt];
+fun = Function[zz, residuals[zz, N, obstacles, robotRadius, dMin, limits, weights]];
+
+zOpt = solveLM[fun, z0, 18, 10^-2];
+{xOpt, yOpt, thOpt, dtOpt} = unpackZ[zOpt, N];
+
+Print["Optimized dt sum=", Total[dtOpt], " min=", Min[dtOpt], " max=", Max[dtOpt]];
+
+Show[
+  ListLinePlot[{Transpose[{x, y}], Transpose[{xOpt, yOpt}]}, PlotMarkers -> Automatic, PlotLegends -> {"init", "opt"}],
+  Graphics@Table[
+    With[{cx = obstacles[[k, 1]], cy = obstacles[[k, 2]], rr = obstacles[[k, 3]]},
+      Circle[{cx, cy}, rr]
+    ],
+    {k, 1, Length[obstacles]}
+  ],
+  AspectRatio -> Automatic, GridLines -> Automatic, PlotLabel -> "TEB demo (educational)"
+]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+
+      <p>
+        <strong>Problem 1 (Discrete kinematic proxies):</strong>
+        For a pose sequence <strong>\( \{(x_i,y_i,\theta_i)\}_{i=0}^N \)</strong> and time gaps
+        <strong>\( \{\Delta t_i\}_{i=0}^{N-1} \)</strong>, derive the expressions for
+        <strong>\( v_i \)</strong> and <strong>\( \omega_i \)</strong> used in TEB and show that if the segment length
+        is fixed, decreasing <strong>\( \Delta t_i \)</strong> increases both <strong>\( v_i \)</strong> and the
+        penalty of any bound <strong>\( v_i &lt; v_{\max} \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong> By definition (Section 2),</p>
+      <h4 class="mathJax">
+        \[
+          v_i = \frac{\sqrt{(x_{i+1}-x_i)^2 + (y_{i+1}-y_i)^2} }{\Delta t_i}, \qquad
+          \omega_i = \frac{\mathrm{wrap}(\theta_{i+1}-\theta_i)}{\Delta t_i}.
+        \]
+      </h4>
+      <p>
+        For a fixed segment length <strong>\( s_i = \sqrt{(\Delta x_i)^2+(\Delta y_i)^2} \)</strong>,
+        we have <strong>\( v_i = s_i/\Delta t_i \)</strong>, hence
+        <strong>\( \tfrac{\partial v_i}{\partial \Delta t_i} = -s_i/\Delta t_i^2 &lt; 0 \)</strong>.
+        Therefore, decreasing <strong>\( \Delta t_i \)</strong> increases <strong>\( v_i \)</strong>, making
+        a hinge penalty <strong>\( \max(0, v_i - v_{\max}) \)</strong> more likely to activate.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Elasticity term as a discrete second derivative):</strong>
+        Consider the continuous smoothness energy <strong>\( E = \int_0^1 \|\tfrac{d^2 \mathbf{p} }{ds^2}\|^2 ds \)</strong>.
+        Show that on a uniform grid, a consistent discrete approximation is proportional to
+        <strong>\( \sum_i \|\mathbf{p}_{i+1} - 2\mathbf{p}_i + \mathbf{p}_{i-1}\|^2 \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong> Let <strong>\( s_i = i\,h \)</strong> with step <strong>\( h \)</strong>.
+        The standard centered finite difference gives
+      </p>
+      <h4 class="mathJax">
+        \[
+          \frac{d^2 \mathbf{p} }{ds^2}(s_i)
+          \approx \frac{\mathbf{p}(s_{i+1}) - 2\mathbf{p}(s_i) + \mathbf{p}(s_{i-1})}{h^2}
+          = \frac{\mathbf{p}_{i+1} - 2\mathbf{p}_i + \mathbf{p}_{i-1} }{h^2}.
+        \]
+      </h4>
+      <p>
+        Substituting into <strong>\( E \)</strong> and approximating the integral by a Riemann sum,
+        <strong>\( \int_0^1 f(s) ds \approx \sum_i f(s_i) h \)</strong>, yields
+      </p>
+      <h4 class="mathJax">
+        \[
+          E \approx \sum_i \left\|\frac{\mathbf{p}_{i+1} - 2\mathbf{p}_i + \mathbf{p}_{i-1} }{h^2}\right\|^2 h
+          = \frac{1}{h^3} \sum_i \|\mathbf{p}_{i+1} - 2\mathbf{p}_i + \mathbf{p}_{i-1}\|^2,
+        \]
+      </h4>
+      <p>
+        which is proportional (up to the constant <strong>\( 1/h^3 \)</strong>) to the discrete second-difference
+        penalty used in TEB. This is the formal link between “band elasticity” and curvature/smoothness regularization.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Normal equations in Gauss-Newton):</strong>
+        Starting from the linearized residual
+        <strong>\( \mathbf{r}(\mathbf{z}+\delta) \approx \mathbf{r} + \mathbf{J}\delta \)</strong>,
+        derive the optimality condition for <strong>\( \delta^* \)</strong> and state when the solution is unique.
+      </p>
+
+      <p><strong>Solution:</strong> From Section 4, the condition is</p>
+      <h4 class="mathJax">
+        \[
+          \mathbf{J}^\top\mathbf{J}\,\delta^* = -\mathbf{J}^\top\mathbf{r}.
+        \]
+      </h4>
+      <p>
+        The solution is unique if <strong>\( \mathbf{J}^\top\mathbf{J} \)</strong> is positive definite,
+        i.e., if <strong>\( \mathbf{J} \)</strong> has full column rank. In practice, damping
+        <strong>\( \lambda\mathbf{I} \)</strong> ensures invertibility even when the rank is deficient.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Obstacle hinge gradient intuition):</strong>
+        For a single obstacle, suppose the clearance residual is
+        <strong>\( r(\mathbf{p})=\sqrt{w_o}\max(0, d_{\min}-\bar{d}(\mathbf{p})) \)</strong>.
+        Explain why the gradient is zero when <strong>\( \bar{d}(\mathbf{p}) &gt; d_{\min} \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong>
+        If <strong>\( \bar{d}(\mathbf{p}) &gt; d_{\min} \)</strong>, then the hinge is inactive and
+        <strong>\( \max(0, d_{\min}-\bar{d})=0 \)</strong>, so the residual is constant zero in a neighborhood,
+        hence its gradient is also zero. When <strong>\( \bar{d}(\mathbf{p}) &lt; d_{\min} \)</strong>,
+        the hinge is active and the gradient follows the gradient of the distance field, pushing the trajectory away
+        from the obstacle.
+      </p>
+
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formulated TEB local planning as a sparse nonlinear least-squares problem over discrete poses and time gaps.
+        By constructing residuals for smoothness, time optimality, obstacle clearance, and kinodynamic feasibility
+        (velocity and acceleration bounds), we obtained a principled optimization view that contrasts with sampling-based
+        local planners. The key computational step is Gauss-Newton/Levenberg–Marquardt on the linearized residuals,
+        exploiting sparsity for real-time performance.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Rösmann, C., Feiten, W., Wösch, T., Hoffmann, F., &amp; Bertram, T. (2012).
+        Trajectory modification considering dynamic constraints of autonomous robots.
+        <em>Proceedings of the German Conference on Robotics (ROBOTIK)</em>, 1–6.
+      </li>
+      <li>
+        Rösmann, C., Feiten, W., Wösch, T., Hoffmann, F., &amp; Bertram, T. (2013).
+        Efficient trajectory optimization using a sparse model.
+        <em>Proceedings of the European Conference on Mobile Robots (ECMR)</em>, 138–143.
+      </li>
+      <li>
+        Rösmann, C., Hoffmann, F., &amp; Bertram, T. (2017).
+        Integrated online trajectory planning and optimization in distinctive topologies.
+        <em>Robotics and Autonomous Systems</em>, 88, 142–153.
+      </li>
+      <li>
+        Kümmerle, R., Grisetti, G., Strasdat, H., Konolige, K., &amp; Burgard, W. (2011).
+        g2o: A general framework for graph optimization.
+        <em>Proceedings of the IEEE International Conference on Robotics and Automation (ICRA)</em>, 3607–3613.
+      </li>
+      <li>
+        Persson, N., &amp; collaborators. (2023).
+        On the initialization problem for timed-elastic bands.
+        <em>IFAC-PapersOnLine</em>, 56(2), 13278–13283.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter15/Lesson3.html">
+          Lesson 3: Dynamic Window Approach (DWA)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson5.html">
+          Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="active-lesson" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

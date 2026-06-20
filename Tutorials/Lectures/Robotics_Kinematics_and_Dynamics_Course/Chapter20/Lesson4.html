@@ -1,0 +1,1893 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 20: Advanced Topics and Research Frontiers in Modeling - Lesson 4: Differentiable Physics for Robotics | Robotics Kinematics and Dynamics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 20: Advanced Topics and Research Frontiers in Modeling</h1>
+    <h3><strong>Lesson 4: Differentiable Physics for Robotics</strong></h3>
+    <p>
+      This lesson introduces differentiable physics for robotic systems: we view
+      the robot dynamics and numerical integrators as smooth maps, derive
+      forward and backward (adjoint) sensitivity equations, and show how to
+      compute analytic gradients of trajectory-level losses with respect to
+      model parameters and inputs. We emphasize discrete-time formulations
+      compatible with standard robot dynamics models and provide multi-language
+      implementations.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview of Differentiable Physics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview of Differentiable Physics</h2>
+    <div class="down-content">
+      <p>
+        In previous chapters we modeled robot dynamics using ordinary
+        differential equations (ODEs) of the form
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{x}}(t) = f\big(\mathbf{x}(t), \mathbf{u}(t),
+        \boldsymbol{\theta}\big), \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{x} \)</strong> collects joint positions and
+        velocities, <strong>\( \mathbf{u} \)</strong> contains input
+        torques/forces, and <strong>\( \boldsymbol{\theta} \)</strong> are
+        physical parameters (masses, inertias, link lengths, friction
+        coefficients, etc.). <em>Differentiable physics</em> means that both the
+        dynamics <strong>\( f \)</strong> and the numerical integration scheme
+        are treated as differentiable maps, so that trajectory-level functionals
+        such as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(\boldsymbol{\theta}, \mathbf{u}_{0:N-1}) =
+        \sum_{k=0}^{N-1} \ell_k(\mathbf{x}_k, \mathbf{u}_k, \boldsymbol{\theta})
+        + \ell_N(\mathbf{x}_N, \boldsymbol{\theta}) \]
+      </h4>
+      <p>
+        admit gradients
+        <strong>\( \nabla_{\boldsymbol{\theta}} \mathcal{L} \)</strong> and
+        <strong>\( \nabla_{\mathbf{u}_{0:N-1}} \mathcal{L} \)</strong>. These
+        gradients can be used for:
+      </p>
+      <ul>
+        <li>
+          parameter identification and model calibration (refining
+          <strong>\( \boldsymbol{\theta} \)</strong>),
+        </li>
+        <li>
+          co-design (simultaneously tuning mechanical parameters and
+          trajectories),
+        </li>
+        <li>
+          as a building block for trajectory optimization and learning-based
+          methods (in later courses).
+        </li>
+      </ul>
+      <p>
+        A typical computational loop for differentiable physics in robotics is:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  P["Model parameters theta"] --> F["Dynamics map f(x,u,theta)"]
+  F --> INT["Time integrator (discrete simulator)"]
+  INT --> TRAJ["State trajectory x_0,...,x_N"]
+  TRAJ --> LOSS["Trajectory loss L(theta,u_0,...,u_{N-1})"]
+  LOSS --> GRAD["Gradients 'dL/dtheta', 'dL/du_k'"]
+  GRAD --> OPT["Gradient-based update of theta or u_k"]
+        </pre>
+      </div>
+      <p>
+        The key mathematical question of this lesson is:
+        <em
+          >how do we compute these gradients efficiently and accurately, given a
+          robot dynamics model and an integrator?</em
+        >
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Discrete-Time Robot Dynamics as a Differentiable Map -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Discrete-Time Robot Dynamics as a Differentiable Map</h2>
+    <div class="down-content">
+      <p>
+        We operate in discrete time with sampling period
+        <strong>\( \Delta t \)</strong>. Let
+        <strong>\( \mathbf{x}_k \approx \mathbf{x}(k\Delta t) \)</strong> and
+        <strong>\( \mathbf{u}_k \approx \mathbf{u}(k\Delta t) \)</strong>. A
+        one-step numerical integrator defines a map
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \Phi\big(\mathbf{x}_k, \mathbf{u}_k,
+        \boldsymbol{\theta}\big), \quad k = 0,\dots,N-1, \]
+      </h4>
+      <p>
+        where <strong>\( \Phi \)</strong> depends on the choice of integration
+        scheme. For example, explicit Euler gives
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{x}_k + \Delta t \,
+        f\big(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}\big). \]
+      </h4>
+      <p>
+        For robot manipulators, a common continuous-time dynamics model in joint
+        coordinates is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q},\boldsymbol{\theta}) \ddot{\mathbf{q}} +
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}},\boldsymbol{\theta})
+        \dot{\mathbf{q}} + \mathbf{g}(\mathbf{q},\boldsymbol{\theta}) +
+        \mathbf{F}_d(\dot{\mathbf{q}},\boldsymbol{\theta}) =
+        \boldsymbol{\tau}(t), \]
+      </h4>
+      <p>
+        where <strong>\( \boldsymbol{\tau}(t) \)</strong> (written as &bsol;tau
+        in LaTeX) collects joint torques. Defining
+        <strong
+          >\( \mathbf{x} = [\mathbf{q}^\top, \dot{\mathbf{q}}^\top]^\top
+          \)</strong
+        >, we can write
+        <strong
+          >\( \dot{\mathbf{x}} =
+          f(\mathbf{x},\boldsymbol{\tau},\boldsymbol{\theta}) \)</strong
+        >, and thus a differentiable <strong>\( \Phi \)</strong>.
+      </p>
+      <p>
+        If <strong>\( f \)</strong> is continuously differentiable in its
+        arguments, and the integrator uses a finite composition of additions,
+        multiplications, and smooth functions, then
+        <strong>\( \Phi \)</strong> is also continuously differentiable. This
+        ensures that all Jacobians needed for gradient computation exist:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}_k := \frac{\partial \Phi}{\partial
+        \mathbf{x}_k}(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}),\quad
+        \mathbf{B}_k := \frac{\partial \Phi}{\partial
+        \boldsymbol{\theta}}(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}),\quad
+        \mathbf{G}_k := \frac{\partial \Phi}{\partial
+        \mathbf{u}_k}(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}). \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Forward Sensitivity Analysis -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Forward Sensitivity Analysis</h2>
+    <div class="down-content">
+      <p>Consider a trajectory loss functional</p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(\boldsymbol{\theta}) = \sum_{k=0}^{N-1}
+        \ell_k(\mathbf{x}_k,\boldsymbol{\theta}) +
+        \ell_N(\mathbf{x}_N,\boldsymbol{\theta}), \quad \mathbf{x}_{k+1} =
+        \Phi(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}), \]
+      </h4>
+      <p>
+        where we treat inputs <strong>\( \mathbf{u}_k \)</strong> as fixed.
+        Define the sensitivity matrices with respect to parameters:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{S}_k := \frac{\partial \mathbf{x}_k}{\partial
+        \boldsymbol{\theta}} \in \mathbb{R}^{n_x \times n_\theta}. \]
+      </h4>
+      <p>Differentiating the discrete dynamics recursion yields</p>
+      <h4 class="mathJax">
+        \[ \mathbf{S}_{k+1} = \mathbf{A}_k \mathbf{S}_k + \mathbf{B}_k, \qquad
+        \mathbf{S}_0 = \frac{\partial \mathbf{x}_0}{\partial
+        \boldsymbol{\theta}}. \]
+      </h4>
+      <p>For explicit Euler,</p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}_k = \mathbf{I} + \Delta t \frac{\partial f}{\partial
+        \mathbf{x}_k},\quad \mathbf{B}_k = \Delta t \frac{\partial f}{\partial
+        \boldsymbol{\theta}}. \]
+      </h4>
+      <p>By the chain rule,</p>
+      <h4 class="mathJax">
+        \[ \frac{\mathrm{d}\mathcal{L}}{\mathrm{d}\boldsymbol{\theta}} =
+        \sum_{k=0}^{N-1} \left( \frac{\partial \ell_k}{\partial \mathbf{x}_k}
+        \mathbf{S}_k + \frac{\partial \ell_k}{\partial \boldsymbol{\theta}}
+        \right) + \frac{\partial \ell_N}{\partial \mathbf{x}_N} \mathbf{S}_N +
+        \frac{\partial \ell_N}{\partial \boldsymbol{\theta}}. \]
+      </h4>
+      <p>
+        <strong>Complexity.</strong> Forward sensitivity scales like
+        <strong>\( \mathcal{O}(N n_x n_\theta) \)</strong>, which is acceptable
+        if the number of parameters <strong>\( n_\theta \)</strong> is small,
+        but expensive when many parameters are calibrated. Differentiable
+        physics often uses <em>adjoint methods</em> to reverse this scaling.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Discrete Adjoint (Reverse-Mode) Gradient -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Discrete Adjoint (Reverse-Mode) Gradient</h2>
+    <div class="down-content">
+      <p>
+        We derive the adjoint (discrete-time reverse-mode) method that computes
+        <strong>\( \nabla_{\boldsymbol{\theta}} \mathcal{L} \)</strong> with
+        cost <strong>\( \mathcal{O}(N n_x) \)</strong>, independent of
+        <strong>\( n_\theta \)</strong>. Introduce Lagrange multipliers
+        <strong>\( \boldsymbol{\lambda}_{k+1} \)</strong> for the dynamic
+        constraints:
+      </p>
+      <h4 class="mathJax">
+        \[ \tilde{\mathcal{L}} = \sum_{k=0}^{N-1}
+        \ell_k(\mathbf{x}_k,\boldsymbol{\theta}) +
+        \ell_N(\mathbf{x}_N,\boldsymbol{\theta}) + \sum_{k=0}^{N-1}
+        \boldsymbol{\lambda}_{k+1}^\top \big(
+        \Phi(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}) - \mathbf{x}_{k+1}
+        \big). \]
+      </h4>
+      <p>
+        Taking variations with respect to
+        <strong>\( \mathbf{x}_k \)</strong> and collecting terms yields the
+        adjoint recursion. For <strong>\( k = N \)</strong> we have
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \tilde{\mathcal{L}}}{\partial \mathbf{x}_N} =
+        \frac{\partial \ell_N}{\partial \mathbf{x}_N} -
+        \boldsymbol{\lambda}_N^\top = \mathbf{0}^\top \quad\Rightarrow\quad
+        \boldsymbol{\lambda}_N^\top = \frac{\partial \ell_N}{\partial
+        \mathbf{x}_N}. \]
+      </h4>
+      <p>
+        For intermediate steps <strong>\( k = N-1,\dots,0 \)</strong>, using the
+        chain rule gives
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\partial \tilde{\mathcal{L}}}{\partial \mathbf{x}_k} =
+        \frac{\partial \ell_k}{\partial \mathbf{x}_k} +
+        \boldsymbol{\lambda}_{k+1}^\top \mathbf{A}_k -
+        \boldsymbol{\lambda}_k^\top = \mathbf{0}^\top, \]
+      </h4>
+      <p>hence the backward recursion</p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\lambda}_k^\top = \frac{\partial \ell_k}{\partial
+        \mathbf{x}_k} + \boldsymbol{\lambda}_{k+1}^\top \mathbf{A}_k, \quad k =
+        N-1,\dots,0. \]
+      </h4>
+      <p>
+        Finally, differentiating <strong>\( \tilde{\mathcal{L}} \)</strong> with
+        respect to <strong>\( \boldsymbol{\theta} \)</strong> and using the
+        dynamics constraints gives
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\mathrm{d}\mathcal{L}}{\mathrm{d}\boldsymbol{\theta}} =
+        \sum_{k=0}^{N-1} \left( \frac{\partial \ell_k}{\partial
+        \boldsymbol{\theta}} + \boldsymbol{\lambda}_{k+1}^\top \mathbf{B}_k
+        \right) + \frac{\partial \ell_N}{\partial \boldsymbol{\theta}}. \]
+      </h4>
+      <p>
+        The computational cost is dominated by the forward rollout and the
+        backward adjoint recursion, both scaling with
+        <strong>\( N n_x^2 \)</strong> if <strong>\( \mathbf{A}_k \)</strong> is
+        dense, but independent of <strong>\( n_\theta \)</strong>.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  X0["Forward pass: x_0"] --> FWD["Propagate x_{k+1} = Phi(x_k,u_k,theta)"]
+  FWD --> TRAJ["Store trajectory x_0,...,x_N"]
+  TRAJ --> LOSS["Compute loss terms l_k, l_N"]
+  LOSS --> LAMBDA["Initialize lambda_N = dl_N/dx_N"]
+  LAMBDA --> BWD["Backward pass: lambda_k = dl_k/dx_k + A_k^T lambda_{k+1}"]
+  BWD --> GRAD["Accumulate gradient with B_k: dL/dtheta"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Example – 1-DOF Rotary Joint Parameter Gradient -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Example &mdash; 1-DOF Rotary Joint Parameter Gradient</h2>
+    <div class="down-content">
+      <p>
+        Consider a single rotary joint with inertia parameter
+        <strong>\( I \)</strong>, viscous friction <strong>\( b \)</strong>,
+        stiffness <strong>\( k \)</strong>, and input torque
+        <strong>\( \tau(t) \)</strong>. In continuous time:
+      </p>
+      <h4 class="mathJax">\[ I \ddot{q} + b \dot{q} + k q = \tau(t). \]</h4>
+      <p>
+        Let the state be <strong>\( \mathbf{x} = [q,\dot{q}]^\top \)</strong>.
+        Then
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{x}} = f(\mathbf{x},\tau,I) = \begin{bmatrix} \dot{q} \\
+        \dfrac{1}{I}\big(\tau - b \dot{q} - k q\big) \end{bmatrix}. \]
+      </h4>
+      <p>Using explicit Euler with step <strong>\( \Delta t \)</strong>:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = \mathbf{x}_k + \Delta t \,
+        f(\mathbf{x}_k,\tau_k,I). \]
+      </h4>
+      <p>
+        Suppose we have desired positions
+        <strong>\( q_k^{\mathrm{ref}} \)</strong> and define the loss
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(I) = \frac{1}{2}\sum_{k=0}^N \big(q_k -
+        q_k^{\mathrm{ref}}\big)^2 = \sum_{k=0}^N \ell_k(\mathbf{x}_k),\quad
+        \ell_k(\mathbf{x}_k) = \frac{1}{2}(q_k - q_k^{\mathrm{ref}})^2. \]
+      </h4>
+      <p>
+        We want <strong>\( \mathrm{d}\mathcal{L} / \mathrm{d}I \)</strong>. The
+        forward sensitivity matrix
+        <strong>\( \mathbf{S}_k = \partial \mathbf{x}_k / \partial I \)</strong>
+        obeys
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{S}_{k+1} = \mathbf{S}_k + \Delta t \left( \frac{\partial
+        f}{\partial \mathbf{x}_k} \mathbf{S}_k + \frac{\partial f}{\partial I}
+        \right), \quad \mathbf{S}_0 = \mathbf{0}. \]
+      </h4>
+      <p>Here</p>
+      <h4 class="mathJax">
+        \[ \frac{\partial f}{\partial I} = \begin{bmatrix} 0 \\ -
+        \dfrac{1}{I^2}\big(\tau_k - b \dot{q}_k - k q_k\big) \end{bmatrix}. \]
+      </h4>
+      <p>The gradient is then</p>
+      <h4 class="mathJax">
+        \[ \frac{\mathrm{d}\mathcal{L}}{\mathrm{d}I} = \sum_{k=0}^N
+        \frac{\partial \ell_k}{\partial \mathbf{x}_k} \mathbf{S}_k =
+        \sum_{k=0}^N (q_k - q_k^{\mathrm{ref}})\, [1\;\;0]\mathbf{S}_k. \]
+      </h4>
+      <p>
+        Alternatively, the adjoint method introduces
+        <strong
+          >\( \lambda_k = \partial \mathcal{L} / \partial \mathbf{x}_k
+          \)</strong
+        >, yielding a backward recursion and
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{\mathrm{d}\mathcal{L}}{\mathrm{d}I} = \sum_{k=0}^{N-1}
+        \boldsymbol{\lambda}_{k+1}^\top \Delta t \frac{\partial f}{\partial I}.
+        \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation – Manual and Autodiff -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Implementation &mdash; Manual and Autodiff Pipelines</h2>
+    <div class="down-content">
+      <p>
+        Python offers both manual implementations of the adjoint method and
+        automatic differentiation via libraries such as <code>jax</code>,
+        <code>torch</code>, or robotics-oriented tools like
+        <code>pinocchio</code> (for dynamics and kinematics) that can be
+        combined with autodiff backends. Below is a minimal manual adjoint
+        implementation for the 1-DOF example:
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+
+def f(x, tau, I, b=0.1, k=1.0):
+    q, dq = x
+    ddq = (tau - b * dq - k * q) / I
+    return np.array([dq, ddq])
+
+def step_euler(x, tau, I, dt):
+    return x + dt * f(x, tau, I)
+
+def rollout(x0, taus, I, dt):
+    xs = [x0]
+    for tau in taus:
+        xs.append(step_euler(xs[-1], tau, I, dt))
+    return np.array(xs)  # shape: (N+1, 2)
+
+def loss(xs, q_ref):
+    # xs[:,0] contains q
+    return 0.5 * np.sum((xs[:, 0] - q_ref)**2)
+
+def grad_I_adjoint(x0, taus, I, dt, q_ref):
+    xs = rollout(x0, taus, I, dt)
+    N = len(taus)
+    # adjoint lambdas: lambda_k in R^2
+    lambdas = np.zeros_like(xs)
+    # terminal condition
+    lambdas[N, 0] = xs[N, 0] - q_ref[N]  # d l_N / d q_N
+    # precompute A_k and dPhi/dI for explicit Euler
+    A = np.zeros((N, 2, 2))
+    dPhi_dI = np.zeros((N, 2))
+    for k in range(N):
+        q, dq = xs[k]
+        tau = taus[k]
+        # partial derivatives of f wrt x
+        # df/dq = [0, -(k/I)]
+        # df/ddq = [1, -(b/I)]
+        df_dq = np.array([0.0, -1.0 * k / I])
+        df_ddq = np.array([1.0, -1.0 * 0.1 / I])
+        Jx = np.column_stack([df_dq, df_ddq])  # 2x2
+        A[k] = np.eye(2) + dt * Jx
+        # df/dI
+        ddq = (tau - 0.1 * dq - k * q) / I
+        dddq_dI = -(tau - 0.1 * dq - k * q) / (I**2)
+        df_dI = np.array([0.0, dddq_dI])
+        dPhi_dI[k] = dt * df_dI
+    # backward adjoint recursion
+    for k in range(N - 1, -1, -1):
+        # gradient of stage loss wrt x_k
+        dL_dxk = np.zeros(2)
+        dL_dxk[0] = xs[k, 0] - q_ref[k]
+        lambdas[k] = dL_dxk + A[k].T @ lambdas[k + 1]
+    # parameter gradient
+    dL_dI = 0.0
+    for k in range(N):
+        dL_dI += lambdas[k + 1] @ dPhi_dI[k]
+    return dL_dI
+
+# Example usage
+dt = 0.01
+N = 100
+taus = np.ones(N) * 1.0
+t_grid = np.arange(N + 1) * dt
+q_ref = 0.5 * np.sin(2.0 * np.pi * t_grid)
+x0 = np.array([0.0, 0.0])
+I = 0.5
+
+xs = rollout(x0, taus, I, dt)
+print("Loss:", loss(xs, q_ref))
+print("dL/dI (adjoint):", grad_I_adjoint(x0, taus, I, dt, q_ref))
+      </code></pre>
+      <p>
+        With <code>jax</code>, we can implement the same dynamics in a
+        functional style and let autodiff compute gradients through the entire
+        rollout, effectively performing the adjoint method automatically while
+        we retain full control over the dynamics model.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation – Algorithmic Differentiation and Robotics Libraries -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      7. C++ Implementation &mdash; Algorithmic Differentiation and Robotics
+      Libraries
+    </h2>
+    <div class="down-content">
+      <p>In C++, differentiable physics is typically implemented using:</p>
+      <ul>
+        <li>
+          <em>Robotics dynamics libraries</em> (e.g., <code>Pinocchio</code>,
+          <code>RBDL</code>) to compute <strong>\( f \)</strong>, and
+        </li>
+        <li>
+          <em>algorithmic differentiation (AD)</em> tools (e.g.,
+          <code>CppAD</code>, <code>adept</code>) to obtain Jacobians and
+          gradients.
+        </li>
+      </ul>
+      <p>
+        The idea is to express one simulation step
+        <code>Phi(x,u,theta)</code> using AD types, then invoke the AD library
+        to obtain <code>dPhi/dtheta</code> or reverse-mode gradients. A skeletal
+        example with <code>CppAD</code> for the 1-DOF system is:
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;cppad/cppad.hpp&gt;
+
+using CppAD::AD;
+
+template &lt;typename Scalar&gt;
+std::vector&lt;Scalar&gt; f(const std::vector&lt;Scalar&gt;&amp; x,
+                       Scalar tau, Scalar I,
+                       Scalar b, Scalar k)
+{
+    Scalar q  = x[0];
+    Scalar dq = x[1];
+    Scalar ddq = (tau - b * dq - k * q) / I;
+    std::vector&lt;Scalar&gt; dx(2);
+    dx[0] = dq;
+    dx[1] = ddq;
+    return dx;
+}
+
+template &lt;typename Scalar&gt;
+std::vector&lt;Scalar&gt; stepEuler(const std::vector&lt;Scalar&gt;&amp; x,
+                               Scalar tau, Scalar I,
+                               Scalar b, Scalar k, Scalar dt)
+{
+    std::vector&lt;Scalar&gt; dx = f(x, tau, I, b, k);
+    std::vector&lt;Scalar&gt; xnext(2);
+    xnext[0] = x[0] + dt * dx[0];
+    xnext[1] = x[1] + dt * dx[1];
+    return xnext;
+}
+
+int main()
+{
+    using ADScalar = AD&lt;double&gt;;
+
+    // Independent variable: I (inertia parameter)
+    std::vector&lt;ADScalar&gt; I_vec(1);
+    I_vec[0] = 0.5;
+    CppAD::Independent(I_vec);
+
+    ADScalar I = I_vec[0];
+    ADScalar b = 0.1;
+    ADScalar k = 1.0;
+    ADScalar dt = 0.01;
+    ADScalar tau = 1.0;
+
+    std::vector&lt;ADScalar&gt; x(2);
+    x[0] = 0.0; // q
+    x[1] = 0.0; // dq
+
+    // Simulate N steps and accumulate loss
+    const int N = 100;
+    ADScalar L = 0.0;
+    for (int kstep = 0; kstep &lt;= N; ++kstep) {
+        ADScalar q_ref = 0.5 * CppAD::sin(2.0 * M_PI * dt * kstep);
+        ADScalar err = x[0] - q_ref;
+        L += 0.5 * err * err;
+        if (kstep &lt; N) {
+            x = stepEuler(x, tau, I, b, k, dt);
+        }
+    }
+
+    // Declare dependent variable
+    std::vector&lt;ADScalar&gt; L_vec(1);
+    L_vec[0] = L;
+    CppAD::ADFun&lt;double&gt; tape(I_vec, L_vec);
+
+    // Compute dL/dI at I = 0.5
+    std::vector&lt;double&gt; I_val(1), grad(1);
+    I_val[0] = 0.5;
+    grad = tape.Jacobian(I_val); // since output dimension is 1
+    std::cout &lt;&lt; "Loss gradient dL/dI = " &lt;&lt; grad[0] &lt;&lt; std::endl;
+
+    return 0;
+}
+      </code></pre>
+      <p>
+        For multi-DOF robots, one typically uses a library like
+        <code>Pinocchio</code> to compute the dynamics and wraps the state and
+        parameters in AD types, letting the AD tool perform reverse-mode
+        differentiation through the entire simulation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation – Differentiable Simulation with Linear Algebra Libraries -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      8. Java Implementation &mdash; Differentiable Simulation via Linear
+      Algebra Libraries
+    </h2>
+    <div class="down-content">
+      <p>
+        Java has mature linear algebra libraries such as <code>EJML</code> and
+        numerical libraries that can be combined with:
+      </p>
+      <ul>
+        <li>manual implementation of forward/adjoint recursions, or</li>
+        <li>
+          automatic differentiation frameworks (e.g., <code>ND4J</code>, custom
+          reverse-mode).
+        </li>
+      </ul>
+      <p>
+        The following simplified example illustrates manual forward sensitivity
+        for the 1-DOF system using plain Java arrays (for clarity). In practice
+        one would use matrix classes from EJML:
+      </p>
+      <pre><code class="language-java">
+public class DifferentiablePendulum {
+
+    static double[] f(double[] x, double tau, double I,
+                      double b, double k) {
+        double q = x[0];
+        double dq = x[1];
+        double ddq = (tau - b * dq - k * q) / I;
+        return new double[]{dq, ddq};
+    }
+
+    static double[] stepEuler(double[] x, double tau, double I,
+                              double b, double k, double dt) {
+        double[] dx = f(x, tau, I, b, k);
+        return new double[]{
+            x[0] + dt * dx[0],
+            x[1] + dt * dx[1]
+        };
+    }
+
+    public static void main(String[] args) {
+        double dt = 0.01;
+        int N = 100;
+        double I = 0.5;
+        double b = 0.1;
+        double k = 1.0;
+        double tau = 1.0;
+
+        double[] x = new double[]{0.0, 0.0};
+        double[][] xTraj = new double[N + 1][2];
+        xTraj[0] = x.clone();
+
+        // Forward rollout
+        for (int kstep = 0; kstep &lt; N; ++kstep) {
+            x = stepEuler(x, tau, I, b, k, dt);
+            xTraj[kstep + 1] = x.clone();
+        }
+
+        // Simple reference trajectory
+        double[] qRef = new double[N + 1];
+        for (int kstep = 0; kstep &lt;= N; ++kstep) {
+            double t = dt * kstep;
+            qRef[kstep] = 0.5 * Math.sin(2.0 * Math.PI * t);
+        }
+
+        // Forward sensitivity S_k = d x_k / dI (2x1 vector)
+        double[][] S = new double[N + 1][2];
+        S[0][0] = 0.0;
+        S[0][1] = 0.0;
+
+        for (int kstep = 0; kstep &lt; N; ++kstep) {
+            double q = xTraj[kstep][0];
+            double dq = xTraj[kstep][1];
+
+            // Jacobian of f wrt x
+            double df_dq0 = 0.0;
+            double df_dq1 = -k / I;
+            double df_ddq0 = 1.0;
+            double df_ddq1 = -b / I;
+
+            // Jx * S_k
+            double JxS0 = df_dq0 * S[kstep][0] + df_ddq0 * S[kstep][1];
+            double JxS1 = df_dq1 * S[kstep][0] + df_ddq1 * S[kstep][1];
+
+            // df/dI
+            double num = tau - b * dq - k * q;
+            double dddq_dI = -num / (I * I);
+            double df_dI0 = 0.0;
+            double df_dI1 = dddq_dI;
+
+            S[kstep + 1][0] = S[kstep][0] + dt * (JxS0 + df_dI0);
+            S[kstep + 1][1] = S[kstep][1] + dt * (JxS1 + df_dI1);
+        }
+
+        // Gradient dL/dI
+        double dLdI = 0.0;
+        for (int kstep = 0; kstep &lt;= N; ++kstep) {
+            double q = xTraj[kstep][0];
+            double err = q - qRef[kstep];
+            dLdI += err * S[kstep][0]; // only q-component
+        }
+
+        System.out.println("Gradient dL/dI = " + dLdI);
+    }
+}
+      </code></pre>
+      <p>
+        This implementation mirrors the continuous-time sensitivity derivation
+        and shows that Java can host differentiable physics computations using
+        only basic language features plus a linear algebra package.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink Implementation – Symbolic and Simulation-Based -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      9. MATLAB/Simulink Implementation &mdash; Symbolic and Simulation-Based
+    </h2>
+    <div class="down-content">
+      <p>
+        In MATLAB, differentiable physics can be approached in (at least) two
+        complementary ways:
+      </p>
+      <ol>
+        <li>
+          <strong>Symbolic differentiation</strong> of the dynamics using the
+          Symbolic Math Toolbox, then generating efficient numeric functions for
+          simulation and gradients.
+        </li>
+        <li>
+          <strong>Simulink-based sensitivity analysis</strong>, using Simscape
+          Multibody for the physics and Simulink Design Optimization /
+          linearization tools to compute sensitivities of outputs to physical
+          parameters.
+        </li>
+      </ol>
+      <p>A symbolic example for the 1-DOF system:</p>
+      <pre><code class="language-matlab">
+syms q dq I b k tau real
+x = [q; dq];
+
+f = [dq;
+     (tau - b*dq - k*q)/I];
+
+% Jacobians needed for sensitivities
+A = jacobian(f, x);   % df/dx
+B = jacobian(f, I);   % df/dI
+
+disp('A(q,dq,I) = ');
+disp(A);
+disp('B(q,dq,I) = ');
+disp(B);
+
+% Generate numeric functions for use in simulation loops
+matlabFunction(f, 'File', 'f_pendulum', 'Vars', {q, dq, tau, I, b, k});
+matlabFunction(A, 'File', 'A_pendulum', 'Vars', {q, dq, tau, I, b, k});
+matlabFunction(B, 'File', 'B_pendulum', 'Vars', {q, dq, tau, I, b, k});
+      </code></pre>
+      <p>
+        These generated functions can be called from a numeric script that
+        unrolls the dynamics and the forward or adjoint recursions. For
+        multi-body robots, one can use the Robotics System Toolbox or custom
+        symbolic derivations of <strong>\( \mathbf{M}(\mathbf{q}) \)</strong>,
+        <strong>\( \mathbf{C}(\mathbf{q},\dot{\mathbf{q}}) \)</strong>, and
+        <strong>\( \mathbf{g}(\mathbf{q}) \)</strong>, and differentiate them
+        with respect to inertial parameters.
+      </p>
+      <p>
+        In Simulink, differentiable physics is realized by constructing a
+        Simscape Multibody model of the robot, marking physical parameters
+        (masses, inertias) as tunable, and using built-in tools to compute
+        gradients of cost functionals (tracking error, energy, etc.) with
+        respect to these parameters. This is conceptually equivalent to the
+        discrete adjoint method derived earlier.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation – Symbolic and Numeric Adjoint -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      10. Wolfram Mathematica Implementation &mdash; Symbolic and Numeric
+      Adjoint
+    </h2>
+    <div class="down-content">
+      <p>
+        Wolfram Mathematica is well suited for differentiable physics because it
+        treats symbolic and numeric computations in a unified framework. One can
+        define the dynamics symbolically, solve or numerically integrate the
+        system, and then differentiate a loss functional with respect to
+        parameters using <code>D</code> or <code>Grad</code>.
+      </p>
+      <pre><code class="language-mathematica">
+(* 1-DOF rotary system *)
+ClearAll["Global`*"];
+q[t_]; dq[t_];
+
+params = {I, b, k};
+tau[t_] := 1.0;
+
+eq = {
+  q'[t] == dq[t],
+  dq'[t] == (tau[t] - b*dq[t] - k*q[t])/I
+};
+
+ic = {q[0] == 0, dq[0] == 0};
+tmax = 1.0;
+
+sol = NDSolve[
+  Join[eq, ic],
+  {q, dq},
+  {t, 0, tmax},
+  Method -&gt; "StiffnessSwitching"
+][[1]];
+
+qFun[t_, I_?NumericQ, b_?NumericQ, k_?NumericQ] :=
+  Evaluate[q[t] /. sol /. {I -&gt; I, b -&gt; b, k -&gt; k}];
+
+(* Reference and loss functional *)
+qRef[t_] := 0.5*Sin[2*Pi*t];
+
+L[I_, b_, k_] := NIntegrate[
+  0.5*(qFun[t, I, b, k] - qRef[t])^2,
+  {t, 0, tmax}
+];
+
+(* Gradient with respect to parameters *)
+gradL[I0_, b0_, k0_] :=
+  Grad[L[I, b, k], {I, b, k}] /. {I -&gt; I0, b -&gt; b0, k -&gt; k0};
+
+(* Example evaluation *)
+gradVal = gradL[0.5, 0.1, 1.0];
+gradVal
+      </code></pre>
+      <p>
+        For higher-dimensional robots, Mathematica can symbolically derive the
+        manipulator equations via Lagrange's method, automatically compute
+        Jacobians and sensitivity equations, and export optimized C or C++ code
+        for embedded differentiable physics computations.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+
+    <p>
+      <strong>Problem 1 (Forward Sensitivity Recursion):</strong>
+      Consider a discrete-time system
+      <strong
+        >\( \mathbf{x}_{k+1} = \Phi(\mathbf{x}_k,\boldsymbol{\theta}) \)</strong
+      >, <strong>\( k = 0,\dots,N-1 \)</strong>, with parameter vector
+      <strong>\( \boldsymbol{\theta} \in \mathbb{R}^{n_\theta} \)</strong>. Show
+      that the sensitivity matrices
+      <strong
+        >\( \mathbf{S}_k = \partial \mathbf{x}_k / \partial \boldsymbol{\theta}
+        \)</strong
+      >
+      satisfy
+    </p>
+    <h4 class="mathJax">
+      \[ \mathbf{S}_{k+1} = \mathbf{A}_k \mathbf{S}_k + \mathbf{B}_k,\quad
+      \mathbf{A}_k = \frac{\partial \Phi}{\partial \mathbf{x}_k},\quad
+      \mathbf{B}_k = \frac{\partial \Phi}{\partial \boldsymbol{\theta}}. \]
+    </h4>
+    <p><strong>Solution:</strong></p>
+    <p>
+      By differentiating the recursion with respect to
+      <strong>\( \boldsymbol{\theta} \)</strong>:
+    </p>
+    <h4 class="mathJax">
+      \[ \frac{\partial \mathbf{x}_{k+1}}{\partial \boldsymbol{\theta}} =
+      \frac{\partial \Phi}{\partial \mathbf{x}_k} \frac{\partial
+      \mathbf{x}_k}{\partial \boldsymbol{\theta}} + \frac{\partial
+      \Phi}{\partial \boldsymbol{\theta}} = \mathbf{A}_k \mathbf{S}_k +
+      \mathbf{B}_k. \]
+    </h4>
+    <p>
+      This uses the multivariate chain rule with
+      <strong
+        >\( \mathbf{x}_{k+1} =
+        \Phi(\mathbf{x}_k(\boldsymbol{\theta}),\boldsymbol{\theta}) \)</strong
+      >. The initial sensitivity follows from
+      <strong>\( \mathbf{x}_0 \)</strong>'s dependence on
+      <strong>\( \boldsymbol{\theta} \)</strong>.
+    </p>
+
+    <p>
+      <strong>Problem 2 (Adjoint Recursion Derivation):</strong>
+      For the loss
+      <strong
+        >\( \mathcal{L} = \sum_{k=0}^{N-1} \ell_k(\mathbf{x}_k) +
+        \ell_N(\mathbf{x}_N) \)</strong
+      >
+      subject to
+      <strong
+        >\( \mathbf{x}_{k+1} = \Phi(\mathbf{x}_k,\boldsymbol{\theta}) \)</strong
+      >, derive the adjoint recursion
+    </p>
+    <h4 class="mathJax">
+      \[ \boldsymbol{\lambda}_N^\top = \frac{\partial \ell_N}{\partial
+      \mathbf{x}_N},\quad \boldsymbol{\lambda}_k^\top = \frac{\partial
+      \ell_k}{\partial \mathbf{x}_k} + \boldsymbol{\lambda}_{k+1}^\top
+      \mathbf{A}_k, \quad k = N-1,\dots,0. \]
+    </h4>
+    <p><strong>Solution:</strong></p>
+    <p>Define the augmented functional</p>
+    <h4 class="mathJax">
+      \[ \tilde{\mathcal{L}} = \sum_{k=0}^{N-1} \ell_k(\mathbf{x}_k) +
+      \ell_N(\mathbf{x}_N) + \sum_{k=0}^{N-1} \boldsymbol{\lambda}_{k+1}^\top
+      \big(\Phi(\mathbf{x}_k,\boldsymbol{\theta}) - \mathbf{x}_{k+1}\big). \]
+    </h4>
+    <p>
+      Setting the gradient of <strong>\( \tilde{\mathcal{L}} \)</strong> with
+      respect to each <strong>\( \mathbf{x}_k \)</strong> to zero gives
+      necessary conditions. For <strong>\( k = N \)</strong>, only
+      <strong>\( \ell_N \)</strong> and the constraint term with
+      <strong>\( \mathbf{x}_N \)</strong> appear, yielding
+      <strong
+        >\( \partial \ell_N / \partial \mathbf{x}_N -
+        \boldsymbol{\lambda}_N^\top = \mathbf{0}^\top \)</strong
+      >. For <strong>\( k &lt; N \)</strong>, differentiating the
+      <strong>\( k \)</strong>-th stage loss and the two constraint terms
+      involving <strong>\( \mathbf{x}_k \)</strong> gives
+    </p>
+    <h4 class="mathJax">
+      \[ \frac{\partial \tilde{\mathcal{L}}}{\partial \mathbf{x}_k} =
+      \frac{\partial \ell_k}{\partial \mathbf{x}_k} +
+      \boldsymbol{\lambda}_{k+1}^\top \mathbf{A}_k - \boldsymbol{\lambda}_k^\top
+      = \mathbf{0}^\top, \]
+    </h4>
+    <p>from which the adjoint recursion follows.</p>
+
+    <p>
+      <strong>Problem 3 (Gradient with Respect to Inputs):</strong>
+      Extend the adjoint derivation to compute
+      <strong>\( \partial \mathcal{L} / \partial \mathbf{u}_k \)</strong> for a
+      system
+      <strong
+        >\( \mathbf{x}_{k+1} =
+        \Phi(\mathbf{x}_k,\mathbf{u}_k,\boldsymbol{\theta}) \)</strong
+      >
+      and loss
+      <strong
+        >\( \mathcal{L} = \sum_k \ell_k(\mathbf{x}_k,\mathbf{u}_k) +
+        \ell_N(\mathbf{x}_N) \)</strong
+      >. Express
+      <strong>\( \partial \mathcal{L} / \partial \mathbf{u}_k \)</strong> in
+      terms of adjoints and partial derivatives of <strong>\( \Phi \)</strong>.
+    </p>
+    <p><strong>Solution:</strong></p>
+    <p>
+      The adjoint recursion is unchanged:
+      <strong
+        >\( \boldsymbol{\lambda}_N^\top = \partial \ell_N / \partial
+        \mathbf{x}_N \)</strong
+      >,
+      <strong
+        >\( \boldsymbol{\lambda}_k^\top = \partial \ell_k / \partial
+        \mathbf{x}_k + \boldsymbol{\lambda}_{k+1}^\top \mathbf{A}_k \)</strong
+      >. Differentiating the augmented functional with respect to
+      <strong>\( \mathbf{u}_k \)</strong> gives
+    </p>
+    <h4 class="mathJax">
+      \[ \frac{\partial \mathcal{L}}{\partial \mathbf{u}_k} = \frac{\partial
+      \ell_k}{\partial \mathbf{u}_k} + \boldsymbol{\lambda}_{k+1}^\top
+      \frac{\partial \Phi}{\partial \mathbf{u}_k} = \frac{\partial
+      \ell_k}{\partial \mathbf{u}_k} + \boldsymbol{\lambda}_{k+1}^\top
+      \mathbf{G}_k. \]
+    </h4>
+    <p>
+      This is the discrete analogue of the continuous-time Pontryagin maximum
+      principle.
+    </p>
+
+    <p>
+      <strong>Problem 4 (Complexity Comparison):</strong>
+      Assume <strong>\( \mathbf{x} \in \mathbb{R}^{n_x} \)</strong>,
+      <strong>\( \boldsymbol{\theta} \in \mathbb{R}^{n_\theta} \)</strong>, and
+      simulation horizon <strong>\( N \)</strong>. Compare the asymptotic
+      computational cost of: (a) forward sensitivity for all parameters, and (b)
+      a single backward adjoint pass. When is adjoint-based differentiable
+      physics advantageous?
+    </p>
+    <p><strong>Solution:</strong></p>
+    <p>
+      For forward sensitivities, each step updates
+      <strong>\( \mathbf{S}_k \in \mathbb{R}^{n_x \times n_\theta} \)</strong>
+      via a matrix-matrix multiplication
+      <strong>\( \mathbf{A}_k \mathbf{S}_k \)</strong> and an addition with
+      <strong>\( \mathbf{B}_k \)</strong>. This costs
+      <strong>\( \mathcal{O}(n_x^2 n_\theta) \)</strong> per step or
+      <strong>\( \mathcal{O}(N n_x^2 n_\theta) \)</strong> overall. The adjoint
+      method stores the trajectory and propagates
+      <strong>\( \boldsymbol{\lambda}_k \in \mathbb{R}^{n_x} \)</strong>
+      backwards, costing <strong>\( \mathcal{O}(n_x^2) \)</strong> per step for
+      the matrix-vector product
+      <strong>\( \mathbf{A}_k^\top \boldsymbol{\lambda}_{k+1} \)</strong>, hence
+      <strong>\( \mathcal{O}(N n_x^2) \)</strong> overall, independent of
+      <strong>\( n_\theta \)</strong>. Thus, when
+      <strong>\( n_\theta \gg 1 \)</strong> (e.g., many inertial parameters,
+      friction parameters, or neural augmentations), adjoint-based
+      differentiable physics is far more efficient.
+    </p>
+
+    <p>
+      <strong>Problem 5 (Integrator Consistency and Gradient Accuracy):</strong>
+      Explain why using a higher-order integrator (e.g., Runge–Kutta of order 4)
+      for
+      <strong>\( \Phi \)</strong> generally improves not only the state
+      trajectory accuracy but also the gradient accuracy. What trade-offs arise
+      in differentiable physics?
+    </p>
+    <p><strong>Solution:</strong></p>
+    <p>
+      Gradients are computed by differentiating the numerical map
+      <strong>\( \Phi \)</strong>, not the continuous dynamics directly. If the
+      integrator is only first order (e.g., explicit Euler), the discrete map
+      approximates the exact flow with local error
+      <strong>\( \mathcal{O}(\Delta t^2) \)</strong>. The gradient of this
+      approximation generally has additional error of the same order, so even
+      with exact differentiation of <strong>\( \Phi \)</strong>, the resulting
+      gradients are only consistent up to the integrator's truncation error. A
+      higher-order scheme (e.g., RK4) reduces truncation error of both the state
+      and its sensitivity, making gradient-based optimization more reliable. The
+      trade-offs are:
+    </p>
+    <ul>
+      <li>
+        higher per-step computational cost (more evaluations of
+        <strong>\( f \)</strong> and Jacobians),
+      </li>
+      <li>
+        more storage if intermediate stages are required for adjoint
+        calculations, and
+      </li>
+      <li>
+        possible complications when combining with event handling or contact
+        dynamics.
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we reframed robot dynamics and numerical integrators as
+        differentiable maps, enabling analytic gradient computation of
+        trajectory-level losses with respect to both physical parameters and
+        inputs. We derived forward sensitivity equations and the discrete
+        adjoint (reverse-mode) recursion, highlighting their computational
+        trade-offs. Through a 1-DOF rotary example, we showed how these
+        gradients can be implemented manually and via automatic differentiation
+        in multiple programming languages and environments (Python, C++, Java,
+        MATLAB/Simulink, and Wolfram Mathematica). Differentiable physics thus
+        provides a rigorous bridge between classical robot modeling and modern
+        gradient-based methods for identification and design.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Marsden, J.E., &amp; West, M. (2001). Discrete mechanics and variational
+        integrators.
+        <em>Acta Numerica</em>, 10, 357&ndash;514.
+      </li>
+      <li>
+        Degrave, J., Hermans, M., Dambre, J., &amp; Wyffels, F. (2016). A
+        differentiable physics engine for deep learning in robotics.
+        <em>arXiv preprint</em> arXiv:1611.01652.
+      </li>
+      <li>
+        Hu, Y., Anderson, L., Li, T.-M., Sun, Q., Carr, N., Ragan-Kelley, J.,
+        &amp; Durand, F. (2019). ChainQueen: A real-time differentiable physical
+        simulator for soft robotics.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 6265&ndash;6271.
+      </li>
+      <li>
+        Chen, T.Q., Rubanova, Y., Bettencourt, J., &amp; Duvenaud, D. (2018).
+        Neural ordinary differential equations.
+        <em>Advances in Neural Information Processing Systems</em>, 31.
+      </li>
+      <li>
+        Ascher, U.M., &amp; Petzold, L.R. (1998).
+        <em
+          >Computer Methods for Ordinary Differential Equations and
+          Differential-Algebraic Equations</em
+        >. SIAM.
+      </li>
+      <li>
+        Betts, J.T. (1998). Survey of numerical methods for trajectory
+        optimization.
+        <em>Journal of Guidance, Control, and Dynamics</em>, 21(2),
+        193&ndash;207.
+      </li>
+      <li>
+        Bryson, A.E., &amp; Ho, Y.-C. (1975).
+        <em>Applied Optimal Control</em>. Hemisphere Publishing.
+      </li>
+      <li>
+        Pontryagin, L.S., Boltyanskii, V.G., Gamkrelidze, R.V., &amp;
+        Mishchenko, E.F. (1962).
+        <em>The Mathematical Theory of Optimal Processes</em>. Interscience
+        Publishers.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Buttons -->
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter20/Lesson3.html">
+          Lesson 3: Probabilistic Dynamics (uncertain parameters)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter20/Lesson5.html">
+          Lesson 5: Open Problems in Modeling Complex Robots
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robotics Kinematics and Dynamics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mathematical Foundations for Robot Modeling</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Linear Algebra Refresher (vectors, matrices, rank, null spaces)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Eigenvalues/Eigenvectors and Physical Meaning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Multivariable Calculus Essentials (gradients, Jacobians, Hessians)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Ordinary Differential Equations in Mechanics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Numerical Computation Practices for Robotics
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Rigid-Body Motion and Lie Groups</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rigid Bodies and Configuration Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Rotation Matrices and SO(3) Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Homogeneous Transforms and SE(3)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Exponential Coordinates and Matrix Log/Exp
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Geometric Interpretation of Lie Groups in Robotics
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Representations of Orientation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Euler Angles and Their Limitations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Axis–Angle Representation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Unit Quaternions and Interpolation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Conversions Between Representations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Practical Pitfalls (ambiguity, singularities)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Serial-Chain Kinematics Structure</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Links, Joints, and Generalized Coordinates
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Kinematic Chains and Graph Interpretation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Open-Chain vs. Closed-Chain Modeling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Kinematic Constraints and DOF Counting (Grübler/Kutzbach)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Modeling Assumptions and Their Consequences
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Forward Kinematics (FK)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Product of Exponentials (PoE) Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Denavit–Hartenberg (DH) Convention
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: FK for Standard Manipulators (2R, 3R, 6R)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: FK for Redundant Arms
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Numerical FK and Implementation Lab (Python toolbox)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Inverse Kinematics (IK)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Existence and Multiplicity of IK Solutions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Analytical IK for Common Arm Geometries
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Geometric IK Techniques
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Numerical IK (Newton–Raphson, damped least squares)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Redundancy Resolution in IK
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: IK Robustness and Practical Implementation Lab
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Differential Kinematics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Velocity Propagation in Chains
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Jacobian Derivation (PoE + DH perspectives)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: End-Effector Twist and Spatial/Body Jacobians
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Jacobian for Redundant Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Numerical Jacobian Checking (finite differences)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Singularities and Workspace Analysis</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Types of Singularities (kinematic, algorithmic)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Manipulability Measures
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Condition Numbers and Sensitivity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Workspace Computation and Visualization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Avoidance Concepts (no control laws)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Statics and Wrench Transmission</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Forces, Moments, and Wrenches in SE(3)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Virtual Work Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Jacobian Transpose Force Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: End-Effector Load Capacity Modeling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Static Equilibrium with Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Fundamentals of Robot Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Kinetic and Potential Energy in Multi-Body Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Generalized Forces and Work
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Lagrangian Formulation Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Structure of Robot Equations of Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Physical Meaning of Inertia Matrix, Coriolis, Gravity Terms
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Lagrange–Euler Dynamics for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Derivation of Equations of Motion (EoM)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Christoffel Symbols and Coriolis Matrix
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Energy Consistency and Passivity Checks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Examples: 2-DOF and 3-DOF Arms
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Symbolic vs. Numeric Derivation Lab
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Newton–Euler Recursive Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Forward Recursion (velocities/accelerations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Backward Recursion (forces/torques)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Computational Efficiency vs. Lagrange
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Implementation Lab (recursive algorithm)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Validation Against Lagrange Results
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Inertia Modeling and Parameterization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Rigid-Body Inertial Parameters
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Spatial Inertia Tensors
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Minimal vs. Full Parameter Sets
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Physical Consistency (positive definiteness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: CAD-to-Dynamics Pipelines (concept + lab)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Non-Ideal Effects in Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Joint Friction Models (Coulomb, viscous, Stribeck)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Gear Dynamics and Reflected Inertia
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Flexibility and Lumped Compliance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Actuator Saturation as a Dynamics Constraint
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Modeling Uncertainty and Error Bounds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Constrained and Closed-Chain Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Holonomic vs. Non-holonomic Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Lagrange Multipliers for Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Closed-Chain Examples (4-bar, parallel wrists)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Constraint Stabilization (Baumgarte)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Numerical Simulation of Constrained Dynamics
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Parallel Robot Kinematics and Dynamics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: FK vs. IK Roles in Parallel Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Constraint-Based Jacobians
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Singularity Types in Parallel Mechanisms
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Dynamics with Closed-Chain Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Stewart Platform Modeling
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Floating-Base and Multi-Body Robotics (Modeling Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Floating-Base Coordinates and Generalized Momenta
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Whole-Body Kinematics Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Centroidal Dynamics and Momentum Conservation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Contact Modeling as Constraints (no control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Example: Simple Legged Robot Dynamics
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Trajectory Quantities from Models</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: From Joint Trajectories to Task-Space Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Velocity/Acceleration Mapping via Jacobians
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Jerk and Smoothness Measures
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Time Parameterization Concepts (no planning algorithms)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Numerical Differentiation vs. Model-Based Differentiation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Identification and Validation of Dynamic Models</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Why Identify Parameters?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Excitation Trajectory Design (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Least Squares Parameter Estimation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Model Validation Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Practical Identification Lab with Data
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Advanced Topics and Research Frontiers in Modeling</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Geometric Mechanics View of Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Model Reduction for High-DOF Systems
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Probabilistic Dynamics (uncertain parameters)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="active-lesson" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Differentiable Physics for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Open Problems in Modeling Complex Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1772 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical) - Lesson 5: Lab: Contact-safe Control Demo | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 5: Constrained and Contact-Aware Control</h1>
+    <h3><strong>Lesson 5: Lab &mdash; Contact-safe Control Demo</strong></h3>
+    <p>
+      In this lab we implement and analyze a simple yet principled
+      <em>contact-safe controller</em> for a robot approaching a rigid
+      environment. We design a velocity-based safety filter using inequality
+      constraints, prove that it bounds the worst-case contact force under a
+      stiffness assumption, and implement it for a 1-DOF mass and for an
+      end-effector direction using effective mass. Implementations are provided
+      in Python, C++, Java, MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Scenario and Objectives -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Scenario and Objectives</h2>
+    <div class="down-content">
+      <p>
+        We consider a robot (or a 1-DOF surrogate) that moves along a known
+        <em>contact normal direction</em> toward a rigid environment (e.g., a
+        vertical wall or a tabletop). The high-level goal is to track a position
+        command that brings the end-effector to the surface, but
+        <strong>without exceeding a prescribed safe contact force</strong>.
+      </p>
+      <p>Building on previous lessons, we assume:</p>
+      <ul>
+        <li>
+          The robot dynamics and Jacobians are known (from kinematics/dynamics).
+        </li>
+        <li>
+          We already know how to generate a desired joint or task-space velocity
+          command from a standard tracking controller (e.g., PD or
+          computed-torque).
+        </li>
+        <li>
+          We know how to handle <em>inequality constraints</em> via saturation /
+          feasibility (Lesson 3).
+        </li>
+      </ul>
+      <p>
+        In this lab, we <em>wrap</em> any such nominal controller with a
+        <strong>safety filter</strong> that modifies the commanded normal
+        velocity when the robot is close to contact, such that:
+      </p>
+      <ul>
+        <li>
+          Impact velocity is bounded by a function of distance to the surface.
+        </li>
+        <li>
+          Under a worst-case environment stiffness, the peak contact force
+          cannot exceed a user-chosen limit.
+        </li>
+      </ul>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Start control cycle (k)"] --> B["Read state q(k), qdot(k)"]
+  B --> C["Compute distance d(k) to surface and normal velocity v_n(k)"]
+  C --> D["Compute safe bound v_safe(d(k))"]
+  D --> E["Get nominal command v_des(k) from tracking controller"]
+  E --> F["Apply safety filter: modify normal component to satisfy |v_n| &lt;= v_safe"]
+  F --> G["Convert to joint command (e.g., qdot_cmd)"]
+  G --> H["Send to low-level servo / simulator and log data"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: 1-DOF Contact Safety Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. One-DOF Contact Safety Model</h2>
+    <div class="down-content">
+      <p>
+        We first analyze a scalar surrogate model: a point mass of mass
+        <strong>\( m \)</strong> moving along a line toward a rigid wall at the
+        origin. Let <strong>\( x(t) &gt; 0 \)</strong> denote the distance to
+        the wall, with the wall at <strong>\( x = 0 \)</strong>. Before contact,
+        dynamics are:
+      </p>
+      <h4 class="mathJax">\[ m \ddot{x}(t) = u(t), \quad x(t)&gt;0. \]</h4>
+      <p>
+        The environment is modeled as a worst-case linear spring of stiffness
+        <strong>\( k_{\text{env}} \)</strong> when penetrated:
+      </p>
+      <h4 class="mathJax">
+        \[ F_{\text{env}}(x) = \begin{cases} 0, &amp; x \ge 0,\\ -k_{\text{env}}
+        x, &amp; x &lt; 0. \end{cases} \]
+      </h4>
+      <p>
+        Suppose the mass hits the wall with (signed) velocity
+        <strong>\( v_0 = \dot{x}(t_0^-) &lt; 0 \)</strong> at the moment
+        <strong>\( x(t_0) = 0 \)</strong>. After contact, assuming
+        <em>no control action</em> for a short time window, the dynamics become
+        a pure mass-spring system. By energy conservation:
+      </p>
+      <h4 class="mathJax">
+        \[ \frac{1}{2} m v_0^2 = \frac{1}{2} k_{\text{env}} x_{\max}^2, \]
+      </h4>
+      <p>
+        where <strong>\( x_{\max} &lt; 0 \)</strong> is the maximal penetration.
+        Taking magnitudes:
+      </p>
+      <h4 class="mathJax">
+        \[ |x_{\max}| = |v_0| \sqrt{\frac{m}{k_{\text{env}}}}. \]
+      </h4>
+      <p>The maximum contact force magnitude is:</p>
+      <h4 class="mathJax">
+        \[ F_{\max} = k_{\text{env}} |x_{\max}| = |v_0| \sqrt{m k_{\text{env}}}.
+        \]
+      </h4>
+      <p>
+        If we require that the peak force not exceed a safety threshold
+        <strong>\( F_{\text{safe}} \)</strong>, we must ensure
+      </p>
+      <h4 class="mathJax">
+        \[ F_{\max} \le F_{\text{safe}} \quad \Rightarrow \quad |v_0| \le
+        \frac{F_{\text{safe}}}{\sqrt{m k_{\text{env}}}}. \]
+      </h4>
+      <p>
+        Thus, for a given mass and environment stiffness, there is a
+        <strong>maximum safe impact speed</strong>
+        <strong>\( v_{\text{force}} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ v_{\text{force}} := \frac{F_{\text{safe}}}{\sqrt{m k_{\text{env}}}}.
+        \]
+      </h4>
+      <p>
+        This relation is the first building block of our contact-safe filter. In
+        practice, we take <strong>\( k_{\text{env}} \)</strong> as a
+        <em>worst-case upper bound</em> on environment stiffness, so that the
+        above inequality is conservative.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Distance-based Braking Constraint -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Distance-based Braking Constraint</h2>
+    <div class="down-content">
+      <p>
+        The previous bound constrains the <em>impact</em> velocity. We also want
+        to ensure that the controller can brake to (almost) zero velocity before
+        the wall from a given distance. Assume a known maximum deceleration
+        ability <strong>\( a_{\text{brake}} &gt; 0 \)</strong> (e.g. from torque
+        limits). If we adopt a simple constant-deceleration model from distance
+        <strong>\( d \)</strong>, then the stopping distance constraint is:
+      </p>
+      <h4 class="mathJax">
+        \[ d_{\text{stop}} = \frac{v^2}{2 a_{\text{brake}}} \le d \quad
+        \Rightarrow \quad |v| \le \sqrt{2 a_{\text{brake}} d}. \]
+      </h4>
+      <p>
+        Thus, if at distance <strong>\( d \)</strong> we enforce
+        <strong>\( |v| \le v_{\text{brake}}(d) \)</strong> with
+      </p>
+      <h4 class="mathJax">
+        \[ v_{\text{brake}}(d) := \sqrt{2 a_{\text{brake}} d}, \]
+      </h4>
+      <p>then the mass can, in principle, stop before reaching the wall.</p>
+      <p>
+        Combining this with the force-based bound yields a
+        <strong>distance-dependent safe velocity</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ v_{\text{safe}}(d) := \min\bigl\{ v_{\text{force}},\,
+        v_{\text{brake}}(d),\, v_{\max} \bigr\}, \]
+      </h4>
+      <p>
+        where <strong>\( v_{\max} \)</strong> is a global speed limit (e.g. from
+        hardware or performance requirements). The lab will implement a
+        controller that guarantees
+        <strong>\( |\dot{x}(t)| \le v_{\text{safe}}(x(t)) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Extension to Manipulators via Effective Mass -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Extension to Manipulators via Effective Mass</h2>
+    <div class="down-content">
+      <p>
+        For an <strong>\( n \)</strong>-DOF manipulator with joint coordinates
+        <strong>\( q \in \mathbb{R}^n \)</strong>, inertia matrix
+        <strong>\( \mathbf{M}(q) \)</strong>, and end-effector Jacobian
+        <strong>\( \mathbf{J}(q) \in \mathbb{R}^{3 \times n} \)</strong>, the
+        standard dynamics with contact wrench <strong>\( \lambda \)</strong> are
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(q)\ddot{q} + \mathbf{C}(q,\dot{q})\dot{q} + \mathbf{g}(q)
+        + \mathbf{J}(q)^\top \lambda = \boldsymbol{&bsol;tau}. \]
+      </h4>
+      <p>
+        Let <strong>\( x(q) \in \mathbb{R}^3 \)</strong> be the end-effector
+        position and <strong>\( \mathbf{J}_x(q) \)</strong> its translational
+        Jacobian so that
+        <strong>\( \dot{x} = \mathbf{J}_x(q)\dot{q} \)</strong>. For a unit
+        contact normal <strong>\( n \in \mathbb{R}^3 \)</strong>, the normal
+        component of end-effector velocity is
+      </p>
+      <h4 class="mathJax">
+        \[ v_n = n^\top \dot{x} = n^\top \mathbf{J}_x(q)\dot{q}. \]
+      </h4>
+      <p>
+        The <em>operational-space inertia matrix</em> (already introduced in
+        task-space control) is
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\Lambda}(q) =
+        \bigl(\mathbf{J}_x(q)\mathbf{M}(q)^{-1}\mathbf{J}_x(q)^\top\bigr)^{-1}.
+        \]
+      </h4>
+      <p>
+        The <strong>effective mass</strong> in direction
+        <strong>\( n \)</strong>
+        is the scalar
+      </p>
+      <h4 class="mathJax">
+        \[ m_{\text{eff},n}(q) := \frac{1}{n^\top
+        \mathbf{J}_x(q)\mathbf{M}(q)^{-1}\mathbf{J}_x(q)^\top n} = n^\top
+        \boldsymbol{\Lambda}(q) n. \]
+      </h4>
+      <p>
+        This scalar plays the same role as <strong>\( m \)</strong> in the 1-DOF
+        case: if the end-effector hits a spring-like environment along
+        <strong>\( n \)</strong>, the peak force is approximately
+      </p>
+      <h4 class="mathJax">
+        \[ F_{\max} \approx |v_n(t_0^-)| \sqrt{ m_{\text{eff},n}(q(t_0))\,
+        k_{\text{env}} }. \]
+      </h4>
+      <p>
+        Therefore, for a given force limit
+        <strong>\( F_{\text{safe}} \)</strong> and stiffness bound
+        <strong>\( k_{\text{env}} \)</strong>, the safe impact velocity along
+        <strong>\( n \)</strong> satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ |v_n(t_0^-)| \le v_{\text{force},n}(q(t_0)) :=
+        \frac{F_{\text{safe}}}{\sqrt{ m_{\text{eff},n}(q(t_0))\, k_{\text{env}}
+        }}. \]
+      </h4>
+      <p>
+        We will use <strong>\( v_{\text{safe}}(d,q) \)</strong> in the
+        manipulator case, combining distance-based braking and
+        configuration-dependent effective mass:
+      </p>
+      <h4 class="mathJax">
+        \[ v_{\text{safe}}(d,q) := \min\Bigl\{ v_{\text{force},n}(q),\; \sqrt{2
+        a_{\text{brake}} d},\; v_{\max} \Bigr\}. \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Safety Filter Design and Algorithm -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Safety Filter Design and Algorithm</h2>
+    <div class="down-content">
+      <p>
+        Let <strong>\( v_{\text{des}} \in \mathbb{R}^3 \)</strong> be the
+        nominal end-effector velocity produced by a tracking controller (e.g.,
+        operational-space controller from Chapter 4). We decompose it into
+        normal and tangential components:
+      </p>
+      <h4 class="mathJax">
+        \[ v_{\text{des},n} = (n^\top v_{\text{des}}) n, \quad v_{\text{des},t}
+        = v_{\text{des}} - v_{\text{des},n}. \]
+      </h4>
+      <p>
+        Suppose the robot is outside contact (<strong>\( d &gt; 0 \)</strong>)
+        and moving toward the surface, i.e.
+        <strong>\( n^\top v_{\text{des}} &lt; 0 \)</strong>. Define the scalar:
+      </p>
+      <h4 class="mathJax">
+        \[ v_n^{\text{des}} := n^\top v_{\text{des}} &lt; 0. \]
+      </h4>
+      <p>
+        We then apply a <strong>scalar saturation</strong> on the normal
+        component:
+      </p>
+      <h4 class="mathJax">
+        \[ v_n^{\text{safe}} := \max\bigl\{-v_{\text{safe}}(d,q),\,
+        v_n^{\text{des}}\bigr\}, \]
+      </h4>
+      <p>and reconstruct the filtered velocity:</p>
+      <h4 class="mathJax">
+        \[ v_{\text{safe}} = v_{\text{des},t} + v_n^{\text{safe}} n. \]
+      </h4>
+      <p>
+        If <strong>\( n^\top v_{\text{des}} \ge 0 \)</strong> (moving away from
+        the surface), we simply take
+        <strong>\( v_{\text{safe}} = v_{\text{des}} \)</strong>.
+      </p>
+      <p>
+        <strong>Guarantee (1-DOF surrogate).</strong> In the 1-DOF case (<strong
+          >\( v_{\text{safe}}(d) \)</strong
+        >
+        scalar, motion toward smaller <strong>\( x \)</strong>), if at each time
+        <strong>\( t \)</strong> we enforce
+        <strong>\( |\dot{x}(t)| \le v_{\text{safe}}(x(t)) \)</strong>, then:
+      </p>
+      <ul>
+        <li>
+          The mass cannot hit the wall with speed exceeding
+          <strong>\( v_{\text{force}} \)</strong>, hence
+          <strong>\( F_{\max} \le F_{\text{safe}} \)</strong>.
+        </li>
+        <li>
+          If the controller actually uses deceleration up to
+          <strong>\( a_{\text{brake}} \)</strong>, the mass can fully stop
+          before the wall (up to numerical tolerances).
+        </li>
+      </ul>
+      <p>
+        The manipulator case uses the same idea along the normal direction with
+        <strong>\( m_{\text{eff},n}(q) \)</strong> instead of
+        <strong>\( m \)</strong>.
+      </p>
+      <p>
+        In this lab, we implement the safety filter both for a scalar mass and
+        in a generic normal direction, and we log the resulting contact force to
+        verify the theoretical bound.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Nominal controller outputs v_des"] --> D["Compute distance d and normal n"]
+  D --> B["Compute v_safe(d,q) from force and braking limits"]
+  B --> P["Project v_des to safe v_safe: saturate normal component"]
+  P --> J["Convert v_safe to joint command (qdot_cmd = J^+ v_safe)"]
+  J --> L["Send command to robot / simulator; log x, v, F"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Discrete-Time Simulation Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Discrete-Time Simulation Model</h2>
+    <div class="down-content">
+      <p>
+        We simulate the 1-DOF system with sampling period
+        <strong>\( h \)</strong>. Let <strong>\( x_k \approx x(kh) \)</strong>,
+        <strong>\( v_k \approx \dot{x}(kh) \)</strong>. A simple explicit Euler
+        discretization is:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} v_{k+1} &amp;= v_k + \frac{h}{m} u_k,\\ x_{k+1}
+        &amp;= x_k + h v_k. \end{aligned} \]
+      </h4>
+      <p>For contact force logging we use:</p>
+      <h4 class="mathJax">
+        \[ F_k = \begin{cases} 0, &amp; x_k \ge 0,\\ -k_{\text{env}} x_k, &amp;
+        x_k &lt; 0. \end{cases} \]
+      </h4>
+      <p>The controller at step <strong>\( k \)</strong>:</p>
+      <ol>
+        <li>Compute distance <strong>\( d_k := x_k \)</strong>.</li>
+        <li>
+          Compute nominal velocity command
+          <strong>\( v_k^{\text{des}} \)</strong> (e.g. from a PD controller).
+        </li>
+        <li>
+          Compute <strong>\( v_{\text{safe}}(d_k) \)</strong> and apply the
+          scalar saturation to obtain <strong>\( v_k^{\text{safe}} \)</strong>.
+        </li>
+        <li>
+          Choose a simple velocity-tracking law, e.g.
+          <strong>\( u_k = m k_v (v_k^{\text{safe}} - v_k) \)</strong>.
+        </li>
+      </ol>
+      <p>
+        This is the core loop implemented in all code listings below (with minor
+        syntactic differences between languages).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab Implementation</h2>
+    <div class="down-content">
+      <p>
+        The Python code uses <code>numpy</code> for simulation and can be easily
+        extended to a manipulator by replacing the scalar dynamics with calls to
+        a robotics library (e.g., a custom dynamics function or a simulator).
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Physical parameters
+m = 1.0                # kg
+k_env = 5000.0         # N/m (worst-case environment stiffness)
+F_safe = 80.0          # N (allowed peak force)
+a_brake = 30.0         # m/s^2 (approx. max decel)
+v_max = 1.0            # m/s (global speed limit)
+
+# Derived parameters
+v_force = F_safe / np.sqrt(m * k_env)
+
+# Simulation parameters
+h = 0.0005             # s
+T = 1.0                # total time
+N = int(T / h)
+
+# Controller gains (nominal PD in position)
+x_target = 0.0         # wall at x=0
+k_p = 50.0
+k_d = 5.0
+k_v = 200.0            # velocity servo gain
+
+# Initial conditions
+x = 0.25               # 25 cm away from wall
+v = 0.0
+
+xs = np.zeros(N)
+vs = np.zeros(N)
+Fs = np.zeros(N)
+ts = np.linspace(0.0, T, N)
+
+for k in range(N):
+    # Distance to wall
+    d = x
+
+    # Nominal desired velocity from PD on position
+    # Negative sign moves toward the wall at x=0
+    v_des = -k_p * (x - x_target) - k_d * v
+
+    # Compute distance-based braking bound (non-negative)
+    v_brake = np.sqrt(max(0.0, 2.0 * a_brake * d))
+
+    # Safe velocity bound
+    v_safe_bound = min(v_force, v_brake, v_max)
+
+    # Apply safety filter only when moving toward wall (v_des &lt; 0)
+    if v_des &lt; -v_safe_bound:
+        v_safe_cmd = -v_safe_bound
+    else:
+        v_safe_cmd = v_des
+
+    # Simple velocity-tracking control (u = m k_v (v_safe_cmd - v))
+    u = m * k_v * (v_safe_cmd - v)
+
+    # Integrate dynamics
+    v = v + (h / m) * u
+    x = x + h * v
+
+    # Contact force model (penetration x &lt; 0)
+    F = 0.0
+    if x &lt; 0.0:
+        F = -k_env * x
+
+    xs[k] = x
+    vs[k] = v
+    Fs[k] = F
+
+# Post-simulation checks
+print("Max penetration (m):", np.min(xs))
+print("Max contact force (N):", np.max(np.abs(Fs)))
+print("Theoretical safe bound F_safe (N):", F_safe)
+
+plt.figure()
+plt.subplot(3,1,1)
+plt.plot(ts, xs)
+plt.ylabel("x [m]")
+
+plt.subplot(3,1,2)
+plt.plot(ts, vs)
+plt.ylabel("v [m/s]")
+
+plt.subplot(3,1,3)
+plt.plot(ts, Fs)
+plt.ylabel("F [N]")
+plt.xlabel("t [s]")
+plt.tight_layout()
+plt.show()
+      </code></pre>
+      <p>
+        The logged maximum force should stay below or near
+        <strong>\( F_{\text{safe}} \)</strong> (up to discretization effects),
+        illustrating the correctness of the safety filter.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation</h2>
+    <div class="down-content">
+      <p>
+        The following standalone C++ program implements the same 1-DOF lab. It
+        prints basic statistics that can be compared with the theoretical force
+        bound. In a real robot, the same logic would be placed inside the
+        real-time control loop, with sensor readings and torque commands.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;iostream&gt;
+#include &lt;cmath&gt;
+#include &lt;vector&gt;
+
+int main() {
+    // Physical parameters
+    const double m = 1.0;
+    const double k_env = 5000.0;
+    const double F_safe = 80.0;
+    const double a_brake = 30.0;
+    const double v_max = 1.0;
+
+    // Derived
+    const double v_force = F_safe / std::sqrt(m * k_env);
+
+    // Simulation
+    const double h = 0.0005;
+    const double T = 1.0;
+    const int N = static_cast&lt;int&gt;(T / h);
+
+    // Controller parameters
+    const double x_target = 0.0;
+    const double k_p = 50.0;
+    const double k_d = 5.0;
+    const double k_v = 200.0;
+
+    double x = 0.25;
+    double v = 0.0;
+
+    std::vector&lt;double&gt; xs(N), vs(N), Fs(N);
+
+    for (int k = 0; k &lt; N; ++k) {
+        double d = x;
+        double v_des = -k_p * (x - x_target) - k_d * v;
+
+        // Distance-based bound
+        double v_brake = std::sqrt(std::max(0.0, 2.0 * a_brake * d));
+        double v_safe_bound = std::min(v_force, std::min(v_brake, v_max));
+
+        double v_safe_cmd = v_des;
+        if (v_des &lt; -v_safe_bound) {
+            v_safe_cmd = -v_safe_bound;
+        }
+
+        // Velocity-tracking torque
+        double u = m * k_v * (v_safe_cmd - v);
+
+        // Integrate
+        v += (h / m) * u;
+        x += h * v;
+
+        // Contact force
+        double F = 0.0;
+        if (x &lt; 0.0) {
+            F = -k_env * x;
+        }
+
+        xs[k] = x;
+        vs[k] = v;
+        Fs[k] = F;
+    }
+
+    double max_penetration = xs[0];
+    double max_force = std::fabs(Fs[0]);
+    for (int k = 0; k &lt; N; ++k) {
+        if (xs[k] &lt; max_penetration) max_penetration = xs[k];
+        if (std::fabs(Fs[k]) &gt; max_force) max_force = std::fabs(Fs[k]);
+    }
+
+    std::cout &lt;&lt; "Max penetration (m): " &lt;&lt; max_penetration &lt;&lt; std::endl;
+    std::cout &lt;&lt; "Max contact force (N): " &lt;&lt; max_force &lt;&lt; std::endl;
+    std::cout &lt;&lt; "Theoretical bound F_safe (N): " &lt;&lt; F_safe &lt;&lt; std::endl;
+
+    return 0;
+}
+      </code></pre>
+      <p>
+        This C++ core can be integrated with a robotics framework such as ROS2,
+        with <code>x</code> and <code>v</code> replaced by measured end-effector
+        distance and normal velocity, and <code>u</code> mapped to joint torques
+        via an inverse-dynamics controller.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation</h2>
+    <div class="down-content">
+      <p>
+        In Java, we can implement the same discrete-time loop as part of a
+        simulation class. This is suitable for lab exercises using Java-based
+        simulation environments or middleware.
+      </p>
+      <pre><code class="language-java">
+public class ContactSafeLab {
+
+    public static void main(String[] args) {
+        double m = 1.0;
+        double kEnv = 5000.0;
+        double fSafe = 80.0;
+        double aBrake = 30.0;
+        double vMax = 1.0;
+
+        double vForce = fSafe / Math.sqrt(m * kEnv);
+
+        double h = 0.0005;
+        double T = 1.0;
+        int N = (int) (T / h);
+
+        double xTarget = 0.0;
+        double kP = 50.0;
+        double kD = 5.0;
+        double kV = 200.0;
+
+        double x = 0.25;
+        double v = 0.0;
+
+        double maxPenetration = x;
+        double maxForce = 0.0;
+
+        for (int k = 0; k &lt; N; k++) {
+            double d = x;
+            double vDes = -kP * (x - xTarget) - kD * v;
+
+            double vBrake = Math.sqrt(Math.max(0.0, 2.0 * aBrake * d));
+            double vSafeBound = Math.min(vForce, Math.min(vBrake, vMax));
+
+            double vSafeCmd = vDes;
+            if (vDes &lt; -vSafeBound) {
+                vSafeCmd = -vSafeBound;
+            }
+
+            double u = m * kV * (vSafeCmd - v);
+
+            v = v + (h / m) * u;
+            x = x + h * v;
+
+            double F = 0.0;
+            if (x &lt; 0.0) {
+                F = -kEnv * x;
+            }
+
+            if (x &lt; maxPenetration) {
+                maxPenetration = x;
+            }
+            if (Math.abs(F) &gt; maxForce) {
+                maxForce = Math.abs(F);
+            }
+        }
+
+        System.out.println("Max penetration (m): " + maxPenetration);
+        System.out.println("Max contact force (N): " + maxForce);
+        System.out.println("Theoretical bound F_safe (N): " + fSafe);
+    }
+}
+      </code></pre>
+      <p>
+        The lab exercise can invite students to vary
+        <code>kEnv</code>, <code>fSafe</code>, and <code>aBrake</code>, and
+        observe their effect on the resulting penetration and contact force.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        In MATLAB, we can script the simulation or implement the logic as a
+        Simulink block diagram. The code below mirrors the previous examples and
+        is easily ported to Simulink using a MATLAB Function block.
+      </p>
+      <pre><code class="language-matlab">
+% Parameters
+m      = 1.0;
+k_env  = 5000.0;
+F_safe = 80.0;
+a_brake = 30.0;
+v_max  = 1.0;
+
+v_force = F_safe / sqrt(m * k_env);
+
+h = 5e-4;
+T = 1.0;
+N = floor(T / h);
+
+x_target = 0.0;
+k_p = 50.0;
+k_d = 5.0;
+k_v = 200.0;
+
+x = 0.25;
+v = 0.0;
+
+xs = zeros(N,1);
+vs = zeros(N,1);
+Fs = zeros(N,1);
+ts = (0:N-1)' * h;
+
+for k = 1:N
+    d = x;
+    v_des = -k_p * (x - x_target) - k_d * v;
+
+    v_brake = sqrt(max(0.0, 2.0 * a_brake * d));
+    v_safe_bound = min([v_force, v_brake, v_max]);
+
+    if v_des &lt; -v_safe_bound
+        v_safe_cmd = -v_safe_bound;
+    else
+        v_safe_cmd = v_des;
+    end
+
+    u = m * k_v * (v_safe_cmd - v);
+
+    v = v + (h / m) * u;
+    x = x + h * v;
+
+    F = 0.0;
+    if x &lt; 0.0
+        F = -k_env * x;
+    end
+
+    xs(k) = x;
+    vs(k) = v;
+    Fs(k) = F;
+end
+
+fprintf("Max penetration (m): %g\n", min(xs));
+fprintf("Max contact force (N): %g\n", max(abs(Fs)));
+fprintf("Theoretical bound F_safe (N): %g\n", F_safe);
+
+figure;
+subplot(3,1,1); plot(ts, xs); ylabel('x [m]');
+subplot(3,1,2); plot(ts, vs); ylabel('v [m/s]');
+subplot(3,1,3); plot(ts, Fs); ylabel('F [N]'); xlabel('t [s]');
+      </code></pre>
+      <p>
+        In Simulink, one can implement the same logic using basic blocks:
+        integrators for <strong>\( x \)</strong> and <strong>\( v \)</strong>, a
+        MATLAB Function block for the safety filter, and a saturation block to
+        visualize the velocity bound <strong>\( v_{\text{safe}}(d) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is convenient for symbolic manipulation and numerical
+        simulation. The following code uses a simple loop with
+        <code>Table</code> to reproduce the 1-DOF lab.
+      </p>
+      <pre><code class="language-mathematica">
+m      = 1.0;
+kEnv   = 5000.0;
+fSafe  = 80.0;
+aBrake = 30.0;
+vMax   = 1.0;
+
+vForce = fSafe/Sqrt[m kEnv];
+
+h = 0.0005;
+tFinal = 1.0;
+nSteps = Floor[tFinal/h];
+
+xTarget = 0.0;
+kP = 50.0;
+kD = 5.0;
+kV = 200.0;
+
+x = 0.25;
+v = 0.0;
+
+data = Table[
+   Module[{d, vDes, vBrake, vSafeBound, vSafeCmd, u, F},
+    d = x;
+    vDes = -kP (x - xTarget) - kD v;
+    vBrake = Sqrt[Max[0.0, 2.0 aBrake d]];
+    vSafeBound = Min[vForce, vBrake, vMax];
+
+    vSafeCmd = If[vDes &lt; -vSafeBound, -vSafeBound, vDes];
+
+    u = m kV (vSafeCmd - v);
+
+    v = v + (h/m) u;
+    x = x + h v;
+
+    F = If[x &lt; 0.0, -kEnv x, 0.0];
+
+    {k h, x, v, F}
+   ],
+   {k, 0, nSteps - 1}
+];
+
+ts = data[[All,1]];
+xs = data[[All,2]];
+vs = data[[All,3]];
+Fs = data[[All,4]];
+
+Print["Max penetration (m): ", Min[xs]];
+Print["Max contact force (N): ", Max[Abs[Fs]]];
+Print["Theoretical bound F_safe (N): ", fSafe];
+
+ListLinePlot[
+  {Transpose[{ts, xs}], Transpose[{ts, vs}], Transpose[{ts, Fs}]},
+  PlotLegends -&gt; {"x(t)", "v(t)", "F(t)"}
+]
+      </code></pre>
+      <p>
+        Mathematica can also be used to symbolically verify the energy-based
+        derivations for the safe velocity bound and to explore parameter
+        sensitivities analytically.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+
+    <p>
+      <strong>Problem 1 (Force bound derivation, 1-DOF).</strong>
+      Consider the 1-DOF mass-spring impact model of Section 2 with mass
+      <strong>\( m \)</strong> and stiffness
+      <strong>\( k_{\text{env}} \)</strong>. Starting from energy conservation,
+      derive the expression
+      <strong>\( F_{\max} = |v_0|\sqrt{m k_{\text{env}}} \)</strong> and hence
+      the safe impact speed
+      <strong
+        >\( v_{\text{force}} = F_{\text{safe}} / \sqrt{m k_{\text{env}}}
+        \)</strong
+      >.
+    </p>
+    <p><strong>Solution.</strong> At impact, the kinetic energy is</p>
+    <h4 class="mathJax">\[ E_{\text{kin}} = \frac{1}{2} m v_0^2. \]</h4>
+    <p>
+      At maximum compression, velocity is zero and potential energy in the
+      spring is
+    </p>
+    <h4 class="mathJax">
+      \[ E_{\text{pot}} = \frac{1}{2} k_{\text{env}} x_{\max}^2. \]
+    </h4>
+    <p>Equating energies and solving for <strong>\( x_{\max} \)</strong>:</p>
+    <h4 class="mathJax">
+      \[ \frac{1}{2} m v_0^2 = \frac{1}{2} k_{\text{env}} x_{\max}^2 \quad
+      \Rightarrow \quad |x_{\max}| = |v_0| \sqrt{\frac{m}{k_{\text{env}}}}. \]
+    </h4>
+    <p>
+      The maximum force magnitude is
+      <strong>\( F_{\max} = k_{\text{env}} |x_{\max}| \)</strong>, giving
+    </p>
+    <h4 class="mathJax">\[ F_{\max} = |v_0|\sqrt{m k_{\text{env}}}. \]</h4>
+    <p>
+      Requiring <strong>\( F_{\max} \le F_{\text{safe}} \)</strong> yields
+      <strong>\( |v_0| \le F_{\text{safe}}/\sqrt{m k_{\text{env}}} \)</strong>
+      as claimed.
+    </p>
+
+    <p>
+      <strong>Problem 2 (Braking bound and stopping distance).</strong>
+      Assume a point mass moving along a line toward a wall with velocity
+      <strong>\( v &lt; 0 \)</strong>. Show that if the controller can enforce a
+      constant deceleration of magnitude
+      <strong>\( a_{\text{brake}} \)</strong>, then the stopping distance is
+      <strong>\( v^2 / (2 a_{\text{brake}}) \)</strong>. Hence, derive the
+      inequality <strong>\( |v| \le \sqrt{2 a_{\text{brake}} d} \)</strong> for
+      stopping before hitting the wall from distance <strong>\( d \)</strong>.
+    </p>
+    <p>
+      <strong>Solution.</strong> With constant deceleration
+      <strong>\( \ddot{x} = -a_{\text{brake}} \)</strong> and initial velocity
+      <strong>\( v \)</strong>, the kinematic relation is
+    </p>
+    <h4 class="mathJax">
+      \[ v_{\text{final}}^2 = v^2 - 2 a_{\text{brake}} \Delta x. \]
+    </h4>
+    <p>For a full stop, <strong>\( v_{\text{final}} = 0 \)</strong>, so</p>
+    <h4 class="mathJax">
+      \[ 0 = v^2 - 2 a_{\text{brake}} \Delta x \quad \Rightarrow \quad \Delta x
+      = \frac{v^2}{2 a_{\text{brake}}}. \]
+    </h4>
+    <p>
+      To stop before the wall from distance <strong>\( d \)</strong>, one needs
+      <strong>\( \Delta x \le d \)</strong>, i.e.
+    </p>
+    <h4 class="mathJax">
+      \[ \frac{v^2}{2 a_{\text{brake}}} \le d \quad \Rightarrow \quad |v| \le
+      \sqrt{2 a_{\text{brake}} d}. \]
+    </h4>
+
+    <p>
+      <strong>Problem 3 (Effective mass along a direction).</strong>
+      Let <strong>\( \mathbf{M}(q) \in \mathbb{R}^{n \times n} \)</strong> be
+      the joint-space inertia matrix and
+      <strong>\( \mathbf{J}_x(q) \in \mathbb{R}^{3 \times n} \)</strong> the
+      end-effector Jacobian. Prove that the effective mass along a unit vector
+      <strong>\( n \in \mathbb{R}^3 \)</strong> is
+      <strong
+        >\( m_{\text{eff},n}(q) = 1 / \bigl(n^\top
+        \mathbf{J}_x(q)\mathbf{M}(q)^{-1}\mathbf{J}_x(q)^\top n\bigr) \)</strong
+      >.
+    </p>
+    <p>
+      <strong>Solution.</strong> Consider a virtual motion along
+      <strong>\( n \)</strong> with scalar coordinate
+      <strong>\( s \)</strong> so that <strong>\( x = s n \)</strong>. Then
+      <strong>\( \dot{x} = \dot{s} n \)</strong> and, by chain rule:
+    </p>
+    <h4 class="mathJax">
+      \[ \dot{x} = \mathbf{J}_x(q)\dot{q} = \dot{s} n \quad \Rightarrow \quad
+      \dot{q} = \mathbf{J}_x(q)^\# (\dot{s} n), \]
+    </h4>
+    <p>
+      where <strong>\( \mathbf{J}_x(q)^\# \)</strong> is a right inverse (for
+      the purpose of energy along this direction). The kinetic energy is
+    </p>
+    <h4 class="mathJax">
+      \[ T = \frac{1}{2} \dot{q}^\top \mathbf{M}(q) \dot{q} = \frac{1}{2}
+      \dot{s}^2 n^\top \mathbf{J}_x(q)\mathbf{M}(q)^{-1}\mathbf{J}_x(q)^\top n.
+      \]
+    </h4>
+    <p>
+      By definition of effective mass along <strong>\( n \)</strong>,
+      <strong>\( T = \frac{1}{2} m_{\text{eff},n} \dot{s}^2 \)</strong>, so
+      comparing coefficients gives
+    </p>
+    <h4 class="mathJax">
+      \[ m_{\text{eff},n}(q) = \frac{1}{n^\top \mathbf{J}_x(q)\mathbf{M}(q)^{-1}
+      \mathbf{J}_x(q)^\top n}. \]
+    </h4>
+
+    <p>
+      <strong>Problem 4 (Safe velocity inequality in half-space form).</strong>
+      For a manipulator approaching a plane with normal
+      <strong>\( n \)</strong>, show that the safety filter can be interpreted
+      as projecting the nominal command
+      <strong>\( v_{\text{des}} \)</strong> onto the half-space
+      <strong>\( \{ v \mid n^\top v \ge -v_{\text{safe}}(d,q) \} \)</strong>.
+      Derive explicitly the projected velocity when the constraint is active.
+    </p>
+    <p>
+      <strong>Solution.</strong> The constraint
+      <strong>\( n^\top v \ge -v_{\text{safe}}(d,q) \)</strong> defines a
+      half-space in velocity space. If
+      <strong>\( v_{\text{des}} \)</strong> violates it, then
+      <strong>\( n^\top v_{\text{des}} &lt; -v_{\text{safe}}(d,q) \)</strong>.
+      The projection of <strong>\( v_{\text{des}} \)</strong> onto the boundary
+      hyperplane solves
+    </p>
+    <h4 class="mathJax">
+      \[ \min_{v} \|v - v_{\text{des}}\|^2 \quad \text{s.t.} \quad n^\top v =
+      -v_{\text{safe}}(d,q). \]
+    </h4>
+    <p>Introducing a Lagrange multiplier <strong>\( \lambda \)</strong>:</p>
+    <h4 class="mathJax">
+      \[ v^\star = v_{\text{des}} - \lambda n, \quad n^\top v^\star =
+      -v_{\text{safe}}(d,q). \]
+    </h4>
+    <p>
+      From the constraint,
+      <strong
+        >\( n^\top v_{\text{des}} - \lambda n^\top n = -v_{\text{safe}}(d,q)
+        \)</strong
+      >, so
+      <strong
+        >\( \lambda = \bigl(n^\top v_{\text{des}} + v_{\text{safe}}(d,q)\bigr) /
+        \|n\|^2 \)</strong
+      >. For a unit normal <strong>\( \|n\| = 1 \)</strong> this gives
+    </p>
+    <h4 class="mathJax">
+      \[ v^\star = v_{\text{des}} - \bigl(n^\top v_{\text{des}} +
+      v_{\text{safe}}(d,q)\bigr) n. \]
+    </h4>
+    <p>
+      In our implementation, we effectively constrain only the normal component
+      while keeping the tangential component unchanged, which is equivalent to
+      this orthogonal projection when <strong>\( n \)</strong> is unit length.
+    </p>
+
+    <p>
+      <strong>Problem 5 (Effect of sampling time).</strong>
+      In the discrete-time simulation of Section 6, the explicit Euler scheme
+      introduces numerical error. Explain qualitatively how too large a step
+      size
+      <strong>\( h \)</strong> could cause the measured maximum force to
+      slightly exceed the theoretical bound
+      <strong>\( F_{\text{safe}} \)</strong>, even when the continuous-time
+      inequality is satisfied.
+    </p>
+    <p>
+      <strong>Solution.</strong> The safety filter enforces
+      <strong>\( |\dot{x}(t)| \le v_{\text{safe}}(x(t)) \)</strong> only at
+      discrete instants <strong>\( t_k = kh \)</strong>. Between updates, the
+      dynamics evolve with constant control <strong>\( u_k \)</strong>, and the
+      explicit Euler scheme approximates this evolution linearly. If
+      <strong>\( h \)</strong> is large, <strong>\( x_{k+1} \)</strong> and
+      <strong>\( v_{k+1} \)</strong> may overshoot the continuous dynamics,
+      yielding a slightly higher peak velocity at contact, and thus a larger
+      force. Reducing <strong>\( h \)</strong> makes the discrete approximation
+      closer to the continuous system, so the empirical force bound converges to
+      the theoretical <strong>\( F_{\text{safe}} \)</strong>.
+    </p>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lab we designed and implemented a simple contact-safe controller
+        based on a distance-dependent velocity bound, derived from energy and
+        braking arguments. We generalized the 1-DOF analysis to manipulators via
+        effective mass along the contact normal, and we interpreted the safety
+        filter as a projection of nominal commands onto a velocity half-space.
+        Multi-language implementations illustrated how the same theoretical idea
+        can be realized in Python, C++, Java, MATLAB/Simulink, and Mathematica,
+        preparing the ground for more advanced interaction and force control
+        schemes in the next chapter.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Hogan, N. (1985). Impedance control: An approach to manipulation.
+        <em>ASME Journal of Dynamic Systems, Measurement, and Control</em>,
+        107(1), 1&ndash;24.
+      </li>
+      <li>
+        Khatib, O. (1987). A unified approach for motion and force control of
+        robot manipulators: The operational space formulation.
+        <em>IEEE Journal on Robotics and Automation</em>, 3(1), 43&ndash;53.
+      </li>
+      <li>
+        De Luca, A., &amp; Siciliano, B. (1991). Closed-form dynamic model of
+        planar multilink lightweight robots.
+        <em>IEEE Transactions on Systems, Man, and Cybernetics</em>, 21(4),
+        826&ndash;839.
+      </li>
+      <li>
+        Brogliato, B. (1999).
+        <em>Nonsmooth Mechanics: Models, Dynamics and Control</em>. Springer.
+      </li>
+      <li>
+        Anitescu, M., &amp; Potra, F. A. (1997). Formulating dynamic
+        multi-rigid-body contact problems with friction as solvable linear
+        complementarity problems.
+        <em>Nonlinear Dynamics</em>, 14(3), 231&ndash;247.
+      </li>
+      <li>
+        Albu-Sch&auml;ffer, A., Ott, C., &amp; Hirzinger, G. (2007). A unified
+        passivity-based control framework for position, torque and impedance
+        control of flexible joint robots.
+        <em>International Journal of Robotics Research</em>, 26(1), 23&ndash;39.
+      </li>
+      <li>
+        Haddadin, S., De Luca, A., &amp; Albu-Sch&auml;ffer, A. (2017). Robot
+        collisions: A survey on detection, isolation, and identification.
+        <em>IEEE Transactions on Robotics</em>, 33(6), 1292&ndash;1312.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Buttons -->
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter5/Lesson4.html">
+          Lesson 4: Contact Transitions and Impact Awareness
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter6/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Motivation for Force Control
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="active-lesson" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,2238 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 12: SLAM II — Graph-Based SLAM - Lesson 4: Handling Outliers (robust kernels) | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 12: SLAM II — Graph-Based SLAM</h1>
+    <h3><strong>Lesson 4: Handling Outliers (robust kernels)</strong></h3>
+    <p>
+      Graph-based SLAM reduces localization + mapping to sparse nonlinear
+      least-squares over robot poses (and optionally landmarks). In real
+      deployments, a small fraction of constraints can be grossly wrong (false
+      loop closures, dynamic objects, perceptual aliasing). This lesson develops
+      robust-kernel (M-estimation) techniques that softly downweight such
+      outliers while preserving the Gauss–Newton / Levenberg–Marquardt structure
+      from Lesson 3.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Motivation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Why Outliers Matter in Graph-Based SLAM</h2>
+    <div class="down-content">
+      <p>
+        In a pose graph, each edge encodes a relative measurement between two
+        poses. Standard optimization assumes near-Gaussian noise. Outliers
+        violate this assumption: their errors have heavy tails or are
+        multi-modal, so a sum-of-squared residuals objective can be dominated by
+        a few wrong constraints.
+      </p>
+      <p>
+        Let node <strong>\( i \)</strong> have pose
+        <strong>\( \mathbf{x}_i \)</strong>, and edge
+        <strong>\( (i,j) \)</strong> provide measurement
+        <strong>\( \mathbf{z}_{ij} \)</strong>. The edge defines a residual
+        <strong>\( \mathbf{r}_{ij}(\mathbf{x}_i,\mathbf{x}_j) \)</strong> which
+        should be near zero for a correct estimate. A single false loop closure
+        can “pull” the whole solution away from the trajectory supported by the
+        majority of edges.
+      </p>
+      <p>
+        Robust kernels fix this by reducing the <em>influence</em> of large
+        residuals without brittle hard rejection (which can fail early in
+        optimization when residuals are temporarily large).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Least Squares Recap -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Recap: Standard Pose-Graph Least Squares</h2>
+    <div class="down-content">
+      <p>
+        For each edge, define the squared Mahalanobis error
+        <strong>\( s_{ij} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ s_{ij}(\mathbf{x}) =
+        \mathbf{r}_{ij}(\mathbf{x})^{\top}\,\mathbf{\Omega}_{ij}\,\mathbf{r}_{ij}(\mathbf{x}),
+        \qquad \mathbf{\Omega}_{ij}=\mathbf{\Sigma}_{ij}^{-1}. \]
+      </h4>
+      <p>
+        The classical objective minimizes
+        <strong
+          >\( F(\mathbf{x})=\sum_{(i,j)\in\mathcal{E}} s_{ij}(\mathbf{x})
+          \)</strong
+        >. Linearizing at <strong>\( \mathbf{x}^{(k)} \)</strong> yields
+        <strong
+          >\( \mathbf{r}_{ij}(\mathbf{x}^{(k)}\oplus\Delta\mathbf{x}) \approx
+          \mathbf{r}_{ij} + \mathbf{J}_{ij}\Delta\mathbf{x} \)</strong
+        >, leading to sparse normal equations
+        <strong>\( \mathbf{H}\Delta\mathbf{x}=-\mathbf{g} \)</strong>
+        (Gauss–Newton) or damped (LM).
+      </p>
+      <p>
+        The weakness: <strong>\( s_{ij} \)</strong> grows quadratically with
+        residual magnitude, so an outlier can dominate both
+        <strong>\( \mathbf{H} \)</strong> and <strong>\( \mathbf{g} \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Robust Kernels -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Robust Kernels as M-Estimators</h2>
+    <div class="down-content">
+      <p>
+        Robust estimation replaces the quadratic penalty on
+        <strong>\( s \)</strong> by a sub-quadratic function
+        <strong>\( \rho(s) \)</strong> (a robust kernel):
+      </p>
+      <h4 class="mathJax">
+        \[ \min_{\mathbf{x}}\;F_{\rho}(\mathbf{x})
+        \;=\;\sum_{(i,j)\in\mathcal{E}} \rho\!\left(s_{ij}(\mathbf{x})\right).
+        \]
+      </h4>
+
+      <h3>3.1 Huber kernel (convex “soft clipping”)</h3>
+      <p>
+        A common convention applies the kernel to
+        <strong>\( \sqrt{s}=\|\mathbf{r}\|_{\Omega} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \rho_{\text{Huber}}(s)= \begin{cases} s, & \sqrt{s}\le \delta \\
+        2\delta\sqrt{s}-\delta^2, & \sqrt{s} \gt \delta \end{cases} \]
+      </h4>
+      <p>
+        For small errors it matches least squares; beyond
+        <strong>\( \delta \)</strong> it grows linearly in
+        <strong>\( \sqrt{s} \)</strong>.
+      </p>
+
+      <h3>3.2 Redescending kernels (aggressive suppression)</h3>
+      <p>
+        Kernels like Tukey’s biweight can have <em>redescending</em> influence:
+        extremely large residuals receive near-zero weight. This is powerful but
+        introduces non-convexity and additional local minima. In mobile-robot
+        SLAM, Huber is often a safe first choice.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Influence Function -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Influence Function and “Bounded Influence”</h2>
+    <div class="down-content">
+      <p>
+        For a scalar residual <strong>\( r \)</strong> with penalty
+        <strong>\( \phi(r) \)</strong>, define the influence function
+        <strong>\( \psi(r)=\frac{d}{dr}\phi(r) \)</strong>. Least squares uses
+        <strong>\( \phi(r)=r^2 \)</strong>, hence
+        <strong>\( \psi(r)=2r \)</strong> (unbounded as
+        <strong>\( |r|\to\infty \)</strong>).
+      </p>
+      <p>
+        Robust kernels bound or slow the growth of
+        <strong>\( \psi(r) \)</strong>. For the scalar Huber penalty:
+      </p>
+      <h4 class="mathJax">
+        \[ \phi_{\text{Huber}}(r)= \begin{cases} r^2, & |r|\le \delta \\
+        2\delta|r|-\delta^2, & |r| \gt \delta \end{cases}
+        \quad\Longrightarrow\quad \psi_{\text{Huber}}(r)= \begin{cases} 2r, &
+        |r|\le \delta \\ 2\delta\,\operatorname{sign}(r), & |r| \gt \delta.
+        \end{cases} \]
+      </h4>
+      <p>
+        Thus a single huge outlier cannot create arbitrarily large force on the
+        optimizer—precisely what we need when false loop closures exist.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: MAP view -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. MAP Interpretation: Heavy-Tailed Likelihoods</h2>
+    <div class="down-content">
+      <p>
+        Robust kernels correspond to heavy-tailed noise models. Assume
+        independent edges with likelihood
+        <strong
+          >\( p(\mathbf{z}_{ij}\mid\mathbf{x})\propto
+          \exp\!\big(-\tfrac{1}{2}\rho(s_{ij}(\mathbf{x}))\big) \)</strong
+        >. Then the MAP estimate is:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{\text{MAP}}
+        =\arg\max_{\mathbf{x}}\prod_{(i,j)\in\mathcal{E}}p(\mathbf{z}_{ij}\mid\mathbf{x})
+        =\arg\min_{\mathbf{x}}\sum_{(i,j)\in\mathcal{E}}\rho\!\left(s_{ij}(\mathbf{x})\right).
+        \]
+      </h4>
+      <p>
+        <strong>Example (Cauchy-style).</strong> If a scalar residual has
+        density <strong>\( p(r)\propto\frac{1}{1+(r/c)^2} \)</strong>, then the
+        negative log-likelihood is
+        <strong>\( \phi(r)=\log\!\left(1+(r/c)^2\right) \)</strong>, which grows
+        only logarithmically for large <strong>\( |r| \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: IRLS derivation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. IRLS: Solving Robust SLAM via Weighted Least Squares</h2>
+    <div class="down-content">
+      <p>
+        We minimize <strong>\( \sum_i \rho(s_i) \)</strong>, where
+        <strong>\( s_i=\mathbf{r}_i^{\top}\Omega_i\mathbf{r}_i \)</strong>.
+        Linearize
+        <strong
+          >\( \mathbf{r}_i(\mathbf{x}^{(k)}\oplus\Delta\mathbf{x})\approx
+          \mathbf{r}_i+\mathbf{J}_i\Delta\mathbf{x} \)</strong
+        >.
+      </p>
+
+      <h3>6.1 IRLS surrogate and weight</h3>
+      <p>
+        A standard IRLS step freezes a scalar weight computed from current
+        residuals and solves:
+      </p>
+      <h4 class="mathJax">
+        \[ \Delta\mathbf{x}^{(k)} =\arg\min_{\Delta\mathbf{x}} \sum_i
+        w_i\,\left\|\mathbf{r}_i+\mathbf{J}_i\Delta\mathbf{x}\right\|_{\Omega_i}^2,
+        \qquad w_i=\rho'(s_i^{(k)}). \]
+      </h4>
+      <p>
+        This reuses the same sparse solver as least squares, but with scaled
+        information
+        <strong>\( \Omega_i \leftarrow w_i\Omega_i \)</strong>.
+      </p>
+
+      <h3>6.2 Huber weight (explicit)</h3>
+      <h4 class="mathJax">
+        \[ w(s)=\rho'(s)= \begin{cases} 1, & \sqrt{s}\le \delta \\
+        \delta/\sqrt{s}, & \sqrt{s} \gt \delta. \end{cases} \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Inputs: current poses x, edges (i,j,z,Omega), kernel params"] --> B["For each edge: compute residual r and scalar s = r^T Omega r"]
+  B --> C["Compute weight w from s (e.g., Huber w=1 or w=delta/sqrt(s))"]
+  C --> D["Linearize: r(x + dx) approx r + J dx (numeric or analytic Jacobians)"]
+  D --> E["Assemble normal equations with scaled info: Omega <- w*Omega"]
+  E --> F["Solve (H + lambda I) dx = -g"]
+  F --> G["Update poses; repeat until ||dx|| small"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Stability note.</strong> Robust kernels can introduce
+        non-convexity (especially redescending kernels). Practical strategy:
+        start with a mild kernel (Huber) and use damping (LM) or continuation
+        (start with large <strong>\( \delta \)</strong>, decrease).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Kernel choices and tuning -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Kernel Choices and Tuning Guidelines</h2>
+    <div class="down-content">
+      <p>
+        Common robust kernels in SLAM back-ends include Huber, Cauchy,
+        Geman–McClure, and Tukey. Huber is convex and typically robust enough
+        for occasional wrong loop closures; redescending kernels are stronger
+        but more non-convex.
+      </p>
+
+      <h3>7.1 Scale selection using inlier statistics</h3>
+      <p>
+        Let residual dimension be <strong>\( d \)</strong> (e.g.,
+        <strong>\( d=3 \)</strong> for 2D relative pose). Under the correct
+        Gaussian inlier model, <strong>\( s \)</strong> is approximately
+        chi-square: <strong>\( s\sim\chi^2_d \)</strong>. Choose
+        <strong>\( \delta \)</strong> so that inliers stay in the quadratic
+        region with probability <strong>\( p \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbb{P}(s\le \delta^2)=p \quad\Longrightarrow\quad
+        \delta=\sqrt{\chi^2_{d,p}}. \]
+      </h4>
+
+      <h3>7.2 Library mapping (what you see in real SLAM stacks)</h3>
+      <ul>
+        <li>
+          <strong>g2o:</strong> per-edge robust kernel objects
+          (Huber/Cauchy/etc.) that scale information matrices during
+          optimization.
+        </li>
+        <li>
+          <strong>Ceres Solver:</strong> <code>LossFunction</code> (HuberLoss,
+          CauchyLoss, …) attached to residual blocks.
+        </li>
+        <li>
+          <strong>GTSAM:</strong> robust noise models (m-estimators) wrapping
+          Gaussian factors.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Robust workflow (diagram #2) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Robust Back-End Workflow in a Mobile Robot</h2>
+    <div class="down-content">
+      <p>
+        Robust kernels are a back-end defense layer: they do not repair
+        perception, but they prevent a small number of bad constraints from
+        corrupting the global estimate.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sensors (LiDAR / vision / wheel / IMU)"] --> FE["Front-end: feature or scan matching"]
+  FE --> ED["Create constraints: odometry edges + loop closures"]
+  ED --> QC["Basic checks: time sync, covariance sanity, optional gating"]
+  QC --> OPT["Back-end: nonlinear least squares with robust kernels"]
+  OPT --> OUT["Output: optimized trajectory + quality metrics"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Python lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Python Lab — IRLS with Huber Kernel (from scratch)</h2>
+    <div class="down-content">
+      <p>
+        The following implementation uses numeric Jacobians (finite differences)
+        for clarity and includes one incorrect loop closure to illustrate robust
+        downweighting. It solves twice: (i) plain least squares and (ii) Huber
+        IRLS.
+      </p>
+      <p>
+        <em>Rendering note:</em> inside HTML <code>&lt;code&gt;</code> blocks,
+        characters like <code>&amp;lt;</code> / <code>&amp;gt;</code> are
+        escaped for safe rendering. The downloadable files contain executable
+        code.
+      </p>
+
+      <p><strong>Chapter12_Lesson4.py</strong></p>
+      <pre><code class="language-python">
+#!/usr/bin/env python3
+# Chapter12_Lesson4.py
+# Graph-Based SLAM (2D Pose Graph) with Robust Kernels via IRLS (Huber)
+# Minimal from-scratch educational implementation (numeric Jacobians).
+
+import numpy as np
+
+def wrap_angle(a):
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+def between(xi, xj):
+    &quot;&quot;&quot;Relative pose z = xi^{-1} ∘ xj expressed in i-frame.
+    xi, xj: [x, y, theta]
+    &quot;&quot;&quot;
+    dx = xj[0] - xi[0]
+    dy = xj[1] - xi[1]
+    c = np.cos(xi[2]); s = np.sin(xi[2])
+    xr =  c * dx + s * dy
+    yr = -s * dx + c * dy
+    tr = wrap_angle(xj[2] - xi[2])
+    return np.array([xr, yr, tr], dtype=float)
+
+def huber_weight_from_s(s, delta):
+    &quot;&quot;&quot;Huber on sqrt(s): rho(s)=s if sqrt(s)&lt;=delta else 2*delta*sqrt(s)-delta^2.
+    IRLS weight w = rho&#x27;(s) = 1 if sqrt(s)&lt;=delta else delta/sqrt(s).
+    &quot;&quot;&quot;
+    r = np.sqrt(max(s, 1e-12))
+    return 1.0 if r &lt;= delta else (delta / r)
+
+def numeric_jacobian_edge(xi, xj, z, eps=1e-6):
+    &quot;&quot;&quot;Return Jacobians of error e wrt xi and xj (3x3 each) via finite differences.&quot;&quot;&quot;
+    def err(a, b):
+        zhat = between(a, b)
+        e = zhat - z
+        e[2] = wrap_angle(e[2])
+        return e
+
+    e0 = err(xi, xj)
+    Ji = np.zeros((3, 3))
+    Jj = np.zeros((3, 3))
+
+    for k in range(3):
+        d = np.zeros(3); d[k] = eps
+        ei = err(xi + d, xj)
+        Ji[:, k] = (ei - e0) / eps
+
+        ej = err(xi, xj + d)
+        Jj[:, k] = (ej - e0) / eps
+
+    return e0, Ji, Jj
+
+def solve_pose_graph_irls(
+    x_init, edges,
+    robust=&quot;huber&quot;, delta=1.5,
+    n_iters=15, damping=1e-6,
+    fix_first=True
+):
+    &quot;&quot;&quot;Gauss-Newton / IRLS for 2D pose graph.
+    x_init: (N,3)
+    edges: list of dicts {i,j,z(3,),Omega(3x3)}
+    robust: &quot;none&quot; or &quot;huber&quot;
+    &quot;&quot;&quot;
+    x = x_init.copy()
+    N = x.shape[0]
+
+    # Variable ordering: optionally fix pose 0 to remove gauge freedom
+    if fix_first:
+        var_nodes = list(range(1, N))
+        base = 1
+    else:
+        var_nodes = list(range(N))
+        base = 0
+
+    dim = 3 * len(var_nodes)
+    node_to_col = {nid: 3 * idx for idx, nid in enumerate(var_nodes)}
+
+    for it in range(n_iters):
+        H = np.zeros((dim, dim))
+        b = np.zeros((dim,))
+
+        total_rho = 0.0
+        total_s = 0.0
+        for e in edges:
+            i, j = e[&quot;i&quot;], e[&quot;j&quot;]
+            z = e[&quot;z&quot;]
+            Omega = e[&quot;Omega&quot;]
+
+            ei, Ji, Jj = numeric_jacobian_edge(x[i], x[j], z)
+            s = float(ei.T @ Omega @ ei)
+            total_s += s
+
+            if robust == &quot;huber&quot;:
+                w = huber_weight_from_s(s, delta)
+                # robust cost value (for monitoring)
+                r = np.sqrt(max(s, 1e-12))
+                if r &lt;= delta:
+                    rho = s
+                else:
+                    rho = 2.0 * delta * r - delta * delta
+                total_rho += rho
+            else:
+                w = 1.0
+                total_rho += s
+
+            W = w * Omega
+
+            # Assemble into normal equations, skipping fixed node
+            def add_block(a, Ja, bnode, Jb):
+                Ha = Ja.T @ W @ Ja
+                Hab = Ja.T @ W @ Jb
+                ga = Ja.T @ W @ ei
+
+                ca = node_to_col.get(a, None)
+                cb = node_to_col.get(bnode, None)
+                if ca is not None:
+                    H[ca:ca+3, ca:ca+3] += Ha
+                    b[ca:ca+3] += ga
+                if ca is not None and cb is not None:
+                    H[ca:ca+3, cb:cb+3] += Hab
+                # NOTE: symmetric part is added when edge is processed; we&#x27;ll enforce symmetry later.
+
+            # i block
+            add_block(i, Ji, j, Jj)
+            # j block
+            add_block(j, Jj, i, Ji)  # adds Hj and Hji, gj
+
+        # Symmetrize, add damping (Levenberg-style)
+        H = 0.5 * (H + H.T)
+        H += damping * np.eye(dim)
+
+        # Solve for dx: H dx = -b
+        try:
+            dx = -np.linalg.solve(H, b)
+        except np.linalg.LinAlgError:
+            dx = -np.linalg.lstsq(H, b, rcond=None)[0]
+
+        # Apply update
+        for nid in var_nodes:
+            c = node_to_col[nid]
+            x[nid, 0] += dx[c + 0]
+            x[nid, 1] += dx[c + 1]
+            x[nid, 2] = wrap_angle(x[nid, 2] + dx[c + 2])
+
+        print(f&quot;iter {it:02d}  sum_s={total_s:.3f}  sum_rho={total_rho:.3f}  |dx|={np.linalg.norm(dx):.3e}&quot;)
+
+        if np.linalg.norm(dx) &lt; 1e-8:
+            break
+
+    return x
+
+def make_synthetic_graph(N=20, sigma_xy=0.05, sigma_th=0.02, seed=0):
+    rng = np.random.default_rng(seed)
+
+    # Ground truth: a smooth arc
+    gt = np.zeros((N, 3))
+    for k in range(1, N):
+        gt[k, 0] = gt[k-1, 0] + 0.3 * np.cos(gt[k-1, 2])
+        gt[k, 1] = gt[k-1, 1] + 0.3 * np.sin(gt[k-1, 2])
+        gt[k, 2] = wrap_angle(gt[k-1, 2] + 0.05)
+
+    # Odometry edges (chain)
+    Omega = np.diag([1.0/(sigma_xy**2), 1.0/(sigma_xy**2), 1.0/(sigma_th**2)])
+    edges = []
+    for k in range(N-1):
+        z = between(gt[k], gt[k+1])
+        z_noisy = z + rng.normal([0,0,0], [sigma_xy, sigma_xy, sigma_th])
+        z_noisy[2] = wrap_angle(z_noisy[2])
+        edges.append({&quot;i&quot;: k, &quot;j&quot;: k+1, &quot;z&quot;: z_noisy, &quot;Omega&quot;: Omega})
+
+    # One correct loop closure (optional)
+    z_loop = between(gt[3], gt[N-2]) + rng.normal([0,0,0], [sigma_xy, sigma_xy, sigma_th])
+    z_loop[2] = wrap_angle(z_loop[2])
+    edges.append({&quot;i&quot;: 3, &quot;j&quot;: N-2, &quot;z&quot;: z_loop, &quot;Omega&quot;: Omega})
+
+    # One outlier loop closure
+    z_bad = np.array([2.0, -1.0, 1.0])  # clearly wrong relative pose
+    edges.append({&quot;i&quot;: 0, &quot;j&quot;: N-1, &quot;z&quot;: z_bad, &quot;Omega&quot;: Omega})
+
+    # Initial guess: integrate odometry only
+    x0 = np.zeros_like(gt)
+    for k in range(1, N):
+        z = edges[k-1][&quot;z&quot;]
+        # compose: x_k = x_{k-1} ∘ z  (approx)
+        th = x0[k-1, 2]
+        c = np.cos(th); s = np.sin(th)
+        x0[k, 0] = x0[k-1, 0] + c*z[0] - s*z[1]
+        x0[k, 1] = x0[k-1, 1] + s*z[0] + c*z[1]
+        x0[k, 2] = wrap_angle(x0[k-1, 2] + z[2])
+
+    return gt, x0, edges
+
+if __name__ == &quot;__main__&quot;:
+    gt, x0, edges = make_synthetic_graph(N=25, seed=1)
+
+    print(&quot;\n=== Solve without robust kernel (sensitive to outlier) ===&quot;)
+    x_ls = solve_pose_graph_irls(x0, edges, robust=&quot;none&quot;, n_iters=15, damping=1e-6)
+
+    print(&quot;\n=== Solve with Huber robust kernel (IRLS) ===&quot;)
+    x_huber = solve_pose_graph_irls(x0, edges, robust=&quot;huber&quot;, delta=1.5, n_iters=15, damping=1e-6)
+
+    # Simple endpoint comparison
+    print(&quot;\nEndpoint (pose N-1):&quot;)
+    print(&quot;  ground truth:&quot;, gt[-1])
+    print(&quot;  least squares:&quot;, x_ls[-1])
+    print(&quot;  huber:&quot;, x_huber[-1])
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: C++ lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. C++ Lab — Robust Kernels in Ceres Solver</h2>
+    <div class="down-content">
+      <p>
+        In Ceres, robust kernels are implemented by attaching a
+        <code>LossFunction</code> (e.g., HuberLoss) to each residual block. This
+        example uses a compact 2D relative-pose constraint and includes one bad
+        loop closure; the Huber loss suppresses its effect.
+      </p>
+
+      <p><strong>Chapter12_Lesson4.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter12_Lesson4.cpp
+// Robust pose-graph style constraints using Ceres Solver robust losses (Huber).
+// This is a compact example illustrating how robust kernels appear in practice.
+// Build (example):
+//   mkdir build &amp;&amp; cd build
+//   cmake .. &amp;&amp; cmake --build .
+// Requires: Ceres Solver installed.
+
+#include &lt;ceres/ceres.h&gt;
+#include &lt;cmath&gt;
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+
+static inline double WrapAngle(double a) {
+  while (a &gt; M_PI) a -= 2.0 * M_PI;
+  while (a &lt; -M_PI) a += 2.0 * M_PI;
+  return a;
+}
+
+struct RelativePose2dCost {
+  RelativePose2dCost(double dx, double dy, double dth, double sxy, double sth)
+      : dx_(dx), dy_(dy), dth_(dth), sxy_(sxy), sth_(sth) {}
+
+  template &lt;typename T&gt;
+  bool operator()(const T* const pi, const T* const pj, T* residuals) const {
+    // pi = [xi, yi, thi], pj = [xj, yj, thj]
+    const T c = ceres::cos(pi[2]);
+    const T s = ceres::sin(pi[2]);
+    const T dxw = pj[0] - pi[0];
+    const T dyw = pj[1] - pi[1];
+
+    // relative translation in i-frame
+    const T xrel =  c * dxw + s * dyw;
+    const T yrel = -s * dxw + c * dyw;
+
+    // relative angle
+    const T threl = ceres::atan2(ceres::sin(pj[2] - pi[2]), ceres::cos(pj[2] - pi[2]));
+
+    residuals[0] = (xrel - T(dx_)) / T(sxy_);
+    residuals[1] = (yrel - T(dy_)) / T(sxy_);
+    residuals[2] = (threl - T(dth_)) / T(sth_);
+    return true;
+  }
+
+  double dx_, dy_, dth_;
+  double sxy_, sth_;
+};
+
+int main() {
+  // Tiny graph: chain + one bad loop closure to show robustness.
+  const int N = 15;
+  std::vector&lt;double&gt; poses(3 * N, 0.0);
+
+  auto Pose = [&amp;](int i) { return &amp;poses[3 * i]; };
+
+  // Initialize along x with small yaw
+  for (int k = 1; k &lt; N; ++k) {
+    Pose(k)[0] = Pose(k - 1)[0] + 0.3;
+    Pose(k)[1] = 0.0;
+    Pose(k)[2] = 0.02 * k;
+  }
+
+  const double sigma_xy = 0.05;
+  const double sigma_th = 0.02;
+
+  ceres::Problem problem;
+
+  // Add all parameter blocks
+  for (int i = 0; i &lt; N; ++i) {
+    problem.AddParameterBlock(Pose(i), 3);
+  }
+  // Fix first pose (gauge)
+  problem.SetParameterBlockConstant(Pose(0));
+
+  // Odometry edges (near-perfect synthetic)
+  for (int k = 0; k &lt; N - 1; ++k) {
+    const double dx = 0.3;
+    const double dy = 0.0;
+    const double dth = 0.02;
+
+    ceres::CostFunction* cost =
+        new ceres::AutoDiffCostFunction&lt;RelativePose2dCost, 3, 3, 3&gt;(
+            new RelativePose2dCost(dx, dy, dth, sigma_xy, sigma_th));
+
+    // Robust kernel: Huber loss
+    ceres::LossFunction* loss = new ceres::HuberLoss(1.5);
+
+    problem.AddResidualBlock(cost, loss, Pose(k), Pose(k + 1));
+  }
+
+  // One bad loop closure (outlier)
+  {
+    const int i = 0;
+    const int j = N - 1;
+    const double dx_bad = 2.0;
+    const double dy_bad = -1.0;
+    const double dth_bad = 1.0;
+
+    ceres::CostFunction* cost =
+        new ceres::AutoDiffCostFunction&lt;RelativePose2dCost, 3, 3, 3&gt;(
+            new RelativePose2dCost(dx_bad, dy_bad, dth_bad, sigma_xy, sigma_th));
+
+    // The same robust kernel will downweight this constraint as residual grows.
+    ceres::LossFunction* loss = new ceres::HuberLoss(1.5);
+
+    problem.AddResidualBlock(cost, loss, Pose(i), Pose(j));
+  }
+
+  ceres::Solver::Options options;
+  options.linear_solver_type = ceres::DENSE_QR;
+  options.max_num_iterations = 30;
+  options.minimizer_progress_to_stdout = true;
+
+  ceres::Solver::Summary summary;
+  ceres::Solve(options, &amp;problem, &amp;summary);
+
+  std::cout &lt;&lt; &quot;\nFinal pose of last node:\n&quot;;
+  std::cout &lt;&lt; &quot;x=&quot; &lt;&lt; Pose(N - 1)[0] &lt;&lt; &quot; y=&quot; &lt;&lt; Pose(N - 1)[1]
+            &lt;&lt; &quot; th=&quot; &lt;&lt; Pose(N - 1)[2] &lt;&lt; &quot;\n&quot;;
+
+  return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Java lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Java Lab — IRLS in Pure Java (numeric Jacobians)</h2>
+    <div class="down-content">
+      <p>
+        This Java implementation mirrors the Python solver: compute residuals,
+        compute Huber weights, assemble normal equations, solve, and iterate. It
+        fixes the first node to remove gauge freedom.
+      </p>
+
+      <p><strong>Chapter12_Lesson4.java</strong></p>
+      <pre><code class="language-java">
+// Chapter12_Lesson4.java
+// Graph-Based SLAM (2D pose graph) with Huber IRLS (numeric Jacobians) in pure Java.
+// Educational: focuses on the robust weighting logic rather than performance.
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Chapter12_Lesson4 {
+
+    static class Edge {
+        int i, j;
+        double[] z;      // [dx, dy, dtheta] = pose_i^{-1} ∘ pose_j in i-frame
+        double[][] Omega; // 3x3 information matrix
+        Edge(int i, int j, double[] z, double[][] Omega) {
+            this.i=i; this.j=j; this.z=z; this.Omega=Omega;
+        }
+    }
+
+    static double wrap(double a) {
+        while (a &gt; Math.PI) a -= 2.0 * Math.PI;
+        while (a &lt; -Math.PI) a += 2.0 * Math.PI;
+        return a;
+    }
+
+    static double[] between(double[] xi, double[] xj) {
+        double dx = xj[0] - xi[0];
+        double dy = xj[1] - xi[1];
+        double c = Math.cos(xi[2]), s = Math.sin(xi[2]);
+        double xr =  c * dx + s * dy;
+        double yr = -s * dx + c * dy;
+        double tr = wrap(xj[2] - xi[2]);
+        return new double[]{xr, yr, tr};
+    }
+
+    static double huberWeightFromS(double s, double delta) {
+        double r = Math.sqrt(Math.max(s, 1e-12));
+        return (r &lt;= delta) ? 1.0 : (delta / r);
+    }
+
+    static class EdgeLinearization {
+        double[] e;     // 3
+        double[][] Ji;  // 3x3
+        double[][] Jj;  // 3x3
+        EdgeLinearization(double[] e, double[][] Ji, double[][] Jj) {
+            this.e=e; this.Ji=Ji; this.Jj=Jj;
+        }
+    }
+
+    static EdgeLinearization numericJacobianEdge(double[] xi, double[] xj, double[] z, double eps) {
+        double[] e0 = err(xi, xj, z);
+        double[][] Ji = new double[3][3];
+        double[][] Jj = new double[3][3];
+
+        for (int k=0; k&lt;3; k++) {
+            double[] d = new double[]{0,0,0};
+            d[k] = eps;
+
+            double[] xi2 = new double[]{xi[0]+d[0], xi[1]+d[1], xi[2]+d[2]};
+            double[] ei = err(xi2, xj, z);
+            for (int r=0; r&lt;3; r++) Ji[r][k] = (ei[r]-e0[r]) / eps;
+
+            double[] xj2 = new double[]{xj[0]+d[0], xj[1]+d[1], xj[2]+d[2]};
+            double[] ej = err(xi, xj2, z);
+            for (int r=0; r&lt;3; r++) Jj[r][k] = (ej[r]-e0[r]) / eps;
+        }
+        return new EdgeLinearization(e0, Ji, Jj);
+    }
+
+    static double[] err(double[] xi, double[] xj, double[] z) {
+        double[] zhat = between(xi, xj);
+        double[] e = new double[]{zhat[0]-z[0], zhat[1]-z[1], wrap(zhat[2]-z[2])};
+        return e;
+    }
+
+    static double quadForm(double[] v, double[][] A) {
+        double[] Av = new double[3];
+        for (int i=0;i&lt;3;i++){
+            Av[i]=0;
+            for(int j=0;j&lt;3;j++) Av[i]+=A[i][j]*v[j];
+        }
+        double s=0;
+        for(int i=0;i&lt;3;i++) s+=v[i]*Av[i];
+        return s;
+    }
+
+    static double[][] matMulT(double[][] J, double[][] A, double[][] K) {
+        // return J^T A K ; here all are 3x3
+        double[][] out = new double[3][3];
+        for (int r=0;r&lt;3;r++){
+            for (int c=0;c&lt;3;c++){
+                double sum=0;
+                for (int i=0;i&lt;3;i++){
+                    for (int j=0;j&lt;3;j++){
+                        sum += J[i][r] * A[i][j] * K[j][c];
+                    }
+                }
+                out[r][c]=sum;
+            }
+        }
+        return out;
+    }
+
+    static double[] matVecMulT(double[][] J, double[][] A, double[] e) {
+        // return J^T A e
+        double[] out = new double[3];
+        for (int r=0;r&lt;3;r++){
+            double sum=0;
+            for (int i=0;i&lt;3;i++){
+                for (int j=0;j&lt;3;j++){
+                    sum += J[i][r] * A[i][j] * e[j];
+                }
+            }
+            out[r]=sum;
+        }
+        return out;
+    }
+
+    static void add3(double[][] H, int ra, int ca, double[][] blk) {
+        for (int r=0;r&lt;3;r++){
+            for(int c=0;c&lt;3;c++){
+                H[ra+r][ca+c]+=blk[r][c];
+            }
+        }
+    }
+    static void add3v(double[] b, int ra, double[] v) {
+        for(int r=0;r&lt;3;r++) b[ra+r]+=v[r];
+    }
+
+    static double[] solveLinear(double[][] A, double[] b) {
+        // naive Gaussian elimination (for small systems)
+        int n = b.length;
+        double[][] M = new double[n][n];
+        double[] x = new double[n];
+        double[] bb = new double[n];
+        for(int i=0;i&lt;n;i++){
+            System.arraycopy(A[i], 0, M[i], 0, n);
+            bb[i]=b[i];
+        }
+        // forward
+        for(int k=0;k&lt;n;k++){
+            // pivot
+            int piv=k;
+            double best=Math.abs(M[k][k]);
+            for(int i=k+1;i&lt;n;i++){
+                if(Math.abs(M[i][k])&gt;best){best=Math.abs(M[i][k]);piv=i;}
+            }
+            if(piv!=k){
+                double[] tmp=M[k]; M[k]=M[piv]; M[piv]=tmp;
+                double t=bb[k]; bb[k]=bb[piv]; bb[piv]=t;
+            }
+            double diag=M[k][k];
+            if(Math.abs(diag)&lt;1e-12) continue;
+            for(int i=k+1;i&lt;n;i++){
+                double f=M[i][k]/diag;
+                for(int j=k;j&lt;n;j++) M[i][j]-=f*M[k][j];
+                bb[i]-=f*bb[k];
+            }
+        }
+        // back substitution
+        for(int i=n-1;i&gt;=0;i--){
+            double sum=bb[i];
+            for(int j=i+1;j&lt;n;j++) sum-=M[i][j]*x[j];
+            double diag=M[i][i];
+            x[i]=(Math.abs(diag)&lt;1e-12)?0:(sum/diag);
+        }
+        return x;
+    }
+
+    static double[][] diagOmega(double sxy, double sth) {
+        double[][] O = new double[3][3];
+        O[0][0] = 1.0/(sxy*sxy);
+        O[1][1] = 1.0/(sxy*sxy);
+        O[2][2] = 1.0/(sth*sth);
+        return O;
+    }
+
+    static double[][] scaleMat(double a, double[][] M) {
+        double[][] out = new double[3][3];
+        for(int i=0;i&lt;3;i++) for(int j=0;j&lt;3;j++) out[i][j]=a*M[i][j];
+        return out;
+    }
+
+    public static void main(String[] args) {
+        int N = 20;
+        double[][] x = new double[N][3];
+
+        // initial chain
+        for (int k=1;k&lt;N;k++){
+            x[k][0] = x[k-1][0] + 0.3;
+            x[k][1] = 0.0;
+            x[k][2] = wrap(x[k-1][2] + 0.05);
+        }
+
+        double sigmaXY=0.05, sigmaTH=0.02;
+        double[][] Omega = diagOmega(sigmaXY, sigmaTH);
+
+        List&lt;Edge&gt; edges = new ArrayList&lt;&gt;();
+        for(int k=0;k&lt;N-1;k++){
+            edges.add(new Edge(k, k+1, new double[]{0.3,0.0,0.05}, Omega));
+        }
+        // bad loop closure (outlier)
+        edges.add(new Edge(0, N-1, new double[]{2.0,-1.0,1.0}, Omega));
+
+        // Optimize with IRLS-Huber
+        int iters=15;
+        double delta=1.5;
+        double eps=1e-6;
+        double damping=1e-6;
+
+        // Fix node 0 (remove gauge): variables are nodes 1..N-1
+        int varN = N-1;
+        int dim = 3*varN;
+
+        for(int it=0; it&lt;iters; it++){
+            double[][] H = new double[dim][dim];
+            double[] b = new double[dim];
+
+            double sumS=0, sumRho=0;
+
+            for(Edge ed : edges){
+                int i=ed.i, j=ed.j;
+                EdgeLinearization lin = numericJacobianEdge(x[i], x[j], ed.z, eps);
+                double s = quadForm(lin.e, ed.Omega);
+                sumS += s;
+
+                double w = huberWeightFromS(s, delta);
+                double r = Math.sqrt(Math.max(s, 1e-12));
+                double rho = (r &lt;= delta) ? s : (2.0*delta*r - delta*delta);
+                sumRho += rho;
+
+                double[][] W = scaleMat(w, ed.Omega);
+
+                // blocks if variable (skip node 0)
+                Integer ci = (i==0)? null : 3*(i-1);
+                Integer cj = (j==0)? null : 3*(j-1);
+
+                // Hii, Hij, gj
+                if(ci != null){
+                    double[][] Hii = matMulT(lin.Ji, W, lin.Ji);
+                    double[] gi = matVecMulT(lin.Ji, W, lin.e);
+                    add3(H, ci, ci, Hii);
+                    add3v(b, ci, gi);
+                }
+                if(cj != null){
+                    double[][] Hjj = matMulT(lin.Jj, W, lin.Jj);
+                    double[] gj = matVecMulT(lin.Jj, W, lin.e);
+                    add3(H, cj, cj, Hjj);
+                    add3v(b, cj, gj);
+                }
+                if(ci != null &amp;&amp; cj != null){
+                    double[][] Hij = matMulT(lin.Ji, W, lin.Jj);
+                    double[][] Hji = matMulT(lin.Jj, W, lin.Ji);
+                    add3(H, ci, cj, Hij);
+                    add3(H, cj, ci, Hji);
+                }
+            }
+
+            // damping
+            for(int d=0; d&lt;dim; d++) H[d][d] += damping;
+
+            // solve H dx = -b
+            double[] rhs = new double[dim];
+            for(int k=0;k&lt;dim;k++) rhs[k] = -b[k];
+            double[] dx = solveLinear(H, rhs);
+
+            double norm=0;
+            for(double v: dx) norm += v*v;
+            norm = Math.sqrt(norm);
+
+            // apply update
+            for(int node=1; node&lt;N; node++){
+                int c = 3*(node-1);
+                x[node][0] += dx[c+0];
+                x[node][1] += dx[c+1];
+                x[node][2] = wrap(x[node][2] + dx[c+2]);
+            }
+
+            System.out.printf(&quot;iter %02d  sumS=%.3f  sumRho=%.3f  |dx|=%.3e%n&quot;, it, sumS, sumRho, norm);
+            if(norm &lt; 1e-8) break;
+        }
+
+        System.out.println(&quot;Final pose of last node: x=&quot; + x[N-1][0] + &quot; y=&quot; + x[N-1][1] + &quot; th=&quot; + x[N-1][2]);
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: MATLAB/Simulink lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. MATLAB/Simulink Lab — IRLS Pose Graph Loop</h2>
+    <div class="down-content">
+      <p>
+        The MATLAB script below implements IRLS-Huber. For Simulink, place the
+        IRLS step in a MATLAB Function block that outputs
+        <strong>\( \Delta\mathbf{x} \)</strong>, then integrate pose states with
+        Unit Delay blocks inside a For-Iterator subsystem (see comments in
+        code).
+      </p>
+
+      <p><strong>Chapter12_Lesson4.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter12_Lesson4.m
+% Graph-Based SLAM (2D pose graph) with robust kernels via IRLS (Huber).
+% Educational MATLAB implementation using numeric Jacobians and Gauss-Newton.
+
+function Chapter12_Lesson4()
+    rng(1);
+    N = 20;
+    x = zeros(N,3);
+    for k=2:N
+        x(k,1) = x(k-1,1) + 0.3;
+        x(k,2) = 0.0;
+        x(k,3) = wrap(x(k-1,3) + 0.05);
+    end
+
+    sigmaXY = 0.05; sigmaTH = 0.02;
+    Omega = diag([1/sigmaXY^2, 1/sigmaXY^2, 1/sigmaTH^2]);
+
+    edges = {};
+    for k=1:N-1
+        e.i = k; e.j = k+1;
+        e.z = [0.3; 0.0; 0.05];
+        e.Omega = Omega;
+        edges{end+1} = e;
+    end
+    % bad loop closure (outlier)
+    e.i = 1; e.j = N; e.z = [2.0; -1.0; 1.0]; e.Omega = Omega;
+    edges{end+1} = e;
+
+    delta = 1.5;
+    iters = 15;
+    damping = 1e-6;
+
+    % Fix node 1 =&gt; variables nodes 2..N
+    dim = 3*(N-1);
+
+    for it=1:iters
+        H = zeros(dim,dim);
+        b = zeros(dim,1);
+
+        sumS = 0; sumRho = 0;
+
+        for idx=1:numel(edges)
+            ed = edges{idx};
+            i = ed.i; j = ed.j;
+
+            [eij, Ji, Jj] = numericJacobianEdge(x(i,:)' , x(j,:)' , ed.z, 1e-6);
+
+            s = eij' * ed.Omega * eij;
+            sumS = sumS + s;
+
+            w = huberWeightFromS(s, delta);
+            r = sqrt(max(s, 1e-12));
+            if r &lt;= delta
+                rho = s;
+            else
+                rho = 2*delta*r - delta^2;
+            end
+            sumRho = sumRho + rho;
+
+            W = w * ed.Omega;
+
+            ci = nodeToCol(i, N);
+            cj = nodeToCol(j, N);
+
+            if ci &gt; 0
+                H(ci:ci+2, ci:ci+2) = H(ci:ci+2, ci:ci+2) + Ji' * W * Ji;
+                b(ci:ci+2) = b(ci:ci+2) + Ji' * W * eij;
+            end
+            if cj &gt; 0
+                H(cj:cj+2, cj:cj+2) = H(cj:cj+2, cj:cj+2) + Jj' * W * Jj;
+                b(cj:cj+2) = b(cj:cj+2) + Jj' * W * eij;
+            end
+            if (ci &gt; 0) &amp;&amp; (cj &gt; 0)
+                H(ci:ci+2, cj:cj+2) = H(ci:ci+2, cj:cj+2) + Ji' * W * Jj;
+                H(cj:cj+2, ci:ci+2) = H(cj:cj+2, ci:ci+2) + Jj' * W * Ji;
+            end
+        end
+
+        H = 0.5*(H+H') + damping*eye(dim);
+        dx = -H \ b;
+
+        % apply
+        for node=2:N
+            c = 3*(node-2) + 1;
+            x(node,1) = x(node,1) + dx(c+0);
+            x(node,2) = x(node,2) + dx(c+1);
+            x(node,3) = wrap(x(node,3) + dx(c+2));
+        end
+
+        fprintf('iter %02d  sumS=%.3f  sumRho=%.3f  |dx|=%.3e\n', it, sumS, sumRho, norm(dx));
+        if norm(dx) &lt; 1e-8
+            break;
+        end
+    end
+
+    disp('Final pose of last node:');
+    disp(x(end,:));
+
+    % Simulink note:
+    % - You can implement the IRLS loop with a MATLAB Function block that outputs dx,
+    %   then integrate pose states with Unit Delay blocks, using a For-Iterator subsystem.
+end
+
+function c = nodeToCol(node, N)
+    % node 1 fixed =&gt; return 0. Others map to 1-based column index.
+    if node == 1
+        c = 0;
+    else
+        c = 3*(node-2) + 1;
+    end
+end
+
+function w = huberWeightFromS(s, delta)
+    r = sqrt(max(s, 1e-12));
+    if r &lt;= delta
+        w = 1.0;
+    else
+        w = delta / r;
+    end
+end
+
+function a = wrap(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+
+function z = between(xi, xj)
+    dx = xj(1) - xi(1);
+    dy = xj(2) - xi(2);
+    c = cos(xi(3)); s = sin(xi(3));
+    xr =  c*dx + s*dy;
+    yr = -s*dx + c*dy;
+    tr = wrap(xj(3) - xi(3));
+    z = [xr; yr; tr];
+end
+
+function e = err(xi, xj, z)
+    zhat = between(xi, xj);
+    e = zhat - z;
+    e(3) = wrap(e(3));
+end
+
+function [e0, Ji, Jj] = numericJacobianEdge(xi, xj, z, eps)
+    e0 = err(xi, xj, z);
+    Ji = zeros(3,3);
+    Jj = zeros(3,3);
+    for k=1:3
+        d = zeros(3,1); d(k)=eps;
+        ei = err(xi+d, xj, z);
+        Ji(:,k) = (ei - e0)/eps;
+        ej = err(xi, xj+d, z);
+        Jj(:,k) = (ej - e0)/eps;
+    end
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Mathematica lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Wolfram Mathematica — Symbolic Weight Derivation + IRLS Demo</h2>
+    <div class="down-content">
+      <p>
+        This notebook expression derives the Huber weight
+        <strong>\( w(s)=\rho'(s) \)</strong> and demonstrates IRLS on a 1D
+        robust location problem.
+      </p>
+
+      <p><strong>Chapter12_Lesson4.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter12_Lesson4.nb
+   Wolfram Language notebook expression (plain-text).
+   Focus: deriving robust weights and a small IRLS demo for 1D location with outliers. *)
+
+Notebook[{
+  Cell["Chapter 12 - Lesson 4: Handling Outliers (Robust Kernels)", "Title"],
+  Cell["IRLS weight derivation for Huber kernel (rho applied to s = r^2).", "Section"],
+
+  Cell[BoxData[
+    RowBox[{
+      RowBox[{"rho", "[", "s_", "]"}], ":=",
+      RowBox[{"Piecewise", "[",
+        RowBox[{
+          RowBox[{"{",
+            RowBox[{
+              RowBox[{"{", RowBox[{"s", ",", RowBox[{"Sqrt", "[", "s", "]"}], "<=", "c"}], "}"}],
+              ",",
+              RowBox[{"{", RowBox[{
+                RowBox[{
+                  RowBox[{"2", " ", "c", " ", RowBox[{"Sqrt", "[", "s", "]"}]}], "-", RowBox[{"c", "^", "2"}]
+                }],
+                ",",
+                RowBox[{"Sqrt", "[", "s", "]"}], ">", "c"
+              }], "}"}]
+            }], "}"}],
+          ",", "s"
+        }], "]"}]}]
+  ], "Input"],
+
+  Cell["Derivative and IRLS weight w = rho'(s).", "Text"],
+  Cell[BoxData[
+    RowBox[{
+      RowBox[{"w", "[", "s_", "]"}], ":=",
+      RowBox[{"D", "[",
+        RowBox[{
+          RowBox[{"rho", "[", "s", "]"}], ",", "s"
+        }], "]"}]}]
+  ], "Input"],
+
+  Cell["Check piecewise form of w(s):", "Text"],
+  Cell[BoxData[RowBox[{"FullSimplify", "[", RowBox[{"w", "[", "s", "]"}], "]"}]], "Input"],
+
+  Cell["IRLS for 1D location: minimize Sum rho((x - yi)^2) over x.", "Section"],
+  Cell[BoxData[
+    RowBox[{
+      RowBox[{"ys", "=", RowBox[{"Join", "[",
+        RowBox[{
+          RowBox[{"RandomVariate", "[", RowBox[{"NormalDistribution", "[", RowBox[{"0", ",", "1"}], "]"}], ",", "40"}], "]"}],
+          ",",
+          RowBox[{"{", RowBox[{"8", ",", "9", ",", "10"}], "}"}]
+        }], "]"}]}], ";"}]
+  ], "Input"],
+
+  Cell[BoxData[RowBox[{"c", "=", "1.5"}]], "Input"],
+
+  Cell[BoxData[
+    RowBox[{
+      RowBox[{"irls", "[", RowBox[{"x0_", ",", "iters_"}], "]"}], ":=",
+      RowBox[{"Module", "[",
+        RowBox[{
+          RowBox[{"{", RowBox[{"x", "=", "x0", ",", "r", ",", "s", ",", "ws"}], "}"}],
+          ",",
+          RowBox[{"Do", "[",
+            RowBox[{
+              RowBox[{
+                RowBox[{"r", "=", RowBox[{"x", "-", "ys"}]}], ";",
+                RowBox[{"s", "=", RowBox[{"r", "^", "2"}]}], ";",
+                RowBox[{"ws", "=", RowBox[{"w", " /@ ", "s"}]}], ";",
+                RowBox[{"x", "=", RowBox[{"Total", "[", RowBox[{"ws", " ", "ys"}], "]"}], "/", RowBox[{"Total", "[", "ws", "]"}]}], ";"
+              }],
+              ",",
+              RowBox[{"{", RowBox[{"iters"}], "}"}]
+            }], "]"}], ";",
+          "x"
+        }], "]"}]}]
+  ], "Input"],
+
+  Cell[BoxData[RowBox[{"x_hat", "=", RowBox[{"irls", "[", RowBox[{"0", ",", "25"}], "]"}]}]], "Input"],
+  Cell[BoxData[RowBox[{"{", RowBox[{"Mean", "[", "ys", "]"}], ",", "x_hat"}], "}"}]], "Input"],
+
+  Cell["The robust estimate x_hat is less influenced by the extreme outliers than Mean[ys].", "Text"]
+}]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (IRLS surrogate):</strong>
+        Starting from
+        <strong>\( \min_{\mathbf{x}}\sum_i \rho(s_i(\mathbf{x})) \)</strong>
+        with <strong>\( s_i=\mathbf{r}_i^{\top}\Omega_i\mathbf{r}_i \)</strong>,
+        justify the IRLS surrogate
+        <strong
+          >\( \min_{\Delta\mathbf{x}}\sum_i
+          w_i\|\mathbf{r}_i+\mathbf{J}_i\Delta\mathbf{x}\|_{\Omega_i}^2
+          \)</strong
+        >
+        with <strong>\( w_i=\rho'(s_i^{(k)}) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Let
+        <strong
+          >\(
+          s_i(\Delta\mathbf{x})=(\mathbf{r}_i+\mathbf{J}_i\Delta\mathbf{x})^{\top}\Omega_i(\mathbf{r}_i+\mathbf{J}_i\Delta\mathbf{x})
+          \)</strong
+        >. Taylor expand <strong>\( \rho \)</strong> around
+        <strong>\( s_i^{(k)} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \rho(s_i(\Delta\mathbf{x})) \approx \rho(s_i^{(k)}) +
+        \rho'(s_i^{(k)})(s_i(\Delta\mathbf{x})-s_i^{(k)}). \]
+      </h4>
+      <p>
+        Dropping constants yields
+        <strong
+          >\( \min_{\Delta\mathbf{x}} \sum_i
+          \rho'(s_i^{(k)})\,s_i(\Delta\mathbf{x}) \)</strong
+        >, which is weighted least squares with
+        <strong>\( w_i=\rho'(s_i^{(k)}) \)</strong>.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 2 (Huber derivative):</strong>
+        For
+        <strong>\( \rho(s)=s \)</strong> if
+        <strong>\( \sqrt{s}\le\delta \)</strong> and
+        <strong>\( \rho(s)=2\delta\sqrt{s}-\delta^2 \)</strong> if
+        <strong>\( \sqrt{s}\gt\delta \)</strong>, compute
+        <strong>\( w(s)=\rho'(s) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> If <strong>\( \sqrt{s}\le\delta \)</strong>,
+        <strong>\( \rho'(s)=1 \)</strong>. If
+        <strong>\( \sqrt{s}\gt\delta \)</strong>, then
+        <strong
+          >\( \rho(s)=2\delta s^{1/2}-\delta^2 \Rightarrow
+          \rho'(s)=\delta/\sqrt{s} \)</strong
+        >.
+      </p>
+      <h4 class="mathJax">
+        \[ w(s)= \begin{cases} 1, & \sqrt{s}\le \delta \\ \delta/\sqrt{s}, &
+        \sqrt{s} \gt \delta. \end{cases} \]
+      </h4>
+
+      <hr />
+
+      <p>
+        <strong>Problem 3 (MAP form):</strong>
+        Assume independent likelihoods
+        <strong
+          >\( p(\mathbf{z}_i\mid\mathbf{x})\propto
+          \exp(-\tfrac{1}{2}\rho(s_i(\mathbf{x}))) \)</strong
+        >. Derive the MAP objective.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        <strong
+          >\( p(\mathcal{Z}\mid\mathbf{x})\propto \prod_i
+          \exp(-\tfrac{1}{2}\rho(s_i(\mathbf{x}))) \)</strong
+        >. Negative log (dropping constants) gives
+        <strong>\( \min_{\mathbf{x}} \sum_i \rho(s_i(\mathbf{x})) \)</strong>.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 4 (Chi-square tuning):</strong>
+        Residual dimension is <strong>\( d=3 \)</strong> and inliers are
+        Gaussian. Choose <strong>\( \delta \)</strong> so that
+        <strong>\( \mathbb{P}(s\le\delta^2)=0.95 \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Under inlier Gaussianity,
+        <strong>\( s\sim\chi^2_3 \)</strong> approximately. Choose
+        <strong>\( \delta=\sqrt{\chi^2_{3,0.95}} \)</strong>.
+      </p>
+
+      <hr />
+
+      <p>
+        <strong>Problem 5 (Bounded influence vs outlier domination):</strong>
+        Explain why least squares can be dominated by a single outlier, but
+        Huber cannot.
+      </p>
+      <p>
+        <strong>Solution:</strong> Least squares has unbounded influence
+        <strong>\( \psi(r)=2r \)</strong>, so as
+        <strong>\( |r| \)</strong> grows, its effect grows without limit. Huber
+        has bounded influence for <strong>\( |r| \gt \delta \)</strong>, namely
+        <strong>\( \psi(r)=2\delta\operatorname{sign}(r) \)</strong>, so a
+        single outlier cannot create arbitrarily large pull.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 15: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>15. Summary</h2>
+    <div class="down-content">
+      <p>
+        Robust kernels replace <strong>\( \sum s_{ij} \)</strong> with
+        <strong>\( \sum \rho(s_{ij}) \)</strong>, limiting the influence of
+        false constraints. They admit a clean MAP interpretation via
+        heavy-tailed likelihoods. IRLS enables practical robust SLAM by
+        repeatedly solving weighted least squares using the same sparse
+        Gauss–Newton/LM machinery, simply scaling each edge’s information by
+        <strong>\( w_i=\rho'(s_i) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 16: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>16. References</h2>
+    <ol>
+      <li>
+        Huber, P.J. (1964). Robust estimation of a location parameter.
+        <em>Annals of Mathematical Statistics</em>, 35(1), 73–101.
+      </li>
+      <li>
+        Hampel, F.R. (1974). The influence curve and its role in robust
+        estimation.
+        <em>Journal of the American Statistical Association</em>, 69(346),
+        383–393.
+      </li>
+      <li>
+        Black, M.J., &amp; Rangarajan, A. (1996). On the unification of line
+        processes, outlier rejection, and robust statistics with applications in
+        early vision.
+        <em>International Journal of Computer Vision</em>, 19(1), 57–91.
+      </li>
+      <li>
+        Triggs, B., McLauchlan, P.F., Hartley, R.I., &amp; Fitzgibbon, A.W.
+        (2000). Bundle adjustment — a modern synthesis.
+        <em>Vision Algorithms: Theory and Practice</em> (LNCS 1883), 298–372.
+      </li>
+      <li>
+        Kümmerle, R., Grisetti, G., Strasdat, H., Konolige, K., &amp; Burgard,
+        W. (2011). g2o: A general framework for graph optimization.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 3607–3613.
+      </li>
+      <li>
+        Sünderhauf, N., &amp; Protzel, P. (2012). Switchable constraints for
+        robust pose graph SLAM.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 1879–1884.
+      </li>
+      <li>
+        Agarwal, P., Tipaldi, G.D., Spinello, L., Stachniss, C., &amp; Burgard,
+        W. (2013). Robust map optimization using dynamic covariance scaling.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 62–69.
+      </li>
+      <li>
+        Dellaert, F. (2012). Factor graphs and GTSAM: A hands-on introduction.
+        <em>Technical report, Georgia Institute of Technology</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter12/Lesson3.html">
+          Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter12/Lesson5.html">
+          Lesson 5: Lab: Build and Optimize a Pose Graph
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="active-lesson" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

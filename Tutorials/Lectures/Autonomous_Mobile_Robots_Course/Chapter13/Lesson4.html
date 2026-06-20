@@ -1,0 +1,1891 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus) - Lesson 4: Scale, Lighting, and Motion Blur Issues | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</h1>
+    <h3><strong>Lesson 4: Scale, Lighting, and Motion Blur Issues</strong></h3>
+    <p>
+      This lesson analyzes three coupled failure mechanisms in visual and
+      visual–inertial SLAM for autonomous mobile robots: (i) metric scale
+      ambiguity (and scale drift) in monocular pipelines, (ii) photometric
+      non-stationarity due to exposure and illumination changes, and (iii)
+      motion blur from platform vibrations and aggressive motions. We develop
+      formal measurement models, derive observability/identifiability statements
+      and practical estimators, and connect them to robust front-end designs
+      (feature-based and direct).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        From earlier lessons, a visual or visual–inertial pipeline estimates a
+        state
+        <strong>\( \mathbf{x}_k \)</strong> (pose, velocity, biases, map
+        variables) by minimizing residuals formed from camera and IMU data. In
+        practice, three “non-idealities” dominate AMR deployments:
+      </p>
+      <ul>
+        <li>
+          <strong>Scale:</strong> monocular vision alone constrains translation
+          only up to an unknown positive scale. Even with VIO, scale couples
+          with accelerometer bias and gravity alignment during initialization.
+        </li>
+        <li>
+          <strong>Lighting:</strong> brightness constancy is violated by
+          auto-exposure, gain changes, HDR tone mapping, and spatial effects
+          (vignetting). Direct methods are especially sensitive unless
+          photometrically calibrated.
+        </li>
+        <li>
+          <strong>Motion blur:</strong> images become temporally integrated
+          measurements; gradients shrink, descriptors degrade, and tracking
+          Jacobians lose rank. Rough terrain and wheel-induced vibrations make
+          blur common for AMR.
+        </li>
+      </ul>
+
+      <p>
+        We will treat these as modeling mismatches. The main pattern is: replace
+        an invalid assumption (metric scale known, brightness constant,
+        “instantaneous” image) with an explicit latent model, then estimate or
+        marginalize the nuisance parameters using robust losses (from Chapter
+        12) and IMU priors (from Lesson 3).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start"] --> A["Acquire image frame and IMU window"]
+  A --> D["Compute diagnostics: blur score, \nexposure change, parallax check"]
+  D -->|blur high| B1["Mitigate blur: \nshorten exposure, \ndrop frame, \nIMU-guided deblur"]
+  D -->|lighting change| B2["Mitigate lighting: \naffine gain/offset, \nphotometric calibration"]
+  D -->|scale uncertain| B3["Mitigate scale: \nVIO initialization, \nwheel/stereo/range cue"]
+  B1 --> E["Run VO/VIO tracking and update"]
+  B2 --> E
+  B3 --> E
+  E --> K["Keyframe decision and robust outlier handling"]
+  K --> O["Output pose and map update"]</pre
+        >
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Scale Ambiguity in Monocular Visual Odometry -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Scale Ambiguity (Monocular VO) and Its AMR Failure Modes</h2>
+    <div class="down-content">
+      <p>
+        For a calibrated pinhole camera with intrinsics
+        <strong>\( \mathbf{K} \)</strong>, a 3D point
+        <strong>\( \mathbf{X} \in \mathbb{R}^3 \)</strong> observed at time
+        \(k\) projects to pixel <strong>\( \mathbf{u}_k \)</strong> as
+      </p>
+
+      <h4 class="mathJax">
+        \[ \tilde{\mathbf{u} }_k \propto \mathbf{K}\left(\mathbf{R}_k\mathbf{X}
+        + \mathbf{t}_k\right),\qquad \mathbf{u}_k = \pi(\tilde{\mathbf{u} }_k),
+        \quad \pi([x\;y\;z]^T)=\left[\frac{x}{z}\;\;\frac{y}{z}\right]^T. \]
+      </h4>
+
+      <p>
+        Define the camera-frame point
+        <strong
+          >\( \mathbf{Y}_k = \mathbf{R}_k\mathbf{X} + \mathbf{t}_k \)</strong
+        >. Monocular scale ambiguity follows from the fact that normalized
+        coordinates depend only on ratios:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \pi(s\mathbf{Y}_k) = \left[\frac{sY_{k,1} }{sY_{k,3}
+        }\;\;\frac{sY_{k,2} }{sY_{k,3} }\right]^T = \left[\frac{Y_{k,1}
+        }{Y_{k,3} }\;\;\frac{Y_{k,2} }{Y_{k,3} }\right]^T = \pi(\mathbf{Y}_k),
+        \quad s &gt; 0. \]
+      </h4>
+
+      <p>
+        <strong>Consequence (two-view geometry):</strong> epipolar constraints
+        depend on the essential matrix
+        <strong>\( \mathbf{E}=[\mathbf{t}]_\times \mathbf{R} \)</strong>, but
+        <strong>\( \mathbf{t} \)</strong> is only identifiable up to a scale
+        factor: <strong>\( \mathbf{E} \)</strong> is unchanged by replacing
+        <strong>\( \mathbf{t} \)</strong> with
+        <strong>\( s\mathbf{t} \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}_2^T \mathbf{E}\mathbf{x}_1 = 0,\quad \mathbf{E} =
+        [\mathbf{t}]_\times \mathbf{R},\quad [s\mathbf{t}]_\times \mathbf{R} =
+        s([\mathbf{t}]_\times \mathbf{R}) \;\Rightarrow\; \mathbf{E} \text{
+        defined up to scale.} \]
+      </h4>
+
+      <p>
+        <strong>AMR-specific failure mode:</strong> wheeled robots often
+        experience long periods of near-planar motion with limited parallax,
+        especially in corridors (forward motion with small yaw). This weakens
+        triangulation, inflates depth uncertainty, and makes scale drift in
+        monocular SLAM more likely (even if the instantaneous scale is
+        arbitrary, drift corrupts map consistency).
+      </p>
+
+      <p>
+        A common monocular SLAM back-end therefore tracks similarity transforms
+        (Sim(3)) between keyframes to correct accumulated scale drift. The
+        “scale state” becomes a slowly varying latent variable that must be
+        constrained by loop closures or additional sensors.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: How VIO Makes Scale (Mostly) Observable -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      3. Scale Observability via Inertial Constraints (Why Initialization
+      Matters)
+    </h2>
+    <div class="down-content">
+      <p>
+        IMU provides metric acceleration (specific force) and angular velocity.
+        A standard continuous-time model is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{p} } = \mathbf{v},\qquad \dot{\mathbf{v} } = \mathbf{g}
+        + \mathbf{R}\left(\mathbf{a}_m - \mathbf{b}_a - \mathbf{n}_a\right),
+        \qquad \boldsymbol{\omega}_m = \boldsymbol{\omega} + \mathbf{b}_\omega +
+        \mathbf{n}_\omega, \]
+      </h4>
+
+      <p>
+        where <strong>\( \mathbf{p},\mathbf{v} \)</strong> are
+        position/velocity, <strong>\( \mathbf{R} \)</strong> is attitude,
+        <strong>\( \mathbf{g} \)</strong> is gravity, and
+        <strong>\( \mathbf{b}_a,\mathbf{b}_\omega \)</strong> are biases. Vision
+        provides geometric constraints that are <em>up-to-scale</em>. Model the
+        unknown metric scale with a scalar <strong>\( s \)</strong> such that:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{p}_k = s\,\hat{\mathbf{p} }_k,\qquad \mathbf{v}_k =
+        s\,\hat{\mathbf{v} }_k, \]
+      </h4>
+
+      <p>
+        where <strong>\( \hat{\mathbf{p} }_k,\hat{\mathbf{v} }_k \)</strong> are
+        the “visual” trajectory expressed in arbitrary units. Differentiating
+        gives
+        <strong>\( \dot{\mathbf{v} } = s\,\dot{\hat{\mathbf{v} } } \)</strong>.
+        Plugging into the IMU dynamics:
+      </p>
+
+      <h4 class="mathJax">
+        \[ s\,\dot{\hat{\mathbf{v} } } = \mathbf{g} +
+        \mathbf{R}\left(\mathbf{a}_m - \mathbf{b}_a - \mathbf{n}_a\right). \]
+      </h4>
+
+      <p>
+        <strong>Key coupling:</strong> during initialization, scale
+        <strong>\( s \)</strong> is entangled with gravity direction and
+        accelerometer bias. If the platform motion is “degenerate” (e.g.,
+        near-constant velocity with little excitation), multiple combinations of
+        <strong>\( (s,\mathbf{g},\mathbf{b}_a) \)</strong> explain the data
+        nearly equally well.
+      </p>
+
+      <p>
+        A practical (and provable) engineering rule is: VIO needs sufficiently
+        rich excitation (changes in acceleration direction and angular rates)
+        over an initialization window to make the scale and gravity observable
+        with acceptable conditioning.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  V["Vision: up-to-scale pose increments"] --> F["Estimator (sliding window / factor graph)"]
+  I["IMU: omega_m and a_m (metric)"] --> F
+  F --> S["Estimate: scale, gravity, biases, poses"]
+  S --> C["Consistency checks: scale jump, bias magnitude, reprojection error"]
+  C -->|pass| O["Continue VIO tracking"]
+  C -->|fail| R["Re-initialize with richer motion / longer window"]</pre
+        >
+      </div>
+
+      <p>
+        <strong>Takeaway for AMR:</strong> if an AMR starts from rest and moves
+        smoothly with tiny accelerations, initialization is fragile. A
+        deliberate “excitation pattern” (short forward–stop–turn sequence) often
+        stabilizes scale and bias estimation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Lighting / Photometric Non-Stationarity -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      4. Lighting Changes: From Brightness Constancy to Photometric Models
+    </h2>
+    <div class="down-content">
+      <p>
+        Direct methods rely on brightness constancy between a reference image
+        <strong>\( I_r \)</strong> and a current image
+        <strong>\( I_c \)</strong>: for a pixel
+        <strong>\( \mathbf{u} \)</strong> warped by motion parameters
+        <strong>\( \boldsymbol{\xi} \)</strong>, the ideal model is
+        <strong
+          >\( I_r(\mathbf{u}) \approx I_c(w(\mathbf{u};\boldsymbol{\xi}))
+          \)</strong
+        >. Under exposure and gain changes, a more robust
+        <em>affine photometric model</em> is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ I_c(\mathbf{u}') \approx a\,I_r(\mathbf{u}) + b,\qquad a &gt; 0,
+        \quad \mathbf{u}' = w(\mathbf{u};\boldsymbol{\xi}). \]
+      </h4>
+
+      <p>
+        The per-pixel residual becomes:
+        <strong> \( r(\mathbf{u}) \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ r(\mathbf{u}) = I_c(w(\mathbf{u};\boldsymbol{\xi})) -
+        \left(a\,I_r(\mathbf{u}) + b\right). \]
+      </h4>
+
+      <p>
+        For a set of selected pixels <strong>\( \Omega \)</strong>, the (robust)
+        objective is:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+        \min_{\boldsymbol{\xi},a,b}\;\sum_{\mathbf{u}\in\Omega}\rho\!\left(r(\mathbf{u})\right),
+        \]
+      </h4>
+
+      <p>
+        with <strong>\( \rho(\cdot) \)</strong> a robust loss (Huber/Cauchy),
+        consistent with Chapter 12. Linearizing around the current estimate
+        yields the Gauss–Newton normal equations:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \left(\mathbf{J}^T
+        \mathbf{W}\mathbf{J}\right)\Delta\boldsymbol{\theta} = -\mathbf{J}^T
+        \mathbf{W}\mathbf{r}, \quad \boldsymbol{\theta} =
+        [\boldsymbol{\xi}^T\;a\;b]^T. \]
+      </h4>
+
+      <p>The Jacobians are structurally important:</p>
+
+      <h4 class="mathJax">
+        \[ \frac{\partial r}{\partial a} = -I_r(\mathbf{u}),\qquad
+        \frac{\partial r}{\partial b} = -1,\qquad \frac{\partial r}{\partial
+        \boldsymbol{\xi} } = \nabla I_c(\mathbf{u}')\;\frac{\partial
+        w(\mathbf{u};\boldsymbol{\xi})}{\partial \boldsymbol{\xi} }. \]
+      </h4>
+
+      <p>
+        <strong>Feature-based note:</strong> descriptors (ORB/SIFT-like) aim for
+        partial illumination invariance, but drastic exposure steps still cause
+        (i) fewer stable keypoints due to saturation, and (ii) systematic
+        mismatch due to nonlinear camera response. In practice, applying
+        photometric calibration (response curve + vignetting + exposure time)
+        improves both direct and feature-based tracking when auto-exposure is
+        active.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Motion Blur as an Image Formation Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      5. Motion Blur: Temporal Integration, Information Loss, and IMU Cues
+    </h2>
+    <div class="down-content">
+      <p>
+        For exposure duration <strong>\( T \)</strong>, a blurred image is
+        (approximately) a temporal average of sharp irradiance under a
+        time-varying warp <strong>\( w_t \)</strong> caused by camera motion
+        during exposure:
+      </p>
+
+      <h4 class="mathJax">
+        \[ I_{\text{blur} }(\mathbf{u}) \approx \frac{1}{T}\int_{0}^{T}
+        I_{\text{sharp} }(w_t(\mathbf{u}))\,dt. \]
+      </h4>
+
+      <p>
+        Under small motion and locally constant depth, this often reduces to a
+        convolution:
+        <strong
+          >\( I_{\text{blur} } \approx \mathbf{K}\ast I_{\text{sharp} }
+          \)</strong
+        >
+        with a motion-dependent kernel <strong>\( \mathbf{K} \)</strong>.
+        Convolution attenuates high spatial frequencies, which are precisely
+        what direct alignment and feature extraction rely on.
+      </p>
+
+      <p>
+        A useful analytical bound follows from the fact that spatial gradients
+        commute with convolution:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \nabla(I_{\text{blur} }) = \nabla(\mathbf{K}\ast I_{\text{sharp} }) =
+        \mathbf{K}\ast \nabla(I_{\text{sharp} }). \]
+      </h4>
+
+      <p>
+        If <strong>\( \mathbf{K} \)</strong> is normalized (typical blur PSF),
+        then gradient energy decreases (smoothing):
+      </p>
+
+      <h4 class="mathJax">
+        \[ \|\nabla I_{\text{blur} }\|_2 \;&lt;\; \|\nabla I_{\text{sharp} }\|_2
+        \quad \Rightarrow \quad \mathbf{H}=\mathbf{J}^T\mathbf{W}\mathbf{J}
+        \text{ becomes ill-conditioned in direct tracking.} \]
+      </h4>
+
+      <p>
+        <strong>IMU cue (engineering approximation):</strong> for dominant
+        rotational blur, pixel smear length is proportional to angular rate and
+        exposure:
+      </p>
+
+      <h4 class="mathJax">
+        \[ L_{\text{px} } \approx f\,\|\boldsymbol{\omega}\|\,T, \]
+      </h4>
+
+      <p>
+        where <strong>\( f \)</strong> is focal length in pixels. Thus gyro data
+        can (i) predict blur severity, (ii) trigger frame dropping, or (iii)
+        guide blur-aware tracking/deblurring in specialized pipelines.
+      </p>
+
+      <p>
+        <strong>Fast blur diagnostic (often used in practice):</strong> variance
+        of Laplacian (focus measure). If <strong>\( \Delta I \)</strong> is the
+        Laplacian image, then
+        <strong> \( s_{\text{blur} } \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ s_{\text{blur} } = \operatorname{Var}\!\left(\Delta I\right), \quad
+        s_{\text{blur} } \text{ small } \Rightarrow \text{ image is likely
+        blurred / low-detail.} \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Practical Mitigation Strategies (AMR-Oriented) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Practical Mitigations (Without Introducing New Course Topics)</h2>
+    <div class="down-content">
+      <p>
+        Below are mitigations that directly match models already introduced in
+        Chapter 13 (VO/VIO) and Chapter 12 (robust optimization):
+      </p>
+
+      <h3>6.1 Scale</h3>
+      <ul>
+        <li>
+          <strong>VIO initialization discipline:</strong> ensure non-degenerate
+          motion; increase window length; enforce bias priors.
+        </li>
+        <li>
+          <strong>Additional metric cues:</strong> wheel odometry (already in
+          earlier chapters), stereo/range, or known-height constraints in indoor
+          AMR.
+        </li>
+        <li>
+          <strong>Robust scale consistency checks:</strong> flag large scale
+          jumps between keyframes; reinitialize when violated.
+        </li>
+      </ul>
+
+      <h3>6.2 Lighting</h3>
+      <ul>
+        <li>
+          <strong>Affine brightness compensation:</strong> estimate
+          <strong>\( a,b \)</strong> per frame-pair (closed form if warp fixed).
+        </li>
+        <li>
+          <strong>Photometric calibration:</strong> compensate exposure time,
+          response nonlinearity, and vignetting where possible.
+        </li>
+        <li>
+          <strong>Robust losses:</strong> treat saturated pixels and shadows as
+          outliers using robust kernels (Chapter 12).
+        </li>
+      </ul>
+
+      <h3>6.3 Motion blur</h3>
+      <ul>
+        <li>
+          <strong>Frame selection:</strong> skip updates when blur score is
+          below threshold; rely temporarily on IMU propagation.
+        </li>
+        <li>
+          <strong>Multi-scale alignment:</strong> coarse-to-fine pyramids
+          partially tolerate blur (because blur is “less severe” at coarse
+          scales).
+        </li>
+        <li>
+          <strong>IMU-triggered exposure control:</strong> increase shutter
+          speed when gyro magnitude rises (hardware-dependent, but conceptually
+          simple).
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Implementations (Python / C++ / Java / MATLAB / Mathematica) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following minimal implementations demonstrate: (i) monocular scale
+        ambiguity + a synthetic IMU “scale fix”, (ii) affine brightness fitting,
+        and (iii) blur score via variance of Laplacian. For real systems, these
+        components sit inside the front-end (tracking) and initialization logic.
+      </p>
+
+      <p><strong>Code: Chapter13_Lesson4.py</strong></p>
+      <pre><code class="language-python"># Chapter13_Lesson4.py
+# Visual/VIO SLAM robustness: (1) monocular scale ambiguity, (2) lighting change via affine photometric model,
+# (3) motion blur metric via variance of Laplacian.
+#
+# Dependencies: numpy, opencv-python
+#
+# Run:
+#   python Chapter13_Lesson4.py
+
+import numpy as np
+import cv2
+
+
+def project_points(K, R, t, Xw):
+    '''
+    Pinhole projection with intrinsics K:
+      u = pi( K [R|t] X )
+    '''
+    Xc = (R @ Xw.T + t.reshape(3, 1)).T  # Nx3
+    x = Xc[:, :2] / Xc[:, 2:3]          # normalized
+    u = (K[:2, :2] @ x.T + K[:2, 2:3]).T
+    return u, Xc
+
+
+def monocular_two_view_scale_demo(seed=0):
+    np.random.seed(seed)
+
+    fx = fy = 420.0
+    cx, cy = 320.0, 240.0
+    K = np.array([[fx, 0, cx],
+                  [0, fy, cy],
+                  [0, 0, 1.0]], dtype=float)
+
+    # 3D points (world) in front of camera 1
+    N = 200
+    Xw = np.column_stack([
+        np.random.uniform(-2.0, 2.0, N),
+        np.random.uniform(-1.0, 1.0, N),
+        np.random.uniform(4.0, 8.0, N),
+    ])
+
+    R1 = np.eye(3)
+    t1 = np.zeros(3)
+
+    # Pose 2: small yaw + forward translation (true metric, unknown to monocular)
+    yaw = np.deg2rad(5.0)
+    R2 = np.array([[np.cos(yaw), 0, np.sin(yaw)],
+                   [0, 1, 0],
+                   [-np.sin(yaw), 0, np.cos(yaw)]], dtype=float)
+    t2_metric = np.array([0.20, 0.0, 0.80])  # meters
+
+    u1, _ = project_points(K, R1, t1, Xw)
+    u2, _ = project_points(K, R2, t2_metric, Xw)
+
+    # Add pixel noise
+    noise = 0.5
+    u1n = u1 + np.random.normal(0, noise, u1.shape)
+    u2n = u2 + np.random.normal(0, noise, u2.shape)
+
+    E, _inl = cv2.findEssentialMat(u1n, u2n, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+    _, _R_est, t_est, _mask = cv2.recoverPose(E, u1n, u2n, K)
+
+    t_unit = t_est.reshape(3)
+    t_unit_norm = np.linalg.norm(t_unit)
+
+    print("\n--- Monocular 2-view: translation scale ambiguity ---")
+    print("Recovered translation direction (unit up to noise):", t_unit)
+    print("||t_unit||:", t_unit_norm)
+    print("True metric translation:", t2_metric, "||t_metric||:", np.linalg.norm(t2_metric))
+
+    # Suppose an IMU-based integration provides metric delta-position over the same interval.
+    # Here we fake it as ground truth + small noise.
+    delta_p_imu = t2_metric + np.random.normal(0, 0.02, 3)
+
+    scale_hat = np.linalg.norm(delta_p_imu) / (t_unit_norm + 1e-12)
+    t_metric_hat = scale_hat * t_unit
+
+    print("IMU delta_p (fake):", delta_p_imu)
+    print("Estimated scale_hat:", scale_hat)
+    print("Metric translation from scale_hat * t_unit:", t_metric_hat)
+
+
+def affine_brightness_fit(I1, I2, mask=None):
+    '''
+    Solve min_{a,b} sum_p (a I1(p) + b - I2(p))^2.
+    Returns (a,b).
+    '''
+    if mask is None:
+        mask = np.ones(I1.shape, dtype=bool)
+    x = I1[mask].reshape(-1, 1).astype(np.float64)
+    y = I2[mask].reshape(-1, 1).astype(np.float64)
+    A = np.hstack([x, np.ones_like(x)])
+    theta, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+    a, b = float(theta[0]), float(theta[1])
+    return a, b
+
+
+def blur_score_var_laplacian(gray):
+    L = cv2.Laplacian(gray, cv2.CV_64F)
+    return float(L.var())
+
+
+def photometric_demo():
+    print("\n--- Lighting change + blur demo (synthetic) ---")
+
+    img = np.zeros((240, 320), dtype=np.uint8)
+    cv2.putText(img, "AMR", (60, 140), cv2.FONT_HERSHEY_SIMPLEX, 2.0, 255, 3, cv2.LINE_AA)
+
+    a_true, b_true = 1.2, -10.0
+    img2 = np.clip(a_true * img.astype(np.float64) + b_true, 0, 255).astype(np.uint8)
+
+    # Add blur (simulating motion blur / defocus)
+    img2 = cv2.GaussianBlur(img2, (9, 9), 2.5)
+
+    a_hat, b_hat = affine_brightness_fit(img, img2)
+    print("True (a,b):", (a_true, b_true))
+    print("Estimated (a,b):", (a_hat, b_hat))
+
+    s1 = blur_score_var_laplacian(img)
+    s2 = blur_score_var_laplacian(img2)
+    print("Blur score var(Laplacian): sharp=", s1, " blurred=", s2)
+
+
+def main():
+    monocular_two_view_scale_demo(seed=0)
+    photometric_demo()
+
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+      <p><strong>Code: Chapter13_Lesson4.cpp</strong></p>
+      <pre><code class="language-cpp">// Chapter13_Lesson4.cpp
+// Robustness utilities: affine brightness fit and blur metric (variance of Laplacian).
+// Dependencies: OpenCV
+//
+// Build (example):
+//   g++ -std=c++17 Chapter13_Lesson4.cpp `pkg-config --cflags --libs opencv4` -o lesson4
+//
+// Run:
+//   ./lesson4 img1.png img2.png
+
+#include &lt;opencv2/opencv.hpp&gt;
+#include &lt;iostream&gt;
+#include &lt;cmath&gt;
+
+static double varLaplacian(const cv::Mat&amp; gray) {
+    cv::Mat lap;
+    cv::Laplacian(gray, lap, CV_64F);
+    cv::Scalar mu, sigma;
+    cv::meanStdDev(lap, mu, sigma);
+    return sigma[0] * sigma[0];
+}
+
+static void affineBrightnessFit(const cv::Mat&amp; I1, const cv::Mat&amp; I2, double&amp; a, double&amp; b) {
+    // Solve min_{a,b} || a*I1 + b - I2 ||^2 (least squares), grayscale images.
+    CV_Assert(I1.size() == I2.size() &amp;&amp; I1.type() == CV_8U &amp;&amp; I2.type() == CV_8U);
+
+    double Sx = 0.0, Sy = 0.0, Sxx = 0.0, Sxy = 0.0;
+    const int N = I1.rows * I1.cols;
+
+    for (int y = 0; y &lt; I1.rows; ++y) {
+        const uchar* p1 = I1.ptr&lt;uchar&gt;(y);
+        const uchar* p2 = I2.ptr&lt;uchar&gt;(y);
+        for (int x = 0; x &lt; I1.cols; ++x) {
+            const double X = static_cast&lt;double&gt;(p1[x]);
+            const double Y = static_cast&lt;double&gt;(p2[x]);
+            Sx += X;   Sy += Y;
+            Sxx += X * X;
+            Sxy += X * Y;
+        }
+    }
+
+    // Normal equations:
+    // [Sxx Sx] [a] = [Sxy]
+    // [Sx  N ] [b]   [Sy ]
+    const double det = Sxx * N - Sx * Sx;
+    if (std::abs(det) &lt; 1e-12) {
+        a = 1.0; b = 0.0; return;
+    }
+    a = (Sxy * N - Sy * Sx) / det;
+    b = (Sxx * Sy - Sx * Sxy) / det;
+}
+
+int main(int argc, char** argv) {
+    if (argc &lt; 3) {
+        std::cerr &lt;&lt; "Usage: " &lt;&lt; argv[0] &lt;&lt; " img1 img2\n";
+        return 1;
+    }
+
+    cv::Mat img1 = cv::imread(argv[1], cv::IMREAD_GRAYSCALE);
+    cv::Mat img2 = cv::imread(argv[2], cv::IMREAD_GRAYSCALE);
+    if (img1.empty() || img2.empty()) {
+        std::cerr &lt;&lt; "Could not read images.\n";
+        return 1;
+    }
+    cv::resize(img2, img2, img1.size());
+
+    double a = 1.0, b = 0.0;
+    affineBrightnessFit(img1, img2, a, b);
+
+    const double s1 = varLaplacian(img1);
+    const double s2 = varLaplacian(img2);
+
+    std::cout &lt;&lt; "Estimated affine brightness: a=" &lt;&lt; a &lt;&lt; " b=" &lt;&lt; b &lt;&lt; "\n";
+    std::cout &lt;&lt; "Blur score var(Laplacian): img1=" &lt;&lt; s1 &lt;&lt; " img2=" &lt;&lt; s2 &lt;&lt; "\n";
+    return 0;
+}
+</code></pre>
+
+      <p><strong>Code: Chapter13_Lesson4.java</strong></p>
+      <pre><code class="language-java">// Chapter13_Lesson4.java
+// Robustness utilities: affine brightness fit and blur metric (variance of Laplacian).
+// Dependencies: OpenCV Java bindings.
+//
+// Run (conceptual):
+//   javac -cp .:opencv-xxx.jar Chapter13_Lesson4.java
+//   java  -cp .:opencv-xxx.jar -Djava.library.path=&lt;path_to_native_libs&gt; Chapter13_Lesson4 img1.png img2.png
+
+import org.opencv.core.*;
+import org.opencv.imgcodecs.Imgcodecs;
+import org.opencv.imgproc.Imgproc;
+
+public class Chapter13_Lesson4 {
+    static { System.loadLibrary(Core.NATIVE_LIBRARY_NAME); }
+
+    static double varLaplacian(Mat gray) {
+        Mat lap = new Mat();
+        Imgproc.Laplacian(gray, lap, CvType.CV_64F);
+        MatOfDouble mean = new MatOfDouble();
+        MatOfDouble std  = new MatOfDouble();
+        Core.meanStdDev(lap, mean, std);
+        double s = std.toArray()[0];
+        return s * s;
+    }
+
+    static double[] affineBrightnessFit(Mat I1, Mat I2) {
+        // Solve min_{a,b} || a*I1 + b - I2 ||^2 via normal equations (grayscale).
+        if (I1.type() != CvType.CV_8U) I1.convertTo(I1, CvType.CV_8U);
+        if (I2.type() != CvType.CV_8U) I2.convertTo(I2, CvType.CV_8U);
+
+        double Sx = 0, Sy = 0, Sxx = 0, Sxy = 0;
+        int rows = I1.rows(), cols = I1.cols();
+        int N = rows * cols;
+
+        byte[] buf1 = new byte[cols];
+        byte[] buf2 = new byte[cols];
+
+        for (int y = 0; y &lt; rows; y++) {
+            I1.get(y, 0, buf1);
+            I2.get(y, 0, buf2);
+            for (int x = 0; x &lt; cols; x++) {
+                double X = (buf1[x] &amp; 0xFF);
+                double Y = (buf2[x] &amp; 0xFF);
+                Sx += X; Sy += Y;
+                Sxx += X * X;
+                Sxy += X * Y;
+            }
+        }
+
+        double det = Sxx * N - Sx * Sx;
+        double a = 1.0, b = 0.0;
+        if (Math.abs(det) &gt;= 1e-12) {
+            a = (Sxy * N - Sy * Sx) / det;
+            b = (Sxx * Sy - Sx * Sxy) / det;
+        }
+        return new double[]{a, b};
+    }
+
+    public static void main(String[] args) {
+        if (args.length &lt; 2) {
+            System.out.println("Usage: java Chapter13_Lesson4 img1 img2");
+            return;
+        }
+
+        Mat img1 = Imgcodecs.imread(args[0], Imgcodecs.IMREAD_GRAYSCALE);
+        Mat img2 = Imgcodecs.imread(args[1], Imgcodecs.IMREAD_GRAYSCALE);
+        if (img1.empty() || img2.empty()) {
+            System.out.println("Could not read images.");
+            return;
+        }
+        Imgproc.resize(img2, img2, img1.size());
+
+        double[] ab = affineBrightnessFit(img1, img2);
+        double s1 = varLaplacian(img1);
+        double s2 = varLaplacian(img2);
+
+        System.out.println("Estimated affine brightness: a=" + ab[0] + " b=" + ab[1]);
+        System.out.println("Blur score var(Laplacian): img1=" + s1 + " img2=" + s2);
+    }
+}
+</code></pre>
+
+      <p><strong>Code: Chapter13_Lesson4.m</strong></p>
+      <pre><code class="language-matlab">% Chapter13_Lesson4.m
+% Visual/VIO SLAM robustness demo:
+%  (1) monocular scale ambiguity via essential matrix (synthetic),
+%  (2) affine brightness fit (gain/offset),
+%  (3) blur score via Laplacian variance.
+%
+% Requires: Computer Vision Toolbox for estimateEssentialMatrix / relativeCameraPose.
+
+function Chapter13_Lesson4()
+
+% --- 1) Scale ambiguity demo (synthetic) ---
+rng(0);
+fx = 420; fy = 420; cx = 320; cy = 240;
+K = [fx 0 cx; 0 fy cy; 0 0 1];
+
+N = 200;
+Xw = [ (rand(N,1)*4-2), (rand(N,1)*2-1), (rand(N,1)*4+4) ]; % z in [4,8]
+
+R1 = eye(3); t1 = [0;0;0];
+
+yaw = deg2rad(5);
+R2 = [cos(yaw) 0 sin(yaw); 0 1 0; -sin(yaw) 0 cos(yaw)];
+t2_metric = [0.20; 0.0; 0.80];
+
+u1 = projectPoints(K,R1,t1,Xw);
+u2 = projectPoints(K,R2,t2_metric,Xw);
+
+noise = 0.5;
+u1n = u1 + noise*randn(size(u1));
+u2n = u2 + noise*randn(size(u2));
+
+[E,inliers] = estimateEssentialMatrix(u1n,u2n,K,K,'Confidence',99.9,'MaxNumTrials',2000);
+[orient, loc] = relativeCameraPose(E, K, u1n(inliers,:), u2n(inliers,:));
+
+t_unit = loc(:); % camera2 location in cam1 coordinates (up to scale)
+t_unit_norm = norm(t_unit);
+
+fprintf('\n--- Monocular 2-view: translation scale ambiguity ---\n');
+fprintf('Recovered translation direction (up to scale): [%g %g %g], ||t||=%g\n', t_unit, t_unit_norm);
+fprintf('True metric translation: [%g %g %g], ||t||=%g\n', t2_metric, norm(t2_metric));
+
+% Fake IMU metric delta-position:
+delta_p_imu = t2_metric + 0.02*randn(3,1);
+scale_hat = norm(delta_p_imu)/(t_unit_norm+1e-12);
+t_metric_hat = scale_hat*t_unit;
+fprintf('Estimated scale_hat=%g, metric t_hat=[%g %g %g]\n', scale_hat, t_metric_hat);
+
+% --- 2) Photometric affine fit ---
+img1 = zeros(240,320,'uint8');
+img1 = insertText(img1,[60 110],'AMR','FontSize',72,'BoxOpacity',0,'TextColor','white');
+img1 = rgb2gray(img1);
+
+a_true = 1.2; b_true = -10;
+img2 = uint8(min(max(a_true*double(img1)+b_true,0),255));
+img2 = imgaussfilt(img2,2.5);
+
+[a_hat, b_hat] = affineBrightnessFit(img1,img2);
+fprintf('\n--- Lighting change fit ---\n');
+fprintf('True (a,b)=(%g,%g), estimated=(%g,%g)\n', a_true,b_true,a_hat,b_hat);
+
+% --- 3) Blur score ---
+s1 = varLaplacian(img1);
+s2 = varLaplacian(img2);
+fprintf('\n--- Blur score ---\n');
+fprintf('Blur score var(Laplacian): sharp=%g, blurred=%g\n', s1, s2);
+
+end
+
+
+function u = projectPoints(K,R,t,Xw)
+Xc = (R*Xw' + t);
+x = Xc(1:2,:)./Xc(3,:);
+u = (K(1:2,1:2)*x + K(1:2,3)).';
+end
+
+function [a,b] = affineBrightnessFit(I1,I2)
+x = double(I1(:));
+y = double(I2(:));
+A = [x, ones(size(x))];
+theta = A\y;
+a = theta(1); b = theta(2);
+end
+
+function s = varLaplacian(gray)
+L = imfilter(double(gray), [0 1 0; 1 -4 1; 0 1 0], 'replicate');
+s = var(L(:));
+end
+</code></pre>
+
+      <p><strong>Code: Chapter13_Lesson4.nb</strong></p>
+      <pre><code class="language-mathematica">(* Chapter13_Lesson4.nb *)
+(* Wolfram Language notebook-style script (saved with .nb extension). *)
+
+(* --------------------------------------------------------------- *)
+(* 1) Monocular scale ambiguity: pinhole projection invariance      *)
+(* --------------------------------------------------------------- *)
+
+(* In normalized coordinates, a 3D point maps as:
+      x = (Y1/Y3, Y2/Y3) where Y = R X + t.
+   If we scale the scene and translation by s&gt;0:
+      Y' = R (s X) + s t = s (R X + t) = s Y
+   then x' = (s Y1)/(s Y3) = Y1/Y3, so the image is unchanged.
+*)
+
+ClearAll[s, Y1, Y2, Y3];
+Assuming[s &gt; 0 &amp;&amp; Y3 != 0,
+  Simplify[
+    (s {Y1, Y2, Y3})/(s {Y1, Y2, Y3}[[3]]) - ({Y1, Y2, Y3})/({Y1, Y2, Y3}[[3]])
+  ]
+]
+
+(* --------------------------------------------------------------- *)
+(* 2) Affine brightness model: closed-form least squares            *)
+(* --------------------------------------------------------------- *)
+
+(* Given samples (x_i, y_i), minimize Sum_i (a x_i + b - y_i)^2.
+   The normal equations yield:
+     [Sum x_i^2  Sum x_i] [a] = [Sum x_i y_i]
+     [Sum x_i    N     ] [b]   [Sum y_i    ]
+*)
+
+ClearAll[x, y, n];
+Sx  = Sum[x[i], {i, 1, n}];
+Sy  = Sum[y[i], {i, 1, n}];
+Sxx = Sum[x[i]^2, {i, 1, n}];
+Sxy = Sum[x[i] y[i], {i, 1, n}];
+
+theta = LinearSolve[{ {Sxx, Sx}, {Sx, n} }, {Sxy, Sy}];
+theta // Simplify
+
+(* --------------------------------------------------------------- *)
+(* 3) Motion blur: frequency-domain interpretation                 *)
+(* --------------------------------------------------------------- *)
+
+(* If I_blur = K * I, then Fourier: F{I_blur}(w) = H(w) F{I}(w).
+   For gradients: F{dI/dx}(w) = (j wx) F{I}(w), so blur attenuates high frequencies
+   when |H(w)| is small at large |w|, reducing gradient energy and thus alignment information.
+*)</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Monocular scale invariance):</strong>
+        Let
+        <strong>\( \mathbf{Y}=\mathbf{R}\mathbf{X}+\mathbf{t} \)</strong> and
+        <strong>\( \pi(\mathbf{Y})=[Y_1/Y_3\;\;Y_2/Y_3]^T \)</strong>. Prove
+        that for any <strong>\( s &gt; 0 \)</strong>,
+        <strong>\( \pi(s\mathbf{Y})=\pi(\mathbf{Y}) \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Substitute:
+        <strong
+          >\(
+          \pi(s\mathbf{Y})=[(sY_1)/(sY_3)\;\;(sY_2)/(sY_3)]^T=[Y_1/Y_3\;\;Y_2/Y_3]^T=\pi(\mathbf{Y})
+          \)</strong
+        >. Hence monocular image measurements cannot determine the absolute
+        scale of <strong>\( \mathbf{Y} \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Essential matrix scale):</strong>
+        Show that replacing <strong>\( \mathbf{t} \)</strong> with
+        <strong>\( s\mathbf{t} \)</strong> leaves the epipolar constraint
+        unchanged.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Since
+        <strong> \( [s\mathbf{t}]_\times = s[\mathbf{t}]_\times \)</strong>, we
+        get
+        <strong>
+          \( \mathbf{E}' = [s\mathbf{t}]_\times \mathbf{R} =
+          s\left([\mathbf{t}]_\times \mathbf{R}\right) = s\mathbf{E} \)</strong
+        >. The epipolar constraint is
+        <strong> \( \mathbf{x}_2^T \mathbf{E}\mathbf{x}_1 = 0 \)</strong>;
+        multiplying <strong> \( \mathbf{E} \)</strong> by any nonzero scalar
+        does not change the set of solutions to this equation. Therefore,
+        monocular two-view geometry identifies translation only up to an unknown
+        positive scale (i.e., direction only).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Closed-form affine brightness):</strong>
+        Given paired intensities <strong>\( \{(x_i,y_i)\}_{i=1}^N \)</strong>,
+        derive the normal equations for
+        <strong>\( \min_{a,b}\sum_i (a x_i + b - y_i)^2 \)</strong>.
+      </p>
+      <p><strong>Solution:</strong> Set partial derivatives to zero:</p>
+      <h4 class="mathJax">
+        \[ \frac{\partial}{\partial a}\sum_i (a x_i + b - y_i)^2 = 2\sum_i x_i(a
+        x_i + b - y_i)=0, \]
+      </h4>
+      <h4 class="mathJax">
+        \[ \frac{\partial}{\partial b}\sum_i (a x_i + b - y_i)^2 = 2\sum_i (a
+        x_i + b - y_i)=0. \]
+      </h4>
+      <p>Rearranging yields:</p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix} \sum_i x_i^2 & \sum_i x_i \\ \sum_i x_i & N
+        \end{bmatrix} \begin{bmatrix} a \\ b \end{bmatrix} = \begin{bmatrix}
+        \sum_i x_i y_i \\ \sum_i y_i \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        <strong>Problem 4 (Blur reduces gradient energy):</strong>
+        Let <strong>\( I_{\text{blur} }=\mathbf{K}\ast I \)</strong> where
+        <strong>\( \mathbf{K} \)</strong> is a normalized blur kernel. Prove
+        <strong
+          >\( \|\nabla I_{\text{blur} }\|_2 \;&lt;\; \|\nabla I\|_2 \)</strong
+        >
+        for typical low-pass kernels.
+      </p>
+      <p>
+        <strong>Solution:</strong> We have
+        <strong>\( \nabla I_{\text{blur} }=\mathbf{K}\ast \nabla I \)</strong>.
+        Convolution by a normalized low-pass kernel is a smoothing operator
+        whose Fourier magnitude response satisfies
+        <strong>\( |H(\omega)| \;&lt;\; 1 \)</strong> for high frequencies.
+        Since gradients emphasize high frequencies, Parseval’s identity implies
+        energy decreases:
+        <strong
+          >\( \|\nabla I_{\text{blur} }\|_2^2=\int
+          |H(\omega)|^2\,|\mathcal{F}\{\nabla I\}(\omega)|^2 d\omega \)</strong
+        >, hence it is smaller than the sharp case when
+        <strong>\( |H(\omega)| \)</strong> is not identically 1.
+      </p>
+
+      <p>
+        <strong>Problem 5 (IMU-based blur predictor):</strong>
+        Using
+        <strong>\( L_{\text{px} } \approx f\|\boldsymbol{\omega}\|T \)</strong>,
+        compute the predicted blur length for <strong>\( f=500 \)</strong> px,
+        <strong>\( \|\boldsymbol{\omega}\|=2 \)</strong> rad/s,
+        <strong>\( T=8 \)</strong> ms.
+      </p>
+      <p>
+        <strong>Solution:</strong> Convert <strong>\( T=8 \)</strong> ms to
+        seconds: <strong>\( T=0.008 \)</strong> s. Then
+        <strong
+          >\( L_{\text{px} } \approx 500 \times 2 \times 0.008 = 8 \)</strong
+        >
+        pixels. This is typically enough to degrade keypoints and direct
+        alignment unless mitigated (shorter exposure, frame skipping, or
+        blur-aware tracking).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formalized three robustness bottlenecks for visual and
+        visual–inertial SLAM on AMR: (i) monocular scale ambiguity (and scale
+        drift) due to projective invariance, (ii) lighting change as a
+        photometric model mismatch handled by affine gain/offset (and full
+        photometric calibration), and (iii) motion blur as temporal integration
+        that reduces gradient information and harms tracking. The unifying
+        remedy is explicit modeling + robust estimation + sensor-aided checks
+        (IMU/wheels) that prevent catastrophic updates.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References (Journal/Conference Style) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Engel, J., Koltun, V., &amp; Cremers, D. (2018). Direct Sparse Odometry.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        40(3), 611–625.
+      </li>
+      <li>
+        Engel, J., Schöps, T., &amp; Cremers, D. (2014). LSD-SLAM: Large-Scale
+        Direct Monocular SLAM.
+        <em>European Conference on Computer Vision (ECCV)</em>, 834–849.
+      </li>
+      <li>
+        Leutenegger, S., Lynen, S., Bosse, M., Siegwart, R., &amp; Furgale, P.
+        (2015). Keyframe-Based Visual–Inertial Odometry Using Nonlinear
+        Optimization.
+        <em>International Journal of Robotics Research</em>, 34(3), 314–334.
+      </li>
+      <li>
+        Mourikis, A.I., &amp; Roumeliotis, S.I. (2007). A Multi-State Constraint
+        Kalman Filter for Vision-Aided Inertial Navigation.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 3565–3572.
+      </li>
+      <li>
+        Qin, T., Li, P., Yang, Z., &amp; Shen, S. (2018). VINS-Mono: A Robust
+        and Versatile Monocular Visual–Inertial State Estimator.
+        <em>IEEE Transactions on Robotics</em>, 34(4), 1004–1020.
+      </li>
+      <li>
+        Bergmann, P., Schindler, K., &amp; Fraundorfer, F. (2017). Online
+        Photometric Calibration of Auto Exposure Video for Realtime Visual
+        Odometry.
+        <em
+          >IEEE International Conference on Computer Vision Workshops
+          (ICCVW)</em
+        >.
+      </li>
+      <li>
+        Pretto, A., Menegatti, E., &amp; Pagello, E. (2009). A Visual Odometry
+        Framework Robust to Motion Blur.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >.
+      </li>
+      <li>
+        Liu, P., Zuo, X., Larsson, V., &amp; Pollefeys, M. (2021). MBA-VO:
+        Motion Blur Aware Visual Odometry.
+        <em>IEEE International Conference on Computer Vision (ICCV)</em>.
+      </li>
+      <li>
+        Zheng, X., Moratto, Z., Li, M., &amp; Mourikis, A.I. (2017). Photometric
+        Patch-based Visual-Inertial Odometry.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson3.html">
+          Lesson 3: Visual–Inertial Fusion Pipelines
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson5.html">
+          Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="active-lesson" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

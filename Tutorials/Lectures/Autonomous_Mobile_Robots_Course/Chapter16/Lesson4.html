@@ -1,0 +1,2305 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 16: Obstacle Avoidance in Dynamic Environments - Lesson 4: Prediction-Aware Local Navigation | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 16: Obstacle Avoidance in Dynamic Environments</h1>
+    <h3><strong>Lesson 4: Prediction-Aware Local Navigation</strong></h3>
+    <p>
+      This lesson develops <em>prediction-aware</em> local navigation: the robot
+      plans controls while explicitly reasoning about
+      <strong>future</strong> trajectories of moving obstacles (people,
+      forklifts, robots) and the <strong>uncertainty</strong> of those
+      predictions. Building on sensing/tracking (Lesson 1), velocity-obstacle
+      reasoning (Lesson 2), and socially aware costs (Lesson 3), we formalize a
+      rigorous receding-horizon framework that integrates motion prediction with
+      local motion generation (e.g., DWA/TEB-style sampling) using risk-aware
+      constraints and probabilistic safety margins.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Why Prediction-Aware Navigation? -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Why Prediction-Aware Navigation?</h2>
+    <div class="down-content">
+      <p>
+        In static worlds, collision avoidance can be handled by geometric
+        clearance and reactive rules. In dynamic environments, however, the
+        robot must reason about
+        <strong>where obstacles will be</strong> at future times. If the robot
+        uses only instantaneous obstacle positions/velocities, it can oscillate,
+        stop unnecessarily, or enter unsafe <em>time-delayed</em> collisions
+        (e.g., stepping into a corridor that will be occupied moments later).
+      </p>
+
+      <p>
+        Prediction-aware navigation introduces a time horizon
+        <strong> \( T = N\Delta t \)</strong> and optimizes over a sequence of
+        controls
+        <strong> \( \mathbf{u}_0, \dots, \mathbf{u}_{N-1} \)</strong> while
+        using a predicted obstacle distribution
+        <strong>
+          \( p\big( \mathbf{o}_k \mid \mathcal{Z}_{0:k_0} \big) \)</strong
+        >
+        for future steps <strong> \( k &gt; k_0 \)</strong>.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sensors (LiDAR / camera / radar)"] --> TR["Track moving objects"]
+  TR --> PR["Predict future motion (mean + uncertainty)"]
+  PR --> LP["Local planner (receding horizon)"]
+  LP --> CMD["Execute first control (v,w)"]
+  CMD --> FB["Feedback: new measurements"]
+  FB --> TR
+        </pre>
+      </div>
+
+      <p>
+        The key technical question:
+        <strong
+          >how do we convert predictions into constraints and costs</strong
+        >
+        so that the planner is both safe and efficient?
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Tracking Model and Predictive Distributions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Tracking Model and Predictive Distributions</h2>
+    <div class="down-content">
+      <p>
+        We represent obstacle <strong> \( j \)</strong> by a (planar) state
+        <strong>
+          \( \mathbf{x}^o_j = [x_j, y_j, v_{x,j}, v_{y,j}]^\top \)</strong
+        >. A common baseline is a constant-velocity (CV) discrete-time model:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}^o_{j,k+1} = \mathbf{F}\mathbf{x}^o_{j,k} +
+        \mathbf{w}_{j,k}, \quad \mathbf{F} = \begin{bmatrix} 1 & 0 & \Delta t &
+        0 \\ 0 & 1 & 0 & \Delta t \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1
+        \end{bmatrix}, \quad \mathbf{w}_{j,k} \sim \mathcal{N}(\mathbf{0},
+        \mathbf{Q}) \]
+      </h4>
+
+      <p>
+        With position observations
+        <strong>
+          \( \mathbf{z}_{j,k} = [x_j, y_j]^\top + \mathbf{v}_{j,k} \)</strong
+        >,
+        <strong>
+          \( \mathbf{v}_{j,k} \sim \mathcal{N}(\mathbf{0}, \mathbf{R})
+          \)</strong
+        >, a Kalman filter yields the posterior
+        <strong>
+          \( \mathbf{x}^o_{j,k} \sim \mathcal{N}(\boldsymbol{\mu}^o_{j,k},
+          \mathbf{P}^o_{j,k}) \)</strong
+        >. For prediction to step <strong> \( k+\ell \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \boldsymbol{\mu}^o_{j,k+\ell \mid k} = \mathbf{F}^\ell
+        \boldsymbol{\mu}^o_{j,k}, \qquad \mathbf{P}^o_{j,k+\ell \mid k} =
+        \mathbf{F}^\ell \mathbf{P}^o_{j,k} (\mathbf{F}^\ell)^\top +
+        \sum_{i=0}^{\ell-1} \mathbf{F}^i \mathbf{Q} (\mathbf{F}^i)^\top. \]
+      </h4>
+
+      <p>
+        In practice, crowd motion can be <em>multi-modal</em>. A compact way to
+        represent this is a mixture:
+        <strong>
+          \( p(\mathbf{o}_{j,k+\ell}) = \sum_{m=1}^M \pi_m \,
+          \mathcal{N}(\boldsymbol{\mu}_{m}, \mathbf{P}_{m}) \)</strong
+        >. A planner can handle this by: (i) choosing a conservative envelope,
+        (ii) sampling modes, or (iii) allocating a risk budget
+        <strong> \( \delta \)</strong> across modes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Robot Local Model and Receding-Horizon Planning -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Robot Local Model and Receding-Horizon Planning</h2>
+    <div class="down-content">
+      <p>
+        For local planning we often use a low-order kinematic model. For a
+        unicycle: robot state
+        <strong> \( \mathbf{x}_k = [x_k, y_k, \theta_k]^\top \)</strong> and
+        control
+        <strong> \( \mathbf{u}_k = [v_k, \omega_k]^\top \)</strong> satisfy
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = f(\mathbf{x}_k, \mathbf{u}_k) = \begin{bmatrix}
+        x_k + \Delta t \, v_k \cos\theta_k \\ y_k + \Delta t \, v_k \sin\theta_k
+        \\ \theta_k + \Delta t \, \omega_k \end{bmatrix}. \]
+      </h4>
+
+      <p>
+        The canonical prediction-aware local objective over a horizon of
+        <strong> \( N \)</strong> steps is
+      </p>
+
+      <h4 class="mathJax">
+        \[ J(\mathbf{u}_{0:N-1}) = \sum_{k=0}^{N-1} \Big( \|\mathbf{p}_k -
+        \mathbf{p}^{\text{ref} }_k\|_{\mathbf{Q}_p}^2 +
+        \|\mathbf{u}_k\|_{\mathbf{Q}_u}^2 + \lambda \, \rho_k \Big) +
+        \|\mathbf{p}_N - \mathbf{p}_g\|_{\mathbf{Q}_g}^2, \]
+      </h4>
+
+      <p>
+        where <strong> \( \mathbf{p}_k=[x_k,y_k]^\top \)</strong>,
+        <strong> \( \mathbf{p}_g \)</strong> is the local goal, and
+        <strong> \( \rho_k \)</strong> is a risk term derived from predicted
+        obstacle distributions (next section). The planner executes only the
+        first control <strong> \( \mathbf{u}_0 \)</strong>, then replans at the
+        next timestep (receding horizon / MPC).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  I["Inputs: robot state, local goal, tracks"] --> P1["Predict obstacles for horizon"]
+  P1 --> P2["Generate candidate controls (samples or optimizer)"]
+  P2 --> P3["Rollout robot motion for each candidate"]
+  P3 --> P4["Compute cost: tracking + control + risk"]
+  P4 --> SEL["Select best candidate"]
+  SEL --> EX["Execute first control"]
+  EX --> SH["Shift horizon and repeat"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: From Predictions to Safety: Risk and Chance Constraints -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. From Predictions to Safety: Risk and Chance Constraints</h2>
+    <div class="down-content">
+      <p>
+        Deterministic collision avoidance enforces
+        <strong> \( \|\mathbf{p}_k - \mathbf{o}_{j,k}\|_2 \ge R \)</strong>
+        for all predicted times. With uncertainty, obstacle position becomes
+        random. A probability-of-collision constraint is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Pr\Big( \|\mathbf{p}_k - \mathbf{o}_{j,k}\|_2 \le R \Big) \le
+        \delta, \qquad 0 &lt; \delta &lt; 1. \]
+      </h4>
+
+      <p>
+        Exact evaluation is expensive (noncentral chi distribution). Instead we
+        derive a conservative, planner-friendly bound. Let the relative position
+        be the random vector
+        <strong> \( \mathbf{r} = \mathbf{p}_k - \mathbf{o}_{j,k} \)</strong>.
+        Assume a Gaussian prediction
+        <strong>
+          \( \mathbf{r} \sim \mathcal{N}(\boldsymbol{\mu}, \mathbf{\Sigma})
+          \)</strong
+        >
+        (common in Kalman-based tracking), with
+        <strong>
+          \( \boldsymbol{\mu} = \mathbf{p}_k - \boldsymbol{\mu}^o_{j,k}
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        Define the unit direction
+        <strong>
+          \( \mathbf{n} = \boldsymbol{\mu} / \|\boldsymbol{\mu}\|_2 \)</strong
+        >. The scalar projection
+        <strong> \( y = \mathbf{n}^\top \mathbf{r} \)</strong> is Gaussian:
+        <strong> \( y \sim \mathcal{N}(m, s^2) \)</strong> where
+        <strong>
+          \( m=\mathbf{n}^\top \boldsymbol{\mu} = \|\boldsymbol{\mu}\|_2
+          \)</strong
+        >
+        and
+        <strong> \( s^2=\mathbf{n}^\top \mathbf{\Sigma}\mathbf{n} \)</strong>.
+      </p>
+
+      <p>
+        Since the collision event
+        <strong> \( \|\mathbf{r}\|_2 \le R \)</strong> implies
+        <strong> \( \mathbf{n}^\top \mathbf{r} \le R \)</strong>, we get the
+        conservative implication:
+        <strong>
+          \( \Pr(\|\mathbf{r}\|_2 \le R) \le \Pr(\mathbf{n}^\top \mathbf{r} \le
+          R) \)</strong
+        >. Therefore it suffices to enforce
+        <strong> \( \Pr(y \le R) \le \delta \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \Pr(y \le R) = \Phi\!\left( \frac{R - m}{s} \right) \le \delta \quad
+        \Longleftrightarrow \quad m - R \ge z_{1-\delta} \, s, \]
+      </h4>
+
+      <p>
+        where <strong> \( \Phi \)</strong> is the standard normal CDF and
+        <strong> \( z_{1-\delta} = \Phi^{-1}(1-\delta) \)</strong>. This yields
+        a geometric “keep-out” margin:
+        <strong>
+          \( \|\boldsymbol{\mu}\|_2 \ge R + z_{1-\delta}\sqrt{\mathbf{n}^\top
+          \mathbf{\Sigma}\mathbf{n} } \)</strong
+        >.
+      </p>
+
+      <p><strong>Proof (conservativeness):</strong></p>
+      <p>
+        If <strong> \( \|\mathbf{r}\|_2 \le R \)</strong>, then for any unit
+        vector <strong> \( \mathbf{n} \)</strong>, by Cauchy–Schwarz,
+        <strong>
+          \( \mathbf{n}^\top \mathbf{r} \le \|\mathbf{n}\|_2 \|\mathbf{r}\|_2
+          \le R \)</strong
+        >. Hence the collision set is a subset of the half-space event
+        <strong> \( \{\mathbf{n}^\top \mathbf{r} \le R\} \)</strong>, implying
+        the probability bound above.
+      </p>
+
+      <p>
+        In implementation, this constraint is often softened into a quadratic
+        penalty
+        <strong> \( \rho_k = \max(0, z_{1-\delta}s - (m-R))^2 \)</strong> to
+        keep the planning problem smooth.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Prediction-Aware Costs Beyond Safety -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Prediction-Aware Costs Beyond Safety</h2>
+    <div class="down-content">
+      <p>
+        Besides explicit chance constraints, prediction enables richer
+        objectives that improve fluency and reduce deadlocks:
+      </p>
+      <ul>
+        <li>
+          <strong>Time-to-collision (TTC):</strong> For predicted relative
+          motion
+          <strong>
+            \( \mathbf{r}(t) \approx \mathbf{r}_0 + t \, \mathbf{v}_{rel}
+            \)</strong
+          >, define the smallest <strong> \( t &gt; 0 \)</strong> with
+          <strong> \( \|\mathbf{r}(t)\|_2 = R \)</strong>. Penalize small TTC to
+          avoid “late braking.”
+        </li>
+        <li>
+          <strong>Spatiotemporal clearance:</strong> A distance field
+          <strong> \( d(x,y,t) \)</strong> on a 3D grid allows costs like
+          <strong> \( \int_0^T \psi(d(\mathbf{p}(t),t)) \, dt \)</strong>.
+        </li>
+        <li>
+          <strong>Interaction-aware etiquette:</strong> In crowds, reduce
+          predicted “intrusions” into personal space:
+          <strong>
+            \( \sum_j \exp(-\|\mathbf{p}-\boldsymbol{\mu}^o_j\|_2/\sigma_{ps})
+            \)</strong
+          >, using the predicted mean path rather than instantaneous positions.
+        </li>
+      </ul>
+
+      <p>
+        A common engineering practice is to combine (i) a hard or soft
+        chance-constraint safety term, and (ii) a smooth social/comfort term
+        derived from predicted occupancy probability.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Linearization and (Approximate) Convexity for MPC -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Linearization and (Approximate) Convexity for MPC</h2>
+    <div class="down-content">
+      <p>
+        For sampling-based local planners (DWA-like), we can evaluate candidate
+        rollouts directly. For optimization-based MPC, we often linearize
+        dynamics around a nominal trajectory
+        <strong> \( \bar{\mathbf{x} }_k, \bar{\mathbf{u} }_k \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} \approx \bar{\mathbf{x} }_{k+1} +
+        \mathbf{A}_k(\mathbf{x}_k - \bar{\mathbf{x} }_k) +
+        \mathbf{B}_k(\mathbf{u}_k - \bar{\mathbf{u} }_k), \quad \mathbf{A}_k =
+        \left.\frac{\partial f}{\partial \mathbf{x} }\right|_{\bar{\mathbf{x}
+        }_k,\bar{\mathbf{u} }_k}, \ \mathbf{B}_k = \left.\frac{\partial
+        f}{\partial \mathbf{u} }\right|_{\bar{\mathbf{x} }_k,\bar{\mathbf{u}
+        }_k}. \]
+      </h4>
+
+      <p>
+        With quadratic tracking and control terms, the resulting subproblem is a
+        QP. The risk proxy from Section 4 can be approximated by a convex
+        penalty if we fix
+        <strong> \( \mathbf{n} \)</strong> using the current mean direction
+        <strong>
+          \( \mathbf{n} = \boldsymbol{\mu}/\|\boldsymbol{\mu}\|_2 \)</strong
+        >
+        (outer loop / SQP).
+      </p>
+
+      <p>
+        This gives a practical recipe used in many planners:
+        <strong
+          >(predict) &rarr; (linearize) &rarr; (solve) &rarr; (apply first
+          control) &rarr; (repeat)</strong
+        >.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Practical Integration in Navigation Stacks -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Practical Integration in Navigation Stacks</h2>
+    <div class="down-content">
+      <p>
+        Prediction-aware local navigation is typically realized by adding two
+        modules to the local planning loop:
+      </p>
+      <ol>
+        <li>
+          <strong>Tracking + prediction:</strong> multi-target tracking (e.g.,
+          Kalman/UKF/particle filters) that outputs predicted means and
+          covariances for the next <strong> \( N \)</strong> steps.
+        </li>
+        <li>
+          <strong>Time-indexed evaluation:</strong> local planner rollouts
+          include timestamps; each rollout point queries predicted obstacle
+          states at matching times, computing a risk-aware cost.
+        </li>
+      </ol>
+
+      <p><strong>Related software libraries</strong> (typical choices):</p>
+      <ul>
+        <li>
+          <strong>Python:</strong> ROS2 (<code>rclpy</code>), Nav2 interfaces,
+          <code>numpy</code>, <code>matplotlib</code>; for optimization MPC:
+          <code>CasADi</code>, <code>OSQP</code>.
+        </li>
+        <li>
+          <strong>C++:</strong> ROS2 Nav2, <code>Eigen</code> (linear algebra),
+          local planners (e.g., DWB/TEB-style), nonlinear solvers (IPOPT,
+          SNOPT), trajectory optimization toolkits.
+        </li>
+        <li>
+          <strong>Java:</strong> ROSJava (where available), EJML (linear
+          algebra), Apache Commons Math (stats), custom local planner loops for
+          research prototypes.
+        </li>
+        <li>
+          <strong>MATLAB/Simulink:</strong> Robotics System Toolbox (ROS2),
+          Navigation Toolbox, MPC Toolbox; Simulink for real-time testing (plant
+          + controller + tracker).
+        </li>
+        <li>
+          <strong>Wolfram Mathematica:</strong> rapid prototyping and analysis:
+          <code>NDSolve</code>, <code>InverseCDF</code>, nonlinear optimization,
+          symbolic checks of bounds.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Implementations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Implementations</h2>
+    <div class="down-content">
+      <p>
+        The following reference implementations demonstrate a prediction-aware
+        sampling MPC: we track obstacles (lightweight Gaussian model), predict
+        their future mean/uncertainty, sample control pairs
+        <strong> \( (v,\omega) \)</strong>, roll out the robot for
+        <strong> \( N \)</strong> steps, and score each rollout using (i) goal
+        tracking, (ii) control regularization, and (iii) the chance-constraint
+        penalty from Section 4.
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson4.py</strong></p>
+      <pre><code class="language-python">
+# Chapter16_Lesson4.py
+# Prediction-Aware Local Navigation (sampling MPC with chance-constraint penalty)
+# Dependencies: numpy, matplotlib (optional for plotting)
+
+import math
+import numpy as np
+
+def wrap_angle(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+class ObstacleTrack:
+    """
+    Simple 2D obstacle track with constant-velocity Gaussian prediction:
+      state x = [px, py, vx, vy]^T
+      covariance P (4x4)
+    """
+    def __init__(self, mean: np.ndarray, cov: np.ndarray, radius: float, name: str = "obs"):
+        self.mean = mean.astype(float).copy().reshape(4)
+        self.cov = cov.astype(float).copy().reshape(4, 4)
+        self.radius = float(radius)
+        self.name = name
+
+    @staticmethod
+    def from_position_velocity(px, py, vx, vy, pos_sigma=0.2, vel_sigma=0.5, radius=0.35, name="obs"):
+        mu = np.array([px, py, vx, vy], dtype=float)
+        P = np.diag([pos_sigma**2, pos_sigma**2, vel_sigma**2, vel_sigma**2])
+        return ObstacleTrack(mu, P, radius=radius, name=name)
+
+    def predict(self, dt: float, q_pos: float = 0.05, q_vel: float = 0.2) -&gt; None:
+        """
+        One-step CV prediction:
+          x_{k+1} = F x_k + w,  w ~ N(0,Q)
+        """
+        F = np.array([
+            [1.0, 0.0, dt, 0.0],
+            [0.0, 1.0, 0.0, dt],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ], dtype=float)
+        Q = np.diag([q_pos**2, q_pos**2, q_vel**2, q_vel**2]).astype(float)
+
+        self.mean = F @ self.mean
+        self.cov = F @ self.cov @ F.T + Q
+
+def unicycle_step(x: np.ndarray, u: np.ndarray, dt: float) -&gt; np.ndarray:
+    """
+    x = [px, py, theta], u = [v, w]
+    """
+    px, py, th = float(x[0]), float(x[1]), float(x[2])
+    v, w = float(u[0]), float(u[1])
+    nx = px + dt * v * math.cos(th)
+    ny = py + dt * v * math.sin(th)
+    nth = wrap_angle(th + dt * w)
+    return np.array([nx, ny, nth], dtype=float)
+
+def chance_penalty_point(
+    p_robot: np.ndarray,
+    track_mu: np.ndarray,
+    track_P: np.ndarray,
+    R_safe: float,
+    delta: float,
+    eps: float = 1e-9,
+) -&gt; float:
+    """
+    Conservative 1D-projection chance-constraint penalty.
+
+    Relative position r = p - o, where o ~ N(mu_o, Sigma_o)
+    Treat p as deterministic, so r ~ N(mu_r, Sigma_o_pos).
+    Let n = mu_r / ||mu_r||, y = n^T r ~ N(m, s^2), with:
+      m = ||mu_r||, s^2 = n^T Sigma n
+    Enforce m - R_safe &gt;= z_{1-delta} s. Penalize violation squared.
+    """
+    # Use only 2D position block of obstacle covariance.
+    Sigma = track_P[:2, :2]
+    mu_o = track_mu[:2]
+    mu_r = p_robot.reshape(2) - mu_o.reshape(2)
+    dist = float(np.linalg.norm(mu_r)) + eps
+    n = mu_r / dist
+
+    m = dist
+    s2 = float(n.T @ Sigma @ n)
+    s = math.sqrt(max(s2, 0.0) + eps)
+
+    # z_{1-delta} for common deltas (avoid scipy). Linear interp for nearby.
+    # For delta in {0.1,0.05,0.02,0.01,0.005,0.001}
+    z_table = {
+        0.1: 1.281551565545,
+        0.05: 1.644853626951,
+        0.02: 2.053748910631,
+        0.01: 2.326347874041,
+        0.005: 2.575829303549,
+        0.001: 3.090232306168,
+    }
+    if delta in z_table:
+        z = z_table[delta]
+    else:
+        # crude fallback: clamp and interpolate on log10(delta)
+        keys = sorted(z_table.keys())
+        d = min(max(delta, keys[0]), keys[-1])
+        # find bracketing
+        lo = max([k for k in keys if k &lt;= d])
+        hi = min([k for k in keys if k &gt;= d])
+        if lo == hi:
+            z = z_table[lo]
+        else:
+            t = (math.log10(d) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
+            z = (1 - t) * z_table[lo] + t * z_table[hi]
+
+    margin = z * s
+    violation = max(0.0, margin - (m - R_safe))
+    return violation * violation
+
+def rollout_cost(
+    x0: np.ndarray,
+    u: np.ndarray,
+    goal_xy: np.ndarray,
+    tracks0: list,
+    dt: float,
+    N: int,
+    weights: dict,
+    delta: float,
+    robot_radius: float,
+) -&gt; float:
+    """
+    Rollout with constant control u for N steps, while predicting obstacles forward.
+    """
+    x = x0.copy()
+    # copy tracks so we can predict in-place
+    tracks = [ObstacleTrack(t.mean.copy(), t.cov.copy(), t.radius, t.name) for t in tracks0]
+
+    w_goal = float(weights.get("goal", 1.0))
+    w_ctrl = float(weights.get("control", 0.05))
+    w_risk = float(weights.get("risk", 8.0))
+
+    cost = 0.0
+    for k in range(N):
+        # predict obstacles to this step (one-step ahead each loop)
+        for t in tracks:
+            t.predict(dt)
+
+        x = unicycle_step(x, u, dt)
+        p = x[:2]
+
+        # quadratic goal tracking
+        err = p - goal_xy.reshape(2)
+        cost += w_goal * float(err.T @ err)
+
+        # control regularization (constant control)
+        cost += w_ctrl * float(u.T @ u)
+
+        # risk penalty (sum over obstacles)
+        risk_k = 0.0
+        for t in tracks:
+            R_safe = robot_radius + t.radius
+            risk_k += chance_penalty_point(p, t.mean, t.cov, R_safe=R_safe, delta=delta)
+        cost += w_risk * risk_k
+
+    return cost
+
+def sample_controls(v_range, w_range, n_v: int, n_w: int):
+    vs = np.linspace(v_range[0], v_range[1], n_v)
+    ws = np.linspace(w_range[0], w_range[1], n_w)
+    for v in vs:
+        for w in ws:
+            yield np.array([v, w], dtype=float)
+
+def prediction_aware_local_plan(
+    x0: np.ndarray,
+    goal_xy: np.ndarray,
+    tracks: list,
+    dt: float = 0.1,
+    N: int = 20,
+    v_range=(0.0, 1.0),
+    w_range=(-1.5, 1.5),
+    n_v: int = 11,
+    n_w: int = 21,
+    delta: float = 0.01,
+    robot_radius: float = 0.25,
+):
+    """
+    Returns best control u* from a sampled set, using prediction-aware risk scoring.
+    """
+    weights = {"goal": 1.0, "control": 0.05, "risk": 10.0}
+
+    best_u = None
+    best_J = float("inf")
+    for u in sample_controls(v_range, w_range, n_v, n_w):
+        J = rollout_cost(
+            x0=x0,
+            u=u,
+            goal_xy=goal_xy,
+            tracks0=tracks,
+            dt=dt,
+            N=N,
+            weights=weights,
+            delta=delta,
+            robot_radius=robot_radius,
+        )
+        if J &lt; best_J:
+            best_J = J
+            best_u = u
+    return best_u, best_J
+
+def demo():
+    # Robot initial state and local goal
+    x0 = np.array([0.0, 0.0, 0.0], dtype=float)
+    goal = np.array([6.0, 0.0], dtype=float)
+
+    # Two moving obstacles crossing the corridor
+    tracks = [
+        ObstacleTrack.from_position_velocity(px=3.0, py=1.0, vx=0.0, vy=-0.6, pos_sigma=0.15, vel_sigma=0.3, radius=0.35, name="p1"),
+        ObstacleTrack.from_position_velocity(px=4.0, py=-1.2, vx=0.0, vy=0.7, pos_sigma=0.15, vel_sigma=0.3, radius=0.35, name="p2"),
+    ]
+
+    dt = 0.1
+    N = 25
+    u_star, J_star = prediction_aware_local_plan(
+        x0=x0,
+        goal_xy=goal,
+        tracks=tracks,
+        dt=dt,
+        N=N,
+        v_range=(0.0, 1.2),
+        w_range=(-1.8, 1.8),
+        n_v=13,
+        n_w=31,
+        delta=0.01,
+        robot_radius=0.25,
+    )
+    print("Best control u* = [v, w] =", u_star, " cost =", J_star)
+
+if __name__ == "__main__":
+    demo()
+      </code></pre>
+
+      <p><strong>Code: Chapter16_Lesson4.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter16_Lesson4.cpp
+// Prediction-Aware Local Navigation (sampling MPC with chance-constraint penalty)
+// Minimal, self-contained (no Eigen). Compile: g++ -O2 -std=c++17 Chapter16_Lesson4.cpp -o demo
+
+#include &lt;cmath&gt;
+#include &lt;cstddef&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;string&gt;
+#include &lt;utility&gt;
+#include &lt;vector&gt;
+
+static double wrap_angle(double a) {
+  const double pi = 3.14159265358979323846;
+  a = std::fmod(a + pi, 2.0 * pi);
+  if (a &lt; 0.0) a += 2.0 * pi;
+  return a - pi;
+}
+
+struct Vec2 {
+  double x{0.0}, y{0.0};
+};
+
+struct Vec3 {
+  double x{0.0}, y{0.0}, th{0.0};
+};
+
+struct Mat2 {
+  // row-major
+  double a11{0.0}, a12{0.0}, a21{0.0}, a22{0.0};
+};
+
+struct Track {
+  // mean: [px, py, vx, vy]
+  double px{0.0}, py{0.0}, vx{0.0}, vy{0.0};
+  // covariance for position block (2x2) only (for penalty)
+  Mat2 SigmaPos;
+  double radius{0.35};
+  std::string name{"obs"};
+
+  void predict(double dt, double q_pos = 0.05, double q_vel = 0.2) {
+    // constant velocity mean update
+    px += dt * vx;
+    py += dt * vy;
+
+    // crude covariance inflation (position grows with velocity uncertainty)
+    // For teaching: SigmaPos &lt;- SigmaPos + dt^2 * q_vel^2 I + q_pos^2 I
+    const double add = (dt * q_vel) * (dt * q_vel) + q_pos * q_pos;
+    SigmaPos.a11 += add;
+    SigmaPos.a22 += add;
+  }
+};
+
+static Vec3 unicycle_step(const Vec3& x, double v, double w, double dt) {
+  Vec3 nx;
+  nx.x = x.x + dt * v * std::cos(x.th);
+  nx.y = x.y + dt * v * std::sin(x.th);
+  nx.th = wrap_angle(x.th + dt * w);
+  return nx;
+}
+
+static double z_value(double delta) {
+  // table for z_{1-delta}
+  if (std::abs(delta - 0.1) &lt; 1e-12) return 1.281551565545;
+  if (std::abs(delta - 0.05) &lt; 1e-12) return 1.644853626951;
+  if (std::abs(delta - 0.02) &lt; 1e-12) return 2.053748910631;
+  if (std::abs(delta - 0.01) &lt; 1e-12) return 2.326347874041;
+  if (std::abs(delta - 0.005) &lt; 1e-12) return 2.575829303549;
+  if (std::abs(delta - 0.001) &lt; 1e-12) return 3.090232306168;
+  // fallback
+  return 2.326347874041;
+}
+
+static double chance_penalty_point(const Vec2& p, const Track& t, double R_safe, double delta) {
+  // mu_r = p - mu_o
+  const double mux = p.x - t.px;
+  const double muy = p.y - t.py;
+  const double dist = std::sqrt(mux * mux + muy * muy) + 1e-9;
+
+  // n = mu / ||mu||
+  const double nx = mux / dist;
+  const double ny = muy / dist;
+
+  // s^2 = n^T Sigma n
+  const double s2 = nx * (t.SigmaPos.a11 * nx + t.SigmaPos.a12 * ny)
+                  + ny * (t.SigmaPos.a21 * nx + t.SigmaPos.a22 * ny);
+  const double s = std::sqrt(std::max(0.0, s2) + 1e-12);
+
+  const double z = z_value(delta);
+  const double margin = z * s;
+  const double violation = std::max(0.0, margin - (dist - R_safe));
+  return violation * violation;
+}
+
+static double rollout_cost(
+    const Vec3& x0,
+    double v,
+    double w,
+    const Vec2& goal,
+    const std::vector&lt;Track&gt;& tracks0,
+    double dt,
+    int N,
+    double delta,
+    double robot_radius) {
+
+  const double w_goal = 1.0;
+  const double w_ctrl = 0.05;
+  const double w_risk = 10.0;
+
+  Vec3 x = x0;
+  std::vector&lt;Track&gt; tracks = tracks0; // copy to predict in-place
+
+  double cost = 0.0;
+  for (int k = 0; k &lt; N; ++k) {
+    for (auto& t : tracks) t.predict(dt);
+
+    x = unicycle_step(x, v, w, dt);
+
+    const double ex = x.x - goal.x;
+    const double ey = x.y - goal.y;
+    cost += w_goal * (ex * ex + ey * ey);
+
+    cost += w_ctrl * (v * v + w * w);
+
+    Vec2 p{x.x, x.y};
+    double risk_k = 0.0;
+    for (const auto& t : tracks) {
+      const double R_safe = robot_radius + t.radius;
+      risk_k += chance_penalty_point(p, t, R_safe, delta);
+    }
+    cost += w_risk * risk_k;
+  }
+  return cost;
+}
+
+int main() {
+  Vec3 x0{0.0, 0.0, 0.0};
+  Vec2 goal{6.0, 0.0};
+
+  std::vector&lt;Track&gt; tracks;
+  Track p1;
+  p1.px = 3.0; p1.py = 1.0; p1.vx = 0.0; p1.vy = -0.6; p1.radius = 0.35; p1.name = "p1";
+  p1.SigmaPos = Mat2{0.15 * 0.15, 0.0, 0.0, 0.15 * 0.15};
+  tracks.push_back(p1);
+
+  Track p2;
+  p2.px = 4.0; p2.py = -1.2; p2.vx = 0.0; p2.vy = 0.7; p2.radius = 0.35; p2.name = "p2";
+  p2.SigmaPos = Mat2{0.15 * 0.15, 0.0, 0.0, 0.15 * 0.15};
+  tracks.push_back(p2);
+
+  const double dt = 0.1;
+  const int N = 25;
+  const double delta = 0.01;
+  const double robot_radius = 0.25;
+
+  const double vmin = 0.0, vmax = 1.2;
+  const double wmin = -1.8, wmax = 1.8;
+  const int n_v = 13;
+  const int n_w = 31;
+
+  double best_v = 0.0, best_w = 0.0;
+  double best_J = std::numeric_limits&lt;double&gt;::infinity();
+
+  for (int i = 0; i &lt; n_v; ++i) {
+    const double v = vmin + (vmax - vmin) * (static_cast&lt;double&gt;(i) / (n_v - 1));
+    for (int j = 0; j &lt; n_w; ++j) {
+      const double w = wmin + (wmax - wmin) * (static_cast&lt;double&gt;(j) / (n_w - 1));
+      const double J = rollout_cost(x0, v, w, goal, tracks, dt, N, delta, robot_radius);
+      if (J &lt; best_J) {
+        best_J = J;
+        best_v = v;
+        best_w = w;
+      }
+    }
+  }
+
+  std::cout &lt;&lt; "Best control u* = [v,w] = [" &lt;&lt; best_v &lt;&lt; ", " &lt;&lt; best_w &lt;&lt; "], cost = " &lt;&lt; best_J &lt;&lt; "\n";
+  return 0;
+}
+      </code></pre>
+
+      <p><strong>Code: Chapter16_Lesson4.java</strong></p>
+      <pre><code class="language-java">
+// Chapter16_Lesson4.java
+// Prediction-Aware Local Navigation (sampling MPC with chance-constraint penalty)
+// Minimal self-contained Java. Compile: javac Chapter16_Lesson4.java ; Run: java Chapter16_Lesson4
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Chapter16_Lesson4 {
+
+  static double wrapAngle(double a) {
+    final double pi = Math.PI;
+    a = (a + pi) % (2.0 * pi);
+    if (a &lt; 0.0) a += 2.0 * pi;
+    return a - pi;
+  }
+
+  static class Vec2 {
+    double x, y;
+    Vec2(double x, double y) { this.x = x; this.y = y; }
+  }
+
+  static class Vec3 {
+    double x, y, th;
+    Vec3(double x, double y, double th) { this.x = x; this.y = y; this.th = th; }
+  }
+
+  static class Mat2 {
+    // row-major
+    double a11, a12, a21, a22;
+    Mat2(double a11, double a12, double a21, double a22) {
+      this.a11 = a11; this.a12 = a12; this.a21 = a21; this.a22 = a22;
+    }
+  }
+
+  static class Track {
+    double px, py, vx, vy;
+    Mat2 SigmaPos;
+    double radius;
+    String name;
+
+    Track(double px, double py, double vx, double vy, Mat2 SigmaPos, double radius, String name) {
+      this.px = px; this.py = py; this.vx = vx; this.vy = vy;
+      this.SigmaPos = SigmaPos;
+      this.radius = radius;
+      this.name = name;
+    }
+
+    void predict(double dt, double qPos, double qVel) {
+      px += dt * vx;
+      py += dt * vy;
+      double add = (dt * qVel) * (dt * qVel) + qPos * qPos;
+      SigmaPos.a11 += add;
+      SigmaPos.a22 += add;
+    }
+  }
+
+  static Vec3 unicycleStep(Vec3 x, double v, double w, double dt) {
+    double nx = x.x + dt * v * Math.cos(x.th);
+    double ny = x.y + dt * v * Math.sin(x.th);
+    double nth = wrapAngle(x.th + dt * w);
+    return new Vec3(nx, ny, nth);
+  }
+
+  static double zValue(double delta) {
+    if (Math.abs(delta - 0.1) &lt; 1e-12) return 1.281551565545;
+    if (Math.abs(delta - 0.05) &lt; 1e-12) return 1.644853626951;
+    if (Math.abs(delta - 0.02) &lt; 1e-12) return 2.053748910631;
+    if (Math.abs(delta - 0.01) &lt; 1e-12) return 2.326347874041;
+    if (Math.abs(delta - 0.005) &lt; 1e-12) return 2.575829303549;
+    if (Math.abs(delta - 0.001) &lt; 1e-12) return 3.090232306168;
+    return 2.326347874041; // fallback
+  }
+
+  static double chancePenaltyPoint(Vec2 p, Track t, double RSafe, double delta) {
+    double mux = p.x - t.px;
+    double muy = p.y - t.py;
+    double dist = Math.sqrt(mux * mux + muy * muy) + 1e-9;
+
+    double nx = mux / dist;
+    double ny = muy / dist;
+
+    double s2 = nx * (t.SigmaPos.a11 * nx + t.SigmaPos.a12 * ny)
+              + ny * (t.SigmaPos.a21 * nx + t.SigmaPos.a22 * ny);
+    double s = Math.sqrt(Math.max(0.0, s2) + 1e-12);
+
+    double z = zValue(delta);
+    double margin = z * s;
+    double violation = Math.max(0.0, margin - (dist - RSafe));
+    return violation * violation;
+  }
+
+  static double rolloutCost(
+      Vec3 x0,
+      double v,
+      double w,
+      Vec2 goal,
+      List&lt;Track&gt; tracks0,
+      double dt,
+      int N,
+      double delta,
+      double robotRadius) {
+
+    double wGoal = 1.0;
+    double wCtrl = 0.05;
+    double wRisk = 10.0;
+
+    Vec3 x = new Vec3(x0.x, x0.y, x0.th);
+    List&lt;Track&gt; tracks = new ArrayList&lt;&gt;();
+    for (Track t : tracks0) {
+      tracks.add(new Track(t.px, t.py, t.vx, t.vy,
+          new Mat2(t.SigmaPos.a11, t.SigmaPos.a12, t.SigmaPos.a21, t.SigmaPos.a22),
+          t.radius, t.name));
+    }
+
+    double cost = 0.0;
+    for (int k = 0; k &lt; N; ++k) {
+      for (Track t : tracks) t.predict(dt, 0.05, 0.2);
+
+      x = unicycleStep(x, v, w, dt);
+
+      double ex = x.x - goal.x;
+      double ey = x.y - goal.y;
+      cost += wGoal * (ex * ex + ey * ey);
+
+      cost += wCtrl * (v * v + w * w);
+
+      Vec2 p = new Vec2(x.x, x.y);
+      double risk = 0.0;
+      for (Track t : tracks) {
+        double RSafe = robotRadius + t.radius;
+        risk += chancePenaltyPoint(p, t, RSafe, delta);
+      }
+      cost += wRisk * risk;
+    }
+    return cost;
+  }
+
+  public static void main(String[] args) {
+    Vec3 x0 = new Vec3(0.0, 0.0, 0.0);
+    Vec2 goal = new Vec2(6.0, 0.0);
+
+    List&lt;Track&gt; tracks = new ArrayList&lt;&gt;();
+    tracks.add(new Track(3.0, 1.0, 0.0, -0.6, new Mat2(0.15*0.15, 0.0, 0.0, 0.15*0.15), 0.35, "p1"));
+    tracks.add(new Track(4.0, -1.2, 0.0, 0.7, new Mat2(0.15*0.15, 0.0, 0.0, 0.15*0.15), 0.35, "p2"));
+
+    double dt = 0.1;
+    int N = 25;
+    double delta = 0.01;
+    double robotRadius = 0.25;
+
+    double vmin = 0.0, vmax = 1.2;
+    double wmin = -1.8, wmax = 1.8;
+    int nV = 13, nW = 31;
+
+    double bestV = 0.0, bestW = 0.0;
+    double bestJ = Double.POSITIVE_INFINITY;
+
+    for (int i = 0; i &lt; nV; ++i) {
+      double v = vmin + (vmax - vmin) * (i / (double)(nV - 1));
+      for (int j = 0; j &lt; nW; ++j) {
+        double w = wmin + (wmax - wmin) * (j / (double)(nW - 1));
+        double J = rolloutCost(x0, v, w, goal, tracks, dt, N, delta, robotRadius);
+        if (J &lt; bestJ) {
+          bestJ = J;
+          bestV = v;
+          bestW = w;
+        }
+      }
+    }
+
+    System.out.println("Best control u* = [v,w] = [" + bestV + ", " + bestW + "], cost = " + bestJ);
+  }
+}
+      </code></pre>
+
+      <p><strong>Code: Chapter16_Lesson4.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter16_Lesson4.m
+% Prediction-Aware Local Navigation (sampling MPC with chance-constraint penalty)
+% Minimal MATLAB script (no toolboxes required).
+
+function Chapter16_Lesson4()
+  x0 = [0; 0; 0];           % [x;y;theta]
+  goal = [6; 0];
+
+  % Two moving obstacles (mean state + simple pos covariance)
+  tracks(1).mu = [3; 1; 0; -0.6];
+  tracks(1).Sigma = diag([0.15^2, 0.15^2, 0.3^2, 0.3^2]);
+  tracks(1).r = 0.35;
+
+  tracks(2).mu = [4; -1.2; 0; 0.7];
+  tracks(2).Sigma = diag([0.15^2, 0.15^2, 0.3^2, 0.3^2]);
+  tracks(2).r = 0.35;
+
+  dt = 0.1; N = 25;
+  delta = 0.01;
+  robot_r = 0.25;
+
+  v_range = [0, 1.2];
+  w_range = [-1.8, 1.8];
+  n_v = 13; n_w = 31;
+
+  bestJ = inf; bestU = [0;0];
+  for i = 1:n_v
+    v = v_range(1) + (v_range(2)-v_range(1))*(i-1)/(n_v-1);
+    for j = 1:n_w
+      w = w_range(1) + (w_range(2)-w_range(1))*(j-1)/(n_w-1);
+      J = rollout_cost(x0, [v; w], goal, tracks, dt, N, delta, robot_r);
+      if J &lt; bestJ
+        bestJ = J;
+        bestU = [v; w];
+      end
+    end
+  end
+
+  fprintf('Best control u* = [v,w] = [%.3f, %.3f], cost = %.3f\n', bestU(1), bestU(2), bestJ);
+end
+
+function x1 = unicycle_step(x, u, dt)
+  v = u(1); w = u(2);
+  x1 = zeros(3,1);
+  x1(1) = x(1) + dt*v*cos(x(3));
+  x1(2) = x(2) + dt*v*sin(x(3));
+  x1(3) = wrapToPi(x(3) + dt*w);
+end
+
+function tracks1 = predict_tracks(tracks, dt)
+  % constant velocity prediction for mean, covariance inflation
+  F = [1 0 dt 0;
+       0 1 0 dt;
+       0 0 1 0;
+       0 0 0 1];
+  Q = diag([0.05^2, 0.05^2, 0.2^2, 0.2^2]);
+  tracks1 = tracks;
+  for k = 1:numel(tracks)
+    tracks1(k).mu = F*tracks(k).mu;
+    tracks1(k).Sigma = F*tracks(k).Sigma*F' + Q;
+  end
+end
+
+function pen = chance_penalty_point(p, mu_o, Sigma_o, R_safe, delta)
+  Sigma = Sigma_o(1:2,1:2);
+  mu_r = p - mu_o(1:2);
+  dist = norm(mu_r) + 1e-9;
+  n = mu_r / dist;
+
+  m = dist;
+  s2 = n'*Sigma*n;
+  s = sqrt(max(0,s2) + 1e-12);
+
+  z = z_value(delta);
+  margin = z*s;
+  violation = max(0, margin - (m - R_safe));
+  pen = violation^2;
+end
+
+function z = z_value(delta)
+  % z_{1-delta} table
+  if abs(delta-0.1) &lt; 1e-12, z = 1.281551565545;
+  elseif abs(delta-0.05) &lt; 1e-12, z = 1.644853626951;
+  elseif abs(delta-0.02) &lt; 1e-12, z = 2.053748910631;
+  elseif abs(delta-0.01) &lt; 1e-12, z = 2.326347874041;
+  elseif abs(delta-0.005) &lt; 1e-12, z = 2.575829303549;
+  elseif abs(delta-0.001) &lt; 1e-12, z = 3.090232306168;
+  else, z = 2.326347874041; % fallback
+  end
+end
+
+function J = rollout_cost(x0, u, goal, tracks0, dt, N, delta, robot_r)
+  w_goal = 1.0; w_ctrl = 0.05; w_risk = 10.0;
+
+  x = x0; tracks = tracks0;
+  J = 0;
+  for k = 1:N
+    tracks = predict_tracks(tracks, dt);
+    x = unicycle_step(x, u, dt);
+
+    e = x(1:2) - goal;
+    J = J + w_goal*(e'*e) + w_ctrl*(u'*u);
+
+    risk = 0;
+    for j = 1:numel(tracks)
+      R_safe = robot_r + tracks(j).r;
+      risk = risk + chance_penalty_point(x(1:2), tracks(j).mu, tracks(j).Sigma, R_safe, delta);
+    end
+    J = J + w_risk*risk;
+  end
+end
+      </code></pre>
+
+      <p><strong>Code: Chapter16_Lesson4.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter16_Lesson4.nb
+   Prediction-Aware Local Navigation (sampling MPC with chance-constraint penalty)
+   Mathematica / Wolfram Language script-style content. *)
+
+ClearAll["Global`*"];
+
+wrapAngle[a_] := Module[{pi = Pi, b = Mod[a + Pi, 2 Pi]},
+  If[b &lt; 0, b = b + 2 Pi];
+  b - Pi
+];
+
+unicycleStep[x_, u_, dt_] := Module[{px, py, th, v, w},
+  {px, py, th} = x; {v, w} = u;
+  {
+    px + dt*v*Cos[th],
+    py + dt*v*Sin[th],
+    wrapAngle[th + dt*w]
+  }
+];
+
+zValue[delta_] := Which[
+  Abs[delta - 0.1] &lt; 10^-12, 1.281551565545,
+  Abs[delta - 0.05] &lt; 10^-12, 1.644853626951,
+  Abs[delta - 0.02] &lt; 10^-12, 2.053748910631,
+  Abs[delta - 0.01] &lt; 10^-12, 2.326347874041,
+  Abs[delta - 0.005] &lt; 10^-12, 2.575829303549,
+  Abs[delta - 0.001] &lt; 10^-12, 3.090232306168,
+  True, 2.326347874041
+];
+
+predictTrack[track_, dt_] := Module[{F, Q, mu, Sigma},
+  F = { {1, 0, dt, 0},
+       {0, 1, 0, dt},
+       {0, 0, 1, 0},
+       {0, 0, 0, 1} };
+  Q = DiagonalMatrix[{0.05^2, 0.05^2, 0.2^2, 0.2^2}];
+  mu = F.track["mu"];
+  Sigma = F.track["Sigma"].Transpose[F] + Q;
+  Association[track, "mu" -&gt; mu, "Sigma" -&gt; Sigma]
+];
+
+chancePenaltyPoint[p_, track_, RSafe_, delta_] := Module[
+  {muO, Sigma2, muR, dist, n, m, s2, s, z, margin, violation},
+  muO = track["mu"][[{1, 2}]];
+  Sigma2 = track["Sigma"][[{1, 2}, {1, 2}]];
+  muR = p - muO;
+  dist = Norm[muR] + 10^-9;
+  n = muR/dist;
+  m = dist;
+  s2 = n.Sigma2.n;
+  s = Sqrt[Max[0, s2] + 10^-12];
+  z = zValue[delta];
+  margin = z*s;
+  violation = Max[0, margin - (m - RSafe)];
+  violation^2
+];
+
+rolloutCost[x0_, u_, goal_, tracks0_, dt_, N_, delta_, robotR_] := Module[
+  {wGoal = 1.0, wCtrl = 0.05, wRisk = 10.0, x = x0, tracks = tracks0, J = 0.0, k, e, risk},
+  For[k = 1, k &lt;= N, k++,
+    tracks = predictTrack[#, dt] &amp; /@ tracks;
+    x = unicycleStep[x, u, dt];
+    e = x[[{1, 2}]] - goal;
+    J = J + wGoal*(e.e) + wCtrl*(u.u);
+    risk = Total@Table[
+      chancePenaltyPoint[x[[{1, 2}]], tracks[[j]], robotR + tracks[[j]]["r"], delta],
+      {j, Length[tracks]}
+    ];
+    J = J + wRisk*risk;
+  ];
+  J
+];
+
+(* Demo setup *)
+x0 = {0.0, 0.0, 0.0};
+goal = {6.0, 0.0};
+dt = 0.1; N = 25; delta = 0.01; robotR = 0.25;
+
+tracks = {
+  &lt;|"mu" -&gt; {3.0, 1.0, 0.0, -0.6},
+    "Sigma" -&gt; DiagonalMatrix[{0.15^2, 0.15^2, 0.3^2, 0.3^2}],
+    "r" -&gt; 0.35, "name" -&gt; "p1"|&gt;,
+  &lt;|"mu" -&gt; {4.0, -1.2, 0.0, 0.7},
+    "Sigma" -&gt; DiagonalMatrix[{0.15^2, 0.15^2, 0.3^2, 0.3^2}],
+    "r" -&gt; 0.35, "name" -&gt; "p2"|&gt;
+};
+
+vRange = {0.0, 1.2};
+wRange = {-1.8, 1.8};
+nV = 13; nW = 31;
+
+bestU = {0.0, 0.0};
+bestJ = Infinity;
+
+Do[
+  v = vRange[[1]] + (vRange[[2]] - vRange[[1]])*(i - 1)/(nV - 1);
+  Do[
+    w = wRange[[1]] + (wRange[[2]] - wRange[[1]])*(j - 1)/(nW - 1);
+    J = rolloutCost[x0, {v, w}, goal, tracks, dt, N, delta, robotR];
+    If[J &lt; bestJ, bestJ = J; bestU = {v, w};],
+    {j, 1, nW}
+  ],
+  {i, 1, nV}
+];
+
+Print["Best control u* = [v,w] = ", bestU, ", cost = ", bestJ];
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Gaussian prediction propagation):</strong>
+        Assume an obstacle CV model
+        <strong>
+          \( \mathbf{x}^o_{k+1}=\mathbf{F}\mathbf{x}^o_k+\mathbf{w}_k \)</strong
+        >,
+        <strong>
+          \( \mathbf{w}_k \sim \mathcal{N}(\mathbf{0},\mathbf{Q}) \)</strong
+        >. Prove the prediction recursion
+        <strong>
+          \( \boldsymbol{\mu}_{k+1|k}=\mathbf{F}\boldsymbol{\mu}_{k|k}
+          \)</strong
+        >,
+        <strong>
+          \(
+          \mathbf{P}_{k+1|k}=\mathbf{F}\mathbf{P}_{k|k}\mathbf{F}^\top+\mathbf{Q}
+          \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        By linearity,
+        <strong>
+          \( E[\mathbf{x}_{k+1}] = E[\mathbf{F}\mathbf{x}_k+\mathbf{w}_k] =
+          \mathbf{F}E[\mathbf{x}_k]+E[\mathbf{w}_k] \)</strong
+        >
+        and <strong> \( E[\mathbf{w}_k]=\mathbf{0} \)</strong>, hence the mean
+        recursion. For covariance,
+        <strong>
+          \(
+          \mathbf{P}_{k+1}=E[(\mathbf{x}_{k+1}-\boldsymbol{\mu}_{k+1})(\cdot)^\top]
+          \)</strong
+        >. Substitute
+        <strong>
+          \(
+          \mathbf{x}_{k+1}-\boldsymbol{\mu}_{k+1}=\mathbf{F}(\mathbf{x}_k-\boldsymbol{\mu}_k)+\mathbf{w}_k
+          \)</strong
+        >. Using independence of <strong> \( \mathbf{w}_k \)</strong> and
+        <strong> \( \mathbf{x}_k \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1} = \mathbf{F}\mathbf{P}_k\mathbf{F}^\top + \mathbf{Q}
+        + E[\mathbf{F}(\mathbf{x}_k-\boldsymbol{\mu}_k)\mathbf{w}_k^\top] +
+        E[\mathbf{w}_k(\mathbf{x}_k-\boldsymbol{\mu}_k)^\top\mathbf{F}^\top] =
+        \mathbf{F}\mathbf{P}_k\mathbf{F}^\top + \mathbf{Q}. \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Chance-constraint bound):</strong>
+        Let <strong> \( y \sim \mathcal{N}(m,s^2) \)</strong>. Show that
+        <strong> \( \Pr(y \le R) \le \delta \)</strong> is equivalent to
+        <strong> \( m - R \ge z_{1-\delta} s \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Standardize: <strong> \( (y-m)/s \sim \mathcal{N}(0,1) \)</strong>. Then
+        <strong>
+          \( \Pr(y \le R) = \Pr((y-m)/s \le (R-m)/s) = \Phi((R-m)/s) \)</strong
+        >. The inequality
+        <strong> \( \Phi((R-m)/s) \le \delta \)</strong> implies
+        <strong> \( (R-m)/s \le \Phi^{-1}(\delta) = -z_{1-\delta} \)</strong>,
+        hence <strong> \( m-R \ge z_{1-\delta}s \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Conservativeness of the projection test):</strong>
+        Prove that for any random vector
+        <strong> \( \mathbf{r} \in \mathbb{R}^2 \)</strong> and any unit
+        <strong> \( \mathbf{n} \)</strong>, the event
+        <strong> \( \{\|\mathbf{r}\|_2 \le R\} \)</strong> implies
+        <strong> \( \{\mathbf{n}^\top \mathbf{r} \le R\} \)</strong>, and thus
+        <strong>
+          \( \Pr(\|\mathbf{r}\|_2 \le R) \le \Pr(\mathbf{n}^\top \mathbf{r} \le
+          R) \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        If <strong> \( \|\mathbf{r}\|_2 \le R \)</strong>, then by
+        Cauchy–Schwarz,
+        <strong>
+          \( \mathbf{n}^\top \mathbf{r} \le \|\mathbf{n}\|_2\|\mathbf{r}\|_2 =
+          \|\mathbf{r}\|_2 \le R \)</strong
+        >
+        since <strong> \( \|\mathbf{n}\|_2=1 \)</strong>. Hence the implication
+        of events, and probability monotonicity yields the inequality.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Risk budget across time):</strong>
+        Suppose you want an overall collision probability bound across the
+        horizon:
+        <strong>
+          \( \Pr(\text{any collision in } k=1,\dots,N) \le \delta_{\text{tot} }
+          \)</strong
+        >. Using the union bound, propose per-step risk allocations
+        <strong> \( \delta_k \)</strong> that guarantee the bound.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Let <strong> \( A_k \)</strong> be the collision event at step
+        <strong> \( k \)</strong>. By union bound,
+        <strong> \( \Pr(\cup_{k=1}^N A_k) \le \sum_{k=1}^N \Pr(A_k) \)</strong>.
+        If we enforce <strong> \( \Pr(A_k) \le \delta_k \)</strong> and choose
+        <strong> \( \sum_{k=1}^N \delta_k \le \delta_{\text{tot} } \)</strong>,
+        then <strong> \( \Pr(\cup_k A_k) \le \delta_{\text{tot} } \)</strong>. A
+        simple allocation is uniform:
+        <strong> \( \delta_k = \delta_{\text{tot} }/N \)</strong>. A more
+        conservative near-term allocation uses, for example,
+        <strong> \( \delta_k \propto \gamma^{k-1} \)</strong> with
+        <strong> \( 0&lt;\gamma&lt;1 \)</strong>, normalized to sum to
+        <strong> \( \delta_{\text{tot} } \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Sampling resolution trade-off):</strong>
+        In a sampling planner, assume <strong> \( n_v \)</strong> speed samples,
+        <strong> \( n_\omega \)</strong> turn-rate samples, horizon length
+        <strong> \( N \)</strong>, and <strong> \( M \)</strong> obstacles. Give
+        the computational complexity per replanning step.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Each candidate control pair costs a rollout of
+        <strong> \( N \)</strong> steps. At each step, the risk term checks
+        <strong> \( M \)</strong> obstacles (and constant-time arithmetic).
+        Therefore the dominant cost is
+        <strong> \( \mathcal{O}(n_v n_\omega N M) \)</strong>. This motivates:
+        parallel evaluation, adaptive sampling, pruning unsafe rollouts early,
+        and limiting <strong> \( M \)</strong>
+        to nearby dynamic obstacles.
+      </p>
+
+      <p>
+        <strong>Problem 6 (Linearization Jacobians):</strong>
+        For the unicycle update
+        <strong> \( x_{k+1}=x_k+\Delta t v_k\cos\theta_k \)</strong>,
+        <strong> \( y_{k+1}=y_k+\Delta t v_k\sin\theta_k \)</strong>,
+        <strong> \( \theta_{k+1}=\theta_k+\Delta t \omega_k \)</strong>, compute
+        <strong> \( \mathbf{A}_k \)</strong> and
+        <strong> \( \mathbf{B}_k \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Let <strong> \( \mathbf{x}=[x,y,\theta]^\top \)</strong>,
+        <strong> \( \mathbf{u}=[v,\omega]^\top \)</strong>. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}_k = \begin{bmatrix} 1 & 0 & -\Delta t\, v_k \sin\theta_k
+        \\ 0 & 1 & \ \Delta t\, v_k \cos\theta_k \\ 0 & 0 & 1 \end{bmatrix},
+        \qquad \mathbf{B}_k = \begin{bmatrix} \Delta t \cos\theta_k & 0 \\
+        \Delta t \sin\theta_k & 0 \\ 0 & \Delta t \end{bmatrix}. \]
+      </h4>
+      <p>
+        These Jacobians are used in SQP / iterative MPC to build local QP
+        subproblems.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Summary</h2>
+    <div class="down-content">
+      <p>
+        Prediction-aware local navigation augments the local planner with (i)
+        tracking and probabilistic prediction of moving obstacles and (ii)
+        time-indexed risk evaluation over a receding horizon. We derived a
+        conservative and implementable chance-constraint bound
+        <strong> \( m - R \ge z_{1-\delta} s \)</strong> based on a 1D
+        projection, and showed how to embed it as a smooth penalty in
+        sampling-based planners or as a constraint/penalty in MPC. This prepares
+        you for Lesson 5, where we benchmark end-to-end navigation through
+        crowds.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. References</h2>
+    <ol>
+      <li>
+        Helbing, D., &amp; Molnár, P. (1995). Social force model for pedestrian
+        dynamics.
+        <em>Physical Review E</em>, 51(5), 4282–4286.
+      </li>
+      <li>
+        Fiorini, P., &amp; Shiller, Z. (1998). Motion planning in dynamic
+        environments using velocity obstacles.
+        <em>International Journal of Robotics Research</em>, 17(7), 760–772.
+      </li>
+      <li>
+        van den Berg, J., Lin, M., &amp; Manocha, D. (2011). Reciprocal velocity
+        obstacles for real-time multi-agent navigation.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 1928–1935.
+      </li>
+      <li>
+        Trautman, P., &amp; Krause, A. (2010). Unfreezing the robot: Navigation
+        in dense, interacting crowds.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 797–803.
+      </li>
+      <li>
+        Ziebart, B.D., Maas, A.L., Bagnell, J.A., &amp; Dey, A.K. (2008).
+        Maximum entropy inverse reinforcement learning.
+        <em>AAAI Conference on Artificial Intelligence</em>, 1433–1438.
+      </li>
+      <li>
+        Luber, M., Stork, J.A., Tipaldi, G.D., &amp; Arras, K.O. (2010). People
+        tracking with human motion predictions from social forces.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 464–469.
+      </li>
+      <li>
+        Ono, M., &amp; Williams, B.C. (2008). Iterative risk allocation: A new
+        approach to robust model predictive control with chance constraints.
+        <em>IEEE Conference on Decision and Control (CDC)</em>, 3427–3432.
+      </li>
+      <li>
+        Blackmore, L., Ono, M., Bektassov, A., &amp; Williams, B.C. (2011). A
+        probabilistic particle-control approximation of chance-constrained
+        stochastic predictive control.
+        <em>IEEE Transactions on Robotics</em>, 26(3), 502–517.
+      </li>
+      <li>
+        Bandyopadhyay, T., Ang, M.H., Hsu, D., Rus, D., &amp; Frazzoli, E.
+        (2013). Intention-aware motion planning.
+        <em>Algorithmic Foundations of Robotics (WAFR)</em>, 475–491.
+      </li>
+      <li>
+        Kucner, T.P., Saarinen, J., Magnusson, M., Schaffernicht, E.,
+        Lilienthal, A.J. (2013). Conditional transition maps: Learning motion
+        patterns in dynamic environments.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 1196–1201.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter16/Lesson3.html">
+          Lesson 3: Socially Aware Navigation Concepts
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter16/Lesson5.html">
+          Lesson 5: Lab: Navigate Through Moving Crowds
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="active-lesson" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

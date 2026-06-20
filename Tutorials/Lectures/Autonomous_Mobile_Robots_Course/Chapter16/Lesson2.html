@@ -1,0 +1,2382 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 16: Obstacle Avoidance in Dynamic Environments - Lesson 2: Velocity Obstacles and Reciprocal Avoidance | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 16: Obstacle Avoidance in Dynamic Environments</h1>
+    <h3>
+      <strong>Lesson 2: Velocity Obstacles and Reciprocal Avoidance</strong>
+    </h3>
+    <p>
+      This lesson develops the velocity-space geometry that underpins real-time
+      collision avoidance among moving agents. We formalize
+      <em>Velocity Obstacles</em> (VO) as sets of forbidden velocities derived
+      from relative motion and finite time horizons, then introduce
+      <em>reciprocal</em> responsibility models (RVO/ORCA) that avoid the
+      “mutual deadlock” pathologies of purely reactive schemes. We emphasize
+      derivations, convex constraint structure, and implementable algorithms
+      consistent with mobile-robot constraints and local navigation stacks.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 15 you produced local motion commands. In dynamic
+        environments, those commands must be filtered by a
+        <strong>collision-avoidance layer</strong> that accounts for moving
+        obstacles (Lesson 1) and chooses a velocity that is simultaneously (i)
+        safe for a finite future window and (ii) close to a preferred velocity
+        from a tracker (e.g., Pure Pursuit / Stanley / DWA / TEB outputs).
+      </p>
+      <p>
+        The key idea: instead of reasoning in configuration space, we reason in
+        <em>velocity space</em>. Each moving obstacle induces a set of robot
+        velocities that would lead to collision. Avoidance becomes: choose
+        <strong>\( \mathbf{v} \)</strong> outside the union of those forbidden
+        sets while satisfying actuation limits.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Perception: detect moving objects"] --> P["Prediction: constant-velocity over horizon T"]
+  P --> R["Relative state: p_rel, v_rel"]
+  R --> V["Build forbidden velocity sets (VO / reciprocal sets)"]
+  V --> A["Intersect with admissible velocities (speed/accel/curvature limits)"]
+  A --> O["Optimize: pick v closest to v_pref"]
+  O --> C["Convert to base commands (v, omega)"]
+  C --> U["Execute for dt; repeat"]
+        </pre>
+      </div>
+
+      <p>
+        In this lesson we use a planar disc model (robot and obstacles
+        approximated as discs). This is standard in crowd/AMR literature because
+        it yields clean geometry and fast solvers; later lessons can add social
+        costs and prediction-aware models.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Relative Motion and Collision Condition -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Relative Motion Model and the Collision Predicate</h2>
+    <div class="down-content">
+      <p>
+        Consider robot A and obstacle/agent B moving in the plane with constant
+        velocities over a short horizon. Let positions be
+        <strong>\( \mathbf{p}_A, \mathbf{p}_B \in \mathbb{R}^2 \)</strong> and
+        velocities
+        <strong>\( \mathbf{v}_A, \mathbf{v}_B \in \mathbb{R}^2 \)</strong>.
+        Define relative quantities:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{p}_{rel} \triangleq \mathbf{p}_B - \mathbf{p}_A,\qquad
+        \mathbf{v}_{rel} \triangleq \mathbf{v}_A - \mathbf{v}_B. \]
+      </h4>
+
+      <p>
+        Let the robot and obstacle be discs with radii
+        <strong>\( r_A \)</strong> and <strong>\( r_B \)</strong>, and define
+        the combined radius <strong>\( R \triangleq r_A + r_B \)</strong>. A
+        collision occurs at time <strong>\( t \)</strong> if:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \|\mathbf{p}_{rel} + t\,\mathbf{v}_{rel}\| \le R. \]
+      </h4>
+
+      <p>
+        For a finite look-ahead horizon <strong>\( T \)</strong>, the key
+        predicate is: “Does there exist <strong>\( t \in [0,T] \)</strong> such
+        that the inequality holds?”
+      </p>
+
+      <p>Expand the squared distance:</p>
+
+      <h4 class="mathJax">
+        \[ \|\mathbf{p}_{rel} + t\,\mathbf{v}_{rel}\|^2 =
+        (\mathbf{v}_{rel}^\top\mathbf{v}_{rel})\,t^2 +
+        2(\mathbf{p}_{rel}^\top\mathbf{v}_{rel})\,t +
+        (\mathbf{p}_{rel}^\top\mathbf{p}_{rel}). \]
+      </h4>
+
+      <p>
+        Collision within the horizon is equivalent to the quadratic inequality:
+      </p>
+
+      <h4 class="mathJax">
+        \[ a t^2 + b t + c \le 0,\quad
+        a=\mathbf{v}_{rel}^\top\mathbf{v}_{rel},\;
+        b=2\mathbf{p}_{rel}^\top\mathbf{v}_{rel},\;
+        c=\mathbf{p}_{rel}^\top\mathbf{p}_{rel} - R^2, \quad t \in [0,T]. \]
+      </h4>
+
+      <p>
+        <strong>Lemma (Quadratic collision test).</strong>
+        If <strong>\( a &gt; 0 \)</strong> and the discriminant
+        <strong>\( \Delta = b^2 - 4ac \)</strong> satisfies
+        <strong>\( \Delta &lt; 0 \)</strong>, there is no collision at any time.
+        If <strong>\( \Delta \ge 0 \)</strong>, the earliest collision time is:
+        <strong>\( t_{hit} = \frac{-b - \sqrt{\Delta}}{2a} \)</strong>. A
+        collision occurs within horizon iff
+        <strong>\( 0 \le t_{hit} \le T \)</strong>.
+      </p>
+
+      <p>
+        This predicate is the computational backbone of VO-based methods: it
+        decides whether a candidate velocity is forbidden.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Velocity Obstacles (VO) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Velocity Obstacles (VO): Definition and Geometry</h2>
+    <div class="down-content">
+      <p>
+        The <strong>Velocity Obstacle</strong> induced by B on A over horizon
+        <strong>\( T \)</strong> is the set of A’s velocities that lead to
+        collision (assuming B maintains <strong>\( \mathbf{v}_B \)</strong>).
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{VO}_{A|B}(T) \triangleq \left\{ \mathbf{v}_A \in \mathbb{R}^2
+        \; \middle| \; \exists t \in (0,T] \text{ such that } \|\mathbf{p}_{rel}
+        + t(\mathbf{v}_A-\mathbf{v}_B)\| \le R \right\}. \]
+      </h4>
+
+      <p>
+        Define relative-velocity space set:
+        <strong
+          >\( \mathrm{VO}^{rel}_{A|B}(T) = \{ \mathbf{v}_{rel} \mid \exists
+          t\in(0,T] : \|\mathbf{p}_{rel} + t\mathbf{v}_{rel}\| \le R\}
+          \)</strong
+        >. Then:
+        <strong
+          >\( \mathrm{VO}_{A|B}(T) = \mathbf{v}_B + \mathrm{VO}^{rel}_{A|B}(T)
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Geometric interpretation.</strong>
+        For discs, <strong>\( \mathrm{VO}^{rel}_{A|B}(T) \)</strong> is a
+        truncated cone in velocity space: the set of rays from the origin that
+        intersect the disc of radius <strong>\( R/T \)</strong> centered at
+        <strong>\( -\mathbf{p}_{rel}/T \)</strong>. In practice, membership is
+        tested with the quadratic predicate in Section 2 (more robust than
+        geometry edge cases).
+      </p>
+
+      <p>
+        <strong>Safety criterion.</strong> If the chosen velocity satisfies
+        <strong>\( \mathbf{v}_A \notin \mathrm{VO}_{A|B}(T) \)</strong> for all
+        nearby B, then there is no collision with any of those obstacles within
+        the horizon under the constant-velocity prediction model.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Reciprocal Avoidance (RVO/ORCA Concepts) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Reciprocal Avoidance: From VO to Shared Responsibility</h2>
+    <div class="down-content">
+      <p>
+        A pure VO policy can fail in symmetric encounters: both agents choose
+        velocities that “wait” or oscillate because each assumes the other will
+        maintain its velocity. Reciprocal methods address this by
+        <em>splitting responsibility</em>.
+      </p>
+
+      <p>
+        A widely used reciprocity model is the
+        <strong>Reciprocal Velocity Obstacle (RVO)</strong>, which shifts the
+        forbidden set so that the “do-nothing” solution corresponds to each
+        agent taking half of the required relative-velocity change. One
+        conceptual form is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathrm{RVO}_{A|B}(T) \triangleq \left\{ \mathbf{v}_A \;\middle|\;
+        \mathbf{v}_A \in \frac{\mathbf{v}_A^{cur}+\mathbf{v}_B^{cur}}{2} +
+        \mathrm{VO}^{rel}_{A|B}(T) \right\}. \]
+      </h4>
+
+      <p>
+        This expression is interpreted operationally: the “apex” of the
+        forbidden region is centered at the midpoint of current velocities,
+        encouraging each agent to contribute roughly half of the velocity
+        adjustment.
+      </p>
+
+      <p>
+        <strong>ORCA (Optimal Reciprocal Collision Avoidance).</strong>
+        ORCA refines RVO into <em>convex half-plane constraints</em> in velocity
+        space. For each neighbor B, ORCA constructs a half-plane:
+        <strong
+          >\( \mathcal{H}_{A|B} = \{\mathbf{v}\mid
+          (\mathbf{v}-\mathbf{v}_{0})^\top\mathbf{n} \ge 0\} \)</strong
+        >, such that if both agents select velocities in their respective
+        half-planes, collisions are avoided within the horizon. The resulting
+        feasible set is an intersection of half-planes, enabling fast
+        optimization (projection/LP in 2D).
+      </p>
+
+      <p>
+        In this lesson’s implementations we use a robust educational approach:
+        <strong
+          >sample admissible velocities and reject those that collide within
+          horizon</strong
+        >
+        (the same collision predicate used to define VO). Synchronous updates
+        naturally produce reciprocal behavior, and the method is transparent for
+        learning. In production, ORCA/RVO2 libraries provide deterministic
+        convex solvers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Admissible Velocity Sets for AMR (Constraints) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Admissible Velocities: Connecting to Mobile-Robot Constraints</h2>
+    <div class="down-content">
+      <p>
+        VO/RVO are easiest for holonomic agents. An AMR base is typically
+        nonholonomic (differential drive / Ackermann), so we do avoidance in a
+        command space consistent with the base.
+      </p>
+
+      <p>
+        For a differential-drive base, commands are
+        <strong>\( (v,\omega) \)</strong> with bounds
+        <strong>\( |v| \le v_{max} \)</strong>,
+        <strong>\( |\omega| \le \omega_{max} \)</strong>, and acceleration
+        limits. Locally (small <strong>\( dt \)</strong>), map to body-frame
+        velocity:
+        <strong>\( \mathbf{v}_A = v[\cos\theta,\; \sin\theta]^\top \)</strong>.
+        Thus the admissible set in world-frame velocity space is approximately a
+        disc (or annulus) clipped by curvature limits.
+      </p>
+
+      <p>
+        A generic admissible set model used by VO filters is:
+        <strong
+          >\( \mathcal{V}_{adm} = \{\mathbf{v}\in\mathbb{R}^2 \mid
+          \|\mathbf{v}\| \le v_{max}\} \)</strong
+        >
+        (optionally refined by acceleration constraints between ticks). The
+        avoidance problem becomes:
+      </p>
+      <!-- prettier-ignore -->
+      <h4 class="mathJax">
+        \[ \mathbf{v}^\star = \arg\min_{\mathbf{v}\in\mathcal{V}_{adm}}
+        \|\mathbf{v}-\mathbf{v}_{pref}\|^2 \quad \text{s.t.}\quad \mathbf{v}
+        \notin \bigcup_{B\in\mathcal{N}} \mathrm{VO}_{A|B}(T) \;\;(\text{or reciprocal constraints}). \]
+      </h4>
+
+      <p>
+        The “preferred velocity” <strong>\( \mathbf{v}_{pref} \)</strong> comes
+        from a tracker or local planner and encodes goal progress. The
+        constraint set encodes safety.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Practical Solver Strategies -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Practical Solver Strategies (Real-Time)</h2>
+    <div class="down-content">
+      <p>In 2D, there are two common real-time strategies:</p>
+      <ul>
+        <li>
+          <strong>Sampling + rejection (educational, robust):</strong>
+          sample candidate velocities in
+          <strong>\( \mathcal{V}_{adm} \)</strong>, reject those that collide
+          within <strong>\( [0,T] \)</strong>, and pick the remaining one
+          closest to <strong>\( \mathbf{v}_{pref} \)</strong>
+          (optionally add a “time-to-collision” soft cost).
+        </li>
+        <li>
+          <strong>Convex projection / LP (ORCA-style, deterministic):</strong>
+          build half-plane constraints per neighbor and project
+          <strong>\( \mathbf{v}_{pref} \)</strong> onto the intersection.
+        </li>
+      </ul>
+
+      <p>
+        The sampling method uses the exact quadratic collision predicate, which
+        is a direct computational realization of the VO definition. It is also
+        easy to integrate with acceleration limits: only sample candidates
+        within a “reachable” set from the current velocity.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      7. Python Implementation (Sampling-Based VO with Synchronous Updates)
+    </h2>
+    <div class="down-content">
+      <p>
+        The code below simulates multiple disc agents crossing through the
+        origin. Each tick, every agent samples candidate velocities, rejects
+        those that would collide with any neighbor within horizon
+        <strong>\( T \)</strong>, and selects the candidate closest to its
+        goal-directed preferred velocity. Because updates are synchronous, the
+        behavior is “reciprocal-emergent” in practice.
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson2.py</strong></p>
+      <pre><code class="language-python">
+"""
+Chapter16_Lesson2.py
+Autonomous Mobile Robots — Chapter 16, Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+
+Educational reference implementation:
+- Time-horizon collision checking in relative motion
+- Sampling-based velocity selection outside Velocity Obstacles (VO)
+- Multi-agent simulation with synchronous (reciprocal-emergent) updates
+
+This is NOT a full ORCA solver. For production, see RVO2 / ORCA libraries.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+import math
+import random
+from typing import List, Tuple
+
+import numpy as np
+
+
+@dataclass
+class Agent:
+    p: np.ndarray          # position (2,)
+    v: np.ndarray          # velocity (2,)
+    goal: np.ndarray       # goal position (2,)
+    radius: float = 0.3
+    v_max: float = 1.0
+
+
+def norm(x: np.ndarray) -&gt; float:
+    return float(np.linalg.norm(x))
+
+
+def clamp_norm(v: np.ndarray, v_max: float) -&gt; np.ndarray:
+    n = norm(v)
+    if n &lt;= v_max:
+        return v
+    return v * (v_max / (n + 1e-12))
+
+
+def time_to_collision_in_horizon(p_rel: np.ndarray, v_rel: np.ndarray, R: float, T: float) -&gt; Tuple[bool, float]:
+    """
+    Relative motion: p_rel(t) = p_rel + t v_rel.
+    Collision if ||p_rel(t)|| &lt;= R for some t in [0, T].
+
+    Returns: (collides, t_hit)
+      - collides: True if collision occurs within horizon
+      - t_hit: smallest nonnegative collision time (approx; exact for quadratic), or +inf if none
+    """
+    # If already intersecting
+    if norm(p_rel) &lt;= R:
+        return True, 0.0
+
+    a = float(v_rel @ v_rel)
+    b = 2.0 * float(p_rel @ v_rel)
+    c = float(p_rel @ p_rel) - R * R
+
+    if a &lt; 1e-12:
+        return False, float("inf")  # relative velocity ~ 0
+
+    disc = b * b - 4.0 * a * c
+    if disc &lt; 0.0:
+        return False, float("inf")
+
+    sqrt_disc = math.sqrt(disc)
+    t1 = (-b - sqrt_disc) / (2.0 * a)
+    t2 = (-b + sqrt_disc) / (2.0 * a)
+
+    # Earliest nonnegative intersection time
+    t_hit = float("inf")
+    if t1 &gt;= 0.0:
+        t_hit = t1
+    elif t2 &gt;= 0.0:
+        t_hit = 0.0  # started outside, enters immediately in continuous-time view
+
+    if 0.0 &lt;= t_hit &lt;= T:
+        return True, t_hit
+    return False, float("inf")
+
+
+def sample_admissible_velocities(v_pref: np.ndarray, v_max: float, n: int = 250, spread: float = 1.2) -&gt; List[np.ndarray]:
+    """
+    Samples candidate velocities in a disk of radius v_max, biased around v_pref.
+    """
+    cand: List[np.ndarray] = []
+    # Always include v_pref clamped
+    cand.append(clamp_norm(v_pref, v_max))
+
+    for _ in range(n):
+        # Gaussian around v_pref
+        vx = random.gauss(float(v_pref[0]), spread * v_max / 2.0)
+        vy = random.gauss(float(v_pref[1]), spread * v_max / 2.0)
+        v = np.array([vx, vy], dtype=float)
+        v = clamp_norm(v, v_max)
+        cand.append(v)
+
+    # Add some uniform samples
+    for _ in range(max(50, n // 4)):
+        ang = random.random() * 2.0 * math.pi
+        r = math.sqrt(random.random()) * v_max
+        cand.append(np.array([r * math.cos(ang), r * math.sin(ang)], dtype=float))
+
+    return cand
+
+
+def choose_velocity_vo(agent: Agent,
+                       neighbors: List[Agent],
+                       dt: float,
+                       T: float,
+                       w_pref: float = 1.0,
+                       w_safety: float = 2.0,
+                       n_samples: int = 250) -&gt; np.ndarray:
+    """
+    Sampling-based VO avoidance:
+    - candidate v is feasible if it does not collide with any neighbor within [0, T]
+      under constant-velocity prediction.
+    - objective prefers closeness to v_pref (toward goal) and larger time-to-collision.
+
+    Reciprocal effect: all agents update synchronously each step (everyone "reacts").
+    """
+    # preferred velocity toward goal (simple proportional guidance)
+    to_goal = agent.goal - agent.p
+    dist = norm(to_goal)
+    if dist &lt; 1e-6:
+        v_pref = np.zeros(2, dtype=float)
+    else:
+        v_pref = (to_goal / dist) * min(agent.v_max, dist / max(dt, 1e-3))
+
+    candidates = sample_admissible_velocities(v_pref, agent.v_max, n=n_samples)
+
+    best_v = np.zeros(2, dtype=float)
+    best_cost = float("inf")
+
+    for v in candidates:
+        feasible = True
+        # Safety score via minimum time-to-collision among neighbors
+        min_ttc = float("inf")
+
+        for nb in neighbors:
+            p_rel = nb.p - agent.p
+            v_rel = v - nb.v
+            R = agent.radius + nb.radius
+            coll, t_hit = time_to_collision_in_horizon(p_rel, v_rel, R, T)
+            if coll:
+                feasible = False
+                break
+            # approximate TTC (continuous-time) even if beyond T
+            coll_any, t_any = time_to_collision_in_horizon(p_rel, v_rel, R, 1e6)
+            if coll_any:
+                min_ttc = min(min_ttc, t_any)
+
+        if not feasible:
+            continue
+
+        # Cost: prefer v close to v_pref; also prefer larger TTC when relevant
+        pref_cost = norm(v - v_pref) ** 2
+        safety_cost = 0.0
+        if min_ttc &lt; float("inf"):
+            safety_cost = 1.0 / (min_ttc + 1e-6)
+
+        cost = w_pref * pref_cost + w_safety * safety_cost
+
+        if cost &lt; best_cost:
+            best_cost = cost
+            best_v = v
+
+    # If no feasible sample, slow down (failsafe)
+    if best_cost == float("inf"):
+        return 0.2 * clamp_norm(agent.v, agent.v_max)
+
+    return best_v
+
+
+def simulate(n_agents: int = 8,
+             steps: int = 400,
+             dt: float = 0.05,
+             T: float = 2.5,
+             seed: int = 1):
+    """
+    Simple multi-agent crossing scenario:
+    agents start on a circle, goals are opposite points.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    agents = []
+    R0 = 5.0
+    for i in range(n_agents):
+        ang = 2.0 * math.pi * i / n_agents
+        p = np.array([R0 * math.cos(ang), R0 * math.sin(ang)], dtype=float)
+        goal = -p
+        agents.append(Agent(p=p, v=np.zeros(2, dtype=float), goal=goal, radius=0.35, v_max=1.2))
+
+    P = np.zeros((steps + 1, n_agents, 2), dtype=float)
+
+    for i, a in enumerate(agents):
+        P[0, i] = a.p
+
+    for k in range(steps):
+        # Compute next velocities synchronously (reciprocal emergent)
+        next_v = []
+        for i, a in enumerate(agents):
+            neighbors = [agents[j] for j in range(n_agents) if j != i]
+            v_new = choose_velocity_vo(a, neighbors, dt=dt, T=T)
+            next_v.append(v_new)
+
+        # Update state
+        for i, a in enumerate(agents):
+            a.v = next_v[i]
+            a.p = a.p + dt * a.v
+            P[k + 1, i] = a.p
+
+    return P
+
+
+def main() -&gt; None:
+    P = simulate()
+    # Save a lightweight CSV trajectory for plotting elsewhere
+    # columns: step, agent, x, y
+    rows = []
+    for k in range(P.shape[0]):
+        for i in range(P.shape[1]):
+            rows.append((k, i, float(P[k, i, 0]), float(P[k, i, 1])))
+    import csv
+    with open("Chapter16_Lesson2_trajectories.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "agent", "x", "y"])
+        w.writerows(rows)
+    print("Wrote Chapter16_Lesson2_trajectories.csv")
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <p>
+        <strong>Libraries:</strong> NumPy for vector algebra; optional
+        Matplotlib can be used for plotting trajectories from the exported CSV.
+        For a full ORCA implementation, the community-standard library is “RVO2”
+        (C++ core with language bindings).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation (Minimal VO Sampling)</h2>
+    <div class="down-content">
+      <p>
+        The C++ code mirrors the Python logic: quadratic collision test and
+        velocity sampling in a disc. It prints a few checkpoints and can be
+        extended to log trajectories.
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson2.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter16_Lesson2.cpp
+// Autonomous Mobile Robots — Chapter 16, Lesson 2: Velocity Obstacles (VO) Sampling Demo
+//
+// Educational reference implementation:
+// - Time-horizon collision check in relative motion (quadratic)
+// - Sampling-based velocity choice outside VO
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter16_Lesson2.cpp -o vo_demo
+//
+// Note: This is a minimal educational demo, not a full ORCA solver.
+
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+#include &lt;random&gt;
+#include &lt;limits&gt;
+
+struct Vec2 {
+    double x{0.0}, y{0.0};
+    Vec2() = default;
+    Vec2(double x_, double y_) : x(x_), y(y_) {}
+    Vec2 operator+(const Vec2& o) const { return Vec2{x+o.x, y+o.y}; }
+    Vec2 operator-(const Vec2& o) const { return Vec2{x-o.x, y-o.y}; }
+    Vec2 operator*(double s) const { return Vec2{x*s, y*s}; }
+};
+
+static inline double dot(const Vec2& a, const Vec2& b) { return a.x*b.x + a.y*b.y; }
+static inline double norm2(const Vec2& a) { return dot(a,a); }
+static inline double norm(const Vec2& a) { return std::sqrt(norm2(a)); }
+
+static inline Vec2 clampNorm(const Vec2& v, double vmax) {
+    double n = norm(v);
+    if (n &lt;= vmax) return v;
+    double s = vmax / (n + 1e-12);
+    return v * s;
+}
+
+struct Agent {
+    Vec2 p;
+    Vec2 v;
+    Vec2 goal;
+    double radius{0.35};
+    double vmax{1.2};
+};
+
+struct TTCResult {
+    bool collides;
+    double t_hit;
+};
+
+TTCResult timeToCollisionInHorizon(const Vec2& p_rel, const Vec2& v_rel, double R, double T) {
+    if (norm(p_rel) &lt;= R) return {true, 0.0};
+
+    double a = norm2(v_rel);
+    double b = 2.0 * dot(p_rel, v_rel);
+    double c = norm2(p_rel) - R*R;
+
+    if (a &lt; 1e-12) return {false, std::numeric_limits&lt;double&gt;::infinity()};
+
+    double disc = b*b - 4.0*a*c;
+    if (disc &lt; 0.0) return {false, std::numeric_limits&lt;double&gt;::infinity()};
+
+    double sdisc = std::sqrt(disc);
+    double t1 = (-b - sdisc) / (2.0*a);
+    double t2 = (-b + sdisc) / (2.0*a);
+
+    double t_hit = std::numeric_limits&lt;double&gt;::infinity();
+    if (t1 &gt;= 0.0) t_hit = t1;
+    else if (t2 &gt;= 0.0) t_hit = 0.0;
+
+    if (t_hit &gt;= 0.0 &amp;&amp; t_hit &lt;= T) return {true, t_hit};
+    return {false, std::numeric_limits&lt;double&gt;::infinity()};
+}
+
+std::vector&lt;Vec2&gt; sampleDisk(double vmax, int n, std::mt19937& rng) {
+    std::uniform_real_distribution&lt;double&gt; uni(0.0, 1.0);
+    std::vector&lt;Vec2&gt; out;
+    out.reserve(n);
+    for (int i=0;i&lt;n;i++) {
+        double ang = 2.0*M_PI*uni(rng);
+        double r = std::sqrt(uni(rng))*vmax;
+        out.emplace_back(r*std::cos(ang), r*std::sin(ang));
+    }
+    return out;
+}
+
+Vec2 chooseVelocityVO(const Agent& a, const std::vector&lt;Agent&gt;& neighbors, double dt, double T, std::mt19937& rng) {
+    Vec2 toGoal = a.goal - a.p;
+    double d = norm(toGoal);
+    Vec2 v_pref{0.0, 0.0};
+    if (d &gt; 1e-9) {
+        double spd = std::min(a.vmax, d / std::max(dt, 1e-3));
+        v_pref = toGoal * (spd / (d + 1e-12));
+    }
+
+    auto cand = sampleDisk(a.vmax, 1200, rng);
+    cand.push_back(clampNorm(v_pref, a.vmax));
+
+    Vec2 best{0.0, 0.0};
+    double bestCost = std::numeric_limits&lt;double&gt;::infinity();
+
+    for (const auto& v : cand) {
+        bool feasible = true;
+        double min_ttc = std::numeric_limits&lt;double&gt;::infinity();
+
+        for (const auto& nb : neighbors) {
+            Vec2 p_rel = nb.p - a.p;
+            Vec2 v_rel = v - nb.v;
+            double R = a.radius + nb.radius;
+
+            auto res = timeToCollisionInHorizon(p_rel, v_rel, R, T);
+            if (res.collides) { feasible = false; break; }
+
+            auto resAny = timeToCollisionInHorizon(p_rel, v_rel, R, 1e6);
+            if (resAny.collides) min_ttc = std::min(min_ttc, resAny.t_hit);
+        }
+
+        if (!feasible) continue;
+
+        double prefCost = norm2(v - v_pref);
+        double safetyCost = 0.0;
+        if (std::isfinite(min_ttc)) safetyCost = 1.0 / (min_ttc + 1e-6);
+
+        double cost = 1.0*prefCost + 2.0*safetyCost;
+        if (cost &lt; bestCost) { bestCost = cost; best = v; }
+    }
+
+    if (!std::isfinite(bestCost)) return a.v * 0.2; // failsafe slow down
+    return best;
+}
+
+int main() {
+    std::mt19937 rng(1);
+
+    const int N = 8;
+    const int steps = 400;
+    const double dt = 0.05;
+    const double T = 2.5;
+    const double R0 = 5.0;
+
+    std::vector&lt;Agent&gt; agents;
+    agents.reserve(N);
+
+    for (int i=0;i&lt;N;i++) {
+        double ang = 2.0*M_PI*i/N;
+        Vec2 p{R0*std::cos(ang), R0*std::sin(ang)};
+        Agent a;
+        a.p = p;
+        a.v = Vec2{0.0, 0.0};
+        a.goal = Vec2{-p.x, -p.y};
+        agents.push_back(a);
+    }
+
+    for (int k=0;k&lt;steps;k++) {
+        std::vector&lt;Vec2&gt; nextV(N);
+        for (int i=0;i&lt;N;i++) {
+            std::vector&lt;Agent&gt; neigh;
+            neigh.reserve(N-1);
+            for (int j=0;j&lt;N;j++) if (j!=i) neigh.push_back(agents[j]);
+            nextV[i] = chooseVelocityVO(agents[i], neigh, dt, T, rng);
+        }
+        for (int i=0;i&lt;N;i++) {
+            agents[i].v = nextV[i];
+            agents[i].p = agents[i].p + agents[i].v * dt;
+        }
+        if (k % 50 == 0) {
+            std::cout &lt;&lt; "Step " &lt;&lt; k &lt;&lt; ": agent0 p=("
+                      &lt;&lt; agents[0].p.x &lt;&lt; "," &lt;&lt; agents[0].p.y &lt;&lt; ")\n";
+        }
+    }
+
+    std::cout &lt;&lt; "Done.\n";
+    return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (Minimal VO Sampling)</h2>
+    <div class="down-content">
+      <p>
+        Java version of the same algorithmic core. It is structured to be easily
+        adapted into ROS Java nodes or Android-based robots (though modern AMR
+        stacks typically use C++).
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson2.java</strong></p>
+      <pre><code class="language-java">
+// Chapter16_Lesson2.java
+// Autonomous Mobile Robots — Chapter 16, Lesson 2: Velocity Obstacles (VO) Sampling Demo
+//
+// Educational reference implementation (minimal):
+// - Time-horizon collision check in relative motion
+// - Sampling-based safe velocity selection
+//
+// Compile/run:
+//   javac Chapter16_Lesson2.java
+//   java Chapter16_Lesson2
+
+import java.util.*;
+
+public class Chapter16_Lesson2 {
+
+    static class Vec2 {
+        double x, y;
+        Vec2(double x, double y) { this.x = x; this.y = y; }
+        Vec2 add(Vec2 o) { return new Vec2(x + o.x, y + o.y); }
+        Vec2 sub(Vec2 o) { return new Vec2(x - o.x, y - o.y); }
+        Vec2 mul(double s) { return new Vec2(x * s, y * s); }
+    }
+
+    static double dot(Vec2 a, Vec2 b) { return a.x*b.x + a.y*b.y; }
+    static double norm2(Vec2 a) { return dot(a,a); }
+    static double norm(Vec2 a) { return Math.sqrt(norm2(a)); }
+
+    static Vec2 clampNorm(Vec2 v, double vmax) {
+        double n = norm(v);
+        if (n &lt;= vmax) return v;
+        double s = vmax / (n + 1e-12);
+        return v.mul(s);
+    }
+
+    static class Agent {
+        Vec2 p, v, goal;
+        double radius = 0.35;
+        double vmax = 1.2;
+        Agent(Vec2 p, Vec2 v, Vec2 goal) {
+            this.p = p; this.v = v; this.goal = goal;
+        }
+    }
+
+    static class TTC {
+        boolean collides;
+        double tHit;
+        TTC(boolean c, double t) { collides=c; tHit=t; }
+    }
+
+    static TTC timeToCollisionInHorizon(Vec2 pRel, Vec2 vRel, double R, double T) {
+        if (norm(pRel) &lt;= R) return new TTC(true, 0.0);
+
+        double a = norm2(vRel);
+        double b = 2.0 * dot(pRel, vRel);
+        double c = norm2(pRel) - R*R;
+
+        if (a &lt; 1e-12) return new TTC(false, Double.POSITIVE_INFINITY);
+
+        double disc = b*b - 4.0*a*c;
+        if (disc &lt; 0.0) return new TTC(false, Double.POSITIVE_INFINITY);
+
+        double sdisc = Math.sqrt(disc);
+        double t1 = (-b - sdisc) / (2.0*a);
+        double t2 = (-b + sdisc) / (2.0*a);
+
+        double tHit = Double.POSITIVE_INFINITY;
+        if (t1 &gt;= 0.0) tHit = t1;
+        else if (t2 &gt;= 0.0) tHit = 0.0;
+
+        if (tHit &gt;= 0.0 &amp;&amp; tHit &lt;= T) return new TTC(true, tHit);
+        return new TTC(false, Double.POSITIVE_INFINITY);
+    }
+
+    static List&lt;Vec2&gt; sampleDisk(double vmax, int n, Random rng) {
+        ArrayList&lt;Vec2&gt; out = new ArrayList&lt;&gt;(n);
+        for (int i=0;i&lt;n;i++) {
+            double ang = 2.0*Math.PI*rng.nextDouble();
+            double r = Math.sqrt(rng.nextDouble())*vmax;
+            out.add(new Vec2(r*Math.cos(ang), r*Math.sin(ang)));
+        }
+        return out;
+    }
+
+    static Vec2 chooseVelocityVO(Agent a, List&lt;Agent&gt; neighbors, double dt, double T, Random rng) {
+        Vec2 toGoal = a.goal.sub(a.p);
+        double d = norm(toGoal);
+        Vec2 vPref = new Vec2(0.0, 0.0);
+        if (d &gt; 1e-9) {
+            double spd = Math.min(a.vmax, d / Math.max(dt, 1e-3));
+            vPref = toGoal.mul(spd / (d + 1e-12));
+        }
+
+        List&lt;Vec2&gt; cand = sampleDisk(a.vmax, 1200, rng);
+        cand.add(clampNorm(vPref, a.vmax));
+
+        Vec2 best = new Vec2(0.0, 0.0);
+        double bestCost = Double.POSITIVE_INFINITY;
+
+        for (Vec2 v : cand) {
+            boolean feasible = true;
+            double minTTC = Double.POSITIVE_INFINITY;
+
+            for (Agent nb : neighbors) {
+                Vec2 pRel = nb.p.sub(a.p);
+                Vec2 vRel = v.sub(nb.v);
+                double R = a.radius + nb.radius;
+
+                TTC res = timeToCollisionInHorizon(pRel, vRel, R, T);
+                if (res.collides) { feasible=false; break; }
+
+                TTC resAny = timeToCollisionInHorizon(pRel, vRel, R, 1e6);
+                if (resAny.collides) minTTC = Math.min(minTTC, resAny.tHit);
+            }
+
+            if (!feasible) continue;
+
+            double prefCost = norm2(v.sub(vPref));
+            double safetyCost = 0.0;
+            if (Double.isFinite(minTTC)) safetyCost = 1.0 / (minTTC + 1e-6);
+
+            double cost = 1.0*prefCost + 2.0*safetyCost;
+            if (cost &lt; bestCost) { bestCost = cost; best = v; }
+        }
+
+        if (!Double.isFinite(bestCost)) return a.v.mul(0.2);
+        return best;
+    }
+
+    public static void main(String[] args) {
+        Random rng = new Random(1);
+
+        final int N = 8;
+        final int steps = 400;
+        final double dt = 0.05;
+        final double T = 2.5;
+        final double R0 = 5.0;
+
+        ArrayList&lt;Agent&gt; agents = new ArrayList&lt;&gt;(N);
+        for (int i=0;i&lt;N;i++) {
+            double ang = 2.0*Math.PI*i/N;
+            Vec2 p = new Vec2(R0*Math.cos(ang), R0*Math.sin(ang));
+            Vec2 goal = new Vec2(-p.x, -p.y);
+            agents.add(new Agent(p, new Vec2(0.0,0.0), goal));
+        }
+
+        for (int k=0;k&lt;steps;k++) {
+            Vec2[] nextV = new Vec2[N];
+
+            for (int i=0;i&lt;N;i++) {
+                ArrayList&lt;Agent&gt; neigh = new ArrayList&lt;&gt;(N-1);
+                for (int j=0;j&lt;N;j++) if (j!=i) neigh.add(agents.get(j));
+                nextV[i] = chooseVelocityVO(agents.get(i), neigh, dt, T, rng);
+            }
+
+            for (int i=0;i&lt;N;i++) {
+                Agent a = agents.get(i);
+                a.v = nextV[i];
+                a.p = a.p.add(a.v.mul(dt));
+            }
+
+            if (k % 50 == 0) {
+                Agent a0 = agents.get(0);
+                System.out.printf("Step %d: agent0 p=(%.3f, %.3f)%n", k, a0.p.x, a0.p.y);
+            }
+        }
+        System.out.println("Done.");
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB / Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB script version. For Simulink, the core function
+        <code>chooseVelocityVO</code> can be placed into a
+        <em>MATLAB Function</em> block, with neighbor states provided by buses
+        (or a fixed maximum number of neighbors).
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson2.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter16_Lesson2.m
+% Autonomous Mobile Robots — Chapter 16, Lesson 2: Velocity Obstacles (VO) Sampling Demo
+%
+% Educational reference implementation:
+% - Finite-horizon collision check in relative motion
+% - Sampling-based velocity selection outside VO
+%
+% Simulink note:
+%   You can paste chooseVelocityVO() into a MATLAB Function block and feed
+%   current state + neighbor states each control tick.
+
+function Chapter16_Lesson2()
+    rng(1);
+
+    N = 8;
+    steps = 400;
+    dt = 0.05;
+    T  = 2.5;
+    R0 = 5.0;
+
+    agents = struct();
+    for i=1:N
+        ang = 2*pi*(i-1)/N;
+        p = [R0*cos(ang); R0*sin(ang)];
+        agents(i).p = p;
+        agents(i).v = [0;0];
+        agents(i).goal = -p;
+        agents(i).radius = 0.35;
+        agents(i).vmax = 1.2;
+    end
+
+    for k=1:steps
+        nextV = zeros(2,N);
+        for i=1:N
+            neigh = agents([1:i-1, i+1:N]);
+            nextV(:,i) = chooseVelocityVO(agents(i), neigh, dt, T);
+        end
+
+        for i=1:N
+            agents(i).v = nextV(:,i);
+            agents(i).p = agents(i).p + dt * agents(i).v;
+        end
+
+        if mod(k,50)==0
+            fprintf('Step %d: agent1 p=(%.3f, %.3f)\n', k, agents(1).p(1), agents(1).p(2));
+        end
+    end
+
+    disp('Done.');
+end
+
+function v = chooseVelocityVO(a, neighbors, dt, T)
+    % Preferred velocity to goal
+    toGoal = a.goal - a.p;
+    d = norm(toGoal);
+    if d &lt; 1e-9
+        vPref = [0;0];
+    else
+        spd = min(a.vmax, d / max(dt, 1e-3));
+        vPref = toGoal / (d + 1e-12) * spd;
+    end
+
+    % Candidate velocities
+    cand = sampleDisk(a.vmax, 1200);
+    cand = [cand, clampNorm(vPref, a.vmax)];
+
+    bestCost = inf;
+    v = [0;0];
+
+    for c = 1:size(cand,2)
+        vc = cand(:,c);
+        feasible = true;
+        minTTC = inf;
+
+        for j = 1:numel(neighbors)
+            nb = neighbors(j);
+            pRel = nb.p - a.p;
+            vRel = vc - nb.v;
+            R = a.radius + nb.radius;
+
+            [coll, ~] = ttcInHorizon(pRel, vRel, R, T);
+            if coll
+                feasible = false;
+                break;
+            end
+
+            [collAny, tAny] = ttcInHorizon(pRel, vRel, R, 1e6);
+            if collAny
+                minTTC = min(minTTC, tAny);
+            end
+        end
+
+        if ~feasible
+            continue;
+        end
+
+        prefCost = norm(vc - vPref)^2;
+        safetyCost = 0.0;
+        if isfinite(minTTC)
+            safetyCost = 1.0 / (minTTC + 1e-6);
+        end
+
+        cost = 1.0*prefCost + 2.0*safetyCost;
+        if cost &lt; bestCost
+            bestCost = cost;
+            v = vc;
+        end
+    end
+
+    if isinf(bestCost)
+        v = 0.2 * clampNorm(a.v, a.vmax); % failsafe slow down
+    end
+end
+
+function [collides, tHit] = ttcInHorizon(pRel, vRel, R, T)
+    if norm(pRel) &lt;= R
+        collides = true;
+        tHit = 0.0;
+        return;
+    end
+
+    a = dot(vRel,vRel);
+    b = 2*dot(pRel,vRel);
+    c = dot(pRel,pRel) - R^2;
+
+    if a &lt; 1e-12
+        collides = false;
+        tHit = inf;
+        return;
+    end
+
+    disc = b^2 - 4*a*c;
+    if disc &lt; 0
+        collides = false;
+        tHit = inf;
+        return;
+    end
+
+    sdisc = sqrt(disc);
+    t1 = (-b - sdisc)/(2*a);
+    t2 = (-b + sdisc)/(2*a);
+
+    tHit = inf;
+    if t1 &gt;= 0
+        tHit = t1;
+    elseif t2 &gt;= 0
+        tHit = 0.0;
+    end
+
+    collides = (tHit &gt;= 0) &amp;&amp; (tHit &lt;= T);
+    if ~collides
+        tHit = inf;
+    end
+end
+
+function V = sampleDisk(vmax, n)
+    V = zeros(2,n);
+    for i=1:n
+        ang = 2*pi*rand();
+        r = sqrt(rand())*vmax;
+        V(:,i) = [r*cos(ang); r*sin(ang)];
+    end
+end
+
+function v = clampNorm(v, vmax)
+    n = norm(v);
+    if n &lt;= vmax
+        return;
+    end
+    v = v * (vmax/(n + 1e-12));
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica (Wolfram Language) Implementation</h2>
+    <div class="down-content">
+      <p>
+        This code is written in Wolfram Language and can be pasted into a
+        notebook. It implements the same core logic: collision predicate +
+        velocity sampling + synchronous multi-agent update.
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson2.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter16_Lesson2.nb
+   Autonomous Mobile Robots — Chapter 16, Lesson 2: Velocity Obstacles (VO) Sampling Demo
+
+   This is Wolfram Language code that you can paste into a notebook.
+*)
+
+ClearAll[norm, ttcInHorizon, sampleDisk, clampNorm, chooseVelocityVO, simulate];
+
+norm[v_] := Sqrt[v.v];
+
+clampNorm[v_, vmax_] := Module[{n = norm[v]},
+  If[n &lt;= vmax, v, (vmax/(n + 10^-12)) v]
+];
+
+ttcInHorizon[pRel_, vRel_, R_, T_] := Module[
+  {a, b, c, disc, t1, t2, tHit = Infinity},
+  If[norm[pRel] &lt;= R, Return[{True, 0.0}]];
+  a = vRel.vRel;
+  b = 2.0 (pRel.vRel);
+  c = (pRel.pRel) - R^2;
+  If[a &lt; 10^-12, Return[{False, Infinity}]];
+  disc = b^2 - 4 a c;
+  If[disc &lt; 0, Return[{False, Infinity}]];
+  t1 = (-b - Sqrt[disc])/(2 a);
+  t2 = (-b + Sqrt[disc])/(2 a);
+  If[t1 &gt;= 0, tHit = t1, If[t2 &gt;= 0, tHit = 0.0]];
+  If[0 &lt;= tHit &lt;= T, {True, tHit}, {False, Infinity}]
+];
+
+sampleDisk[vmax_, n_] := Table[
+  Module[{ang = 2 Pi RandomReal[], r = Sqrt[RandomReal[]] vmax},
+    {r Cos[ang], r Sin[ang]}
+  ],
+  {n}
+];
+
+chooseVelocityVO[a_Association, neighbors_List, dt_, T_] := Module[
+  {toGoal, d, vmax, vPref, cand, best = {0., 0.}, bestCost = Infinity, vc,
+   feasible, minTTC, pRel, vRel, R, coll, tHit, collAny, tAny, prefCost, safetyCost, cost},
+
+  vmax = a["vmax"];
+  toGoal = a["goal"] - a["p"];
+  d = norm[toGoal];
+  vPref = If[d &lt; 10^-9, {0., 0.}, (Min[vmax, d/Max[dt, 10^-3]]/(d + 10^-12)) toGoal];
+
+  cand = Join[sampleDisk[vmax, 1200], {clampNorm[vPref, vmax]}];
+
+  Do[
+    vc = cand[[i]];
+    feasible = True;
+    minTTC = Infinity;
+
+    Do[
+      pRel = neighbors[[j]]["p"] - a["p"];
+      vRel = vc - neighbors[[j]]["v"];
+      R = a["radius"] + neighbors[[j]]["radius"];
+
+      {coll, tHit} = ttcInHorizon[pRel, vRel, R, T];
+      If[coll, feasible = False; Break[]];
+
+      {collAny, tAny} = ttcInHorizon[pRel, vRel, R, 10^6];
+      If[collAny, minTTC = Min[minTTC, tAny]];
+      ,
+      {j, Length[neighbors]}
+    ];
+
+    If[!feasible, Continue[]];
+
+    prefCost = norm[vc - vPref]^2;
+    safetyCost = If[minTTC &lt; Infinity, 1.0/(minTTC + 10^-6), 0.0];
+    cost = 1.0 prefCost + 2.0 safetyCost;
+
+    If[cost &lt; bestCost, bestCost = cost; best = vc];
+    ,
+    {i, Length[cand]}
+  ];
+
+  If[bestCost === Infinity, 0.2 clampNorm[a["v"], vmax], best]
+];
+
+simulate[nAgents_: 8, steps_: 400, dt_: 0.05, T_: 2.5] := Module[
+  {R0 = 5.0, agents, nextV, k, i, neighbors},
+
+  agents = Table[
+    Module[{ang = 2 Pi (i - 1)/nAgents, p},
+      p = {R0 Cos[ang], R0 Sin[ang]};
+      &lt;|"p" -&gt; p, "v" -&gt; {0., 0.}, "goal" -&gt; -p, "radius" -&gt; 0.35, "vmax" -&gt; 1.2|&gt;
+    ],
+    {i, nAgents}
+  ];
+
+  Do[
+    nextV = Table[
+      neighbors = Delete[agents, i];
+      chooseVelocityVO[agents[[i]], neighbors, dt, T],
+      {i, nAgents}
+    ];
+
+    Do[
+      agents[[i, "v"]] = nextV[[i]];
+      agents[[i, "p"]] = agents[[i, "p"]] + dt agents[[i, "v"]];
+      ,
+      {i, nAgents}
+    ];
+    ,
+    {k, steps}
+  ];
+
+  agents
+];
+
+(* Run a quick demo: *)
+SeedRandom[1];
+finalAgents = simulate[];
+finalAgents[[1]]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (VO membership via quadratic test):</strong>
+        Let <strong>\( \mathbf{p}_{rel} \)</strong> and
+        <strong>\( \mathbf{v}_{rel} \)</strong> be constant. Show that collision
+        within horizon <strong>\( T \)</strong> occurs iff the quadratic
+        <strong>\( a t^2 + b t + c \le 0 \)</strong> has a solution in
+        <strong>\( [0,T] \)</strong>, where
+        <strong>\( a=\mathbf{v}_{rel}^\top\mathbf{v}_{rel} \)</strong>,
+        <strong>\( b=2\mathbf{p}_{rel}^\top\mathbf{v}_{rel} \)</strong>,
+        <strong>\( c=\mathbf{p}_{rel}^\top\mathbf{p}_{rel}-R^2 \)</strong>.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Start from
+        <strong>\( \|\mathbf{p}_{rel}+t\mathbf{v}_{rel}\| \le R \)</strong>.
+        Squaring both sides (valid since norms are nonnegative) yields
+        <strong>\( \|\mathbf{p}_{rel}+t\mathbf{v}_{rel}\|^2 \le R^2 \)</strong>.
+        Expanding gives <strong>\( a t^2 + b t + c \le 0 \)</strong>. Therefore
+        existence of collision time in <strong>\( [0,T] \)</strong> is exactly
+        the existence of a feasible <strong>\( t \)</strong> solving the
+        quadratic inequality on that interval. If
+        <strong>\( \Delta=b^2-4ac &lt; 0 \)</strong>, the quadratic has no real
+        roots so it never crosses zero: no collision. If
+        <strong>\( \Delta \ge 0 \)</strong>, the first contact time is the
+        smallest nonnegative root
+        <strong>\( t_{hit}=\frac{-b-\sqrt{\Delta}}{2a} \)</strong>; collision
+        within horizon holds iff <strong>\( 0 \le t_{hit} \le T \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Effect of horizon \(T\)):</strong>
+        Consider fixed
+        <strong>\( \mathbf{p}_{rel}\neq \mathbf{0} \)</strong> and radius
+        <strong>\( R \)</strong>. Compare the sets
+        <strong>\( \mathrm{VO}_{A|B}(T_1) \)</strong> and
+        <strong>\( \mathrm{VO}_{A|B}(T_2) \)</strong> for
+        <strong>\( 0 &lt; T_1 &lt; T_2 \)</strong>. Which one is larger?
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        If a velocity causes collision within <strong>\( T_1 \)</strong>, it
+        certainly causes collision within <strong>\( T_2 \)</strong> because
+        <strong>\( [0,T_1] \subset [0,T_2] \)</strong>. Hence:
+      </p>
+      <h4 class="mathJax">
+        \[ 0 &lt; T_1 &lt; T_2 \quad \Rightarrow \quad \mathrm{VO}_{A|B}(T_1)
+        \subseteq \mathrm{VO}_{A|B}(T_2). \]
+      </h4>
+      <p>
+        A longer horizon is safer but more restrictive and can induce
+        conservatism or deadlocks if not paired with reciprocity or progress
+        costs.
+      </p>
+
+      <p>
+        <strong
+          >Problem 3 (Programming exercise: visualize unsafe
+          velocities):</strong
+        >
+        Implement a function that samples velocities in a disc and marks them
+        unsafe if the quadratic collision test indicates collision within
+        horizon. Plot safe vs unsafe samples in velocity space for a moving
+        obstacle.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Use the following reference script (produces
+        a velocity-space scatter plot).
+      </p>
+
+      <p><strong>Code: Chapter16_Lesson2_Ex1.py</strong></p>
+      <pre><code class="language-python">
+"""
+Chapter16_Lesson2_Ex1.py
+Exercise: Single agent + single moving obstacle — sample a safe velocity
+and visualize unsafe velocities (in velocity space) under a finite horizon.
+"""
+from __future__ import annotations
+import math
+import random
+import numpy as np
+
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+
+
+def norm(x):
+    return float(np.linalg.norm(x))
+
+
+def time_to_collision(p_rel, v_rel, R, T):
+    # Quadratic intersection with ||p_rel + t v_rel|| = R
+    if norm(p_rel) &lt;= R:
+        return True, 0.0
+    a = float(v_rel @ v_rel)
+    b = 2.0 * float(p_rel @ v_rel)
+    c = float(p_rel @ p_rel) - R * R
+    if a &lt; 1e-12:
+        return False, float("inf")
+    disc = b * b - 4.0 * a * c
+    if disc &lt; 0:
+        return False, float("inf")
+    t = (-b - math.sqrt(disc)) / (2.0 * a)
+    return (0.0 &lt;= t &lt;= T), t
+
+
+def sample_disk(v_max, n):
+    out = []
+    for _ in range(n):
+        ang = random.random() * 2.0 * math.pi
+        r = math.sqrt(random.random()) * v_max
+        out.append(np.array([r*math.cos(ang), r*math.sin(ang)], dtype=float))
+    return out
+
+
+def main():
+    random.seed(0)
+    np.random.seed(0)
+
+    # Agent and obstacle configuration
+    p_a = np.array([0.0, 0.0])
+    v_a = np.array([0.0, 0.0])
+    p_b = np.array([2.0, 0.8])
+    v_b = np.array([-0.4, -0.05])
+
+    r_a, r_b = 0.35, 0.35
+    R = r_a + r_b
+    T = 3.0
+    v_max = 1.2
+
+    # Preferred velocity (toward a goal)
+    goal = np.array([4.0, 0.0])
+    v_pref = (goal - p_a)
+    v_pref = v_pref / (norm(v_pref) + 1e-12) * 1.0
+
+    candidates = sample_disk(v_max, 4000)
+    safe = []
+    unsafe = []
+    for v in candidates:
+        coll, t = time_to_collision(p_b - p_a, v - v_b, R, T)
+        if coll:
+            unsafe.append(v)
+        else:
+            safe.append(v)
+
+    # Choose the safe velocity closest to v_pref
+    safe = np.array(safe) if safe else np.zeros((0,2))
+    unsafe = np.array(unsafe) if unsafe else np.zeros((0,2))
+    if safe.shape[0] &gt; 0:
+        idx = np.argmin(np.sum((safe - v_pref[None,:])**2, axis=1))
+        v_star = safe[idx]
+    else:
+        v_star = np.zeros(2)
+
+    print("Preferred v:", v_pref)
+    print("Chosen safe v*:", v_star)
+
+    if plt is None:
+        print("matplotlib not available; skipping plot.")
+        return
+
+    plt.figure(figsize=(7,6))
+    if unsafe.shape[0] &gt; 0:
+        plt.scatter(unsafe[:,0], unsafe[:,1], s=5, alpha=0.15, label="Unsafe (inside VO_T)")
+    if safe.shape[0] &gt; 0:
+        plt.scatter(safe[:,0], safe[:,1], s=6, alpha=0.25, label="Safe")
+    plt.scatter([v_pref[0]], [v_pref[1]], marker="x", s=120, label="v_pref")
+    plt.scatter([v_star[0]], [v_star[1]], marker="o", s=120, label="v*")
+    plt.axis("equal")
+    plt.xlabel("v_x")
+    plt.ylabel("v_y")
+    plt.title("Velocity-space safe/unsafe samples (finite horizon)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <p>
+        <strong>Problem 4 (Why ORCA becomes convex):</strong>
+        Explain why replacing each forbidden region by a supporting half-plane
+        constraint yields a convex feasible set. What is the computational
+        advantage in 2D?
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Each half-plane is convex. The intersection of convex sets is convex,
+        hence the feasible set
+        <strong
+          >\( \mathcal{F} = \mathcal{V}_{adm} \cap \bigcap_{B\in\mathcal{N}}
+          \mathcal{H}_{A|B} \)</strong
+        >
+        is convex when <strong>\( \mathcal{V}_{adm} \)</strong> is convex (e.g.,
+        a disc or polygon). In 2D, projecting
+        <strong>\( \mathbf{v}_{pref} \)</strong> onto
+        <strong>\( \mathcal{F} \)</strong> can be done with linear-time
+        incremental constraint handling (specialized 2D LP / projection
+        algorithms), enabling real-time performance with many neighbors.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  P["v_pref"] --> K["Add constraint half-planes one by one"]
+  K --> I["Maintain feasible intersection region (convex)"]
+  I --> J["Project v_pref to nearest feasible v*"]
+  J --> E["Execute (dt) and rebuild constraints"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        Velocity Obstacles convert dynamic collision avoidance into a
+        velocity-space feasibility problem using relative motion. For disc
+        approximations and finite horizons, collision checking reduces to a
+        quadratic predicate, enabling fast rejection of unsafe velocities.
+        Reciprocal approaches (RVO/ORCA) address symmetric deadlocks by sharing
+        avoidance responsibility and, in ORCA, producing convex half-plane
+        constraints that admit deterministic real-time solvers. The provided
+        implementations emphasize transparency: a sampling-based VO filter that
+        integrates naturally with AMR local-planning outputs via a preferred
+        velocity.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Fiorini, P., &amp; Shiller, Z. (1998). Motion planning in dynamic
+        environments using velocity obstacles.
+        <em>International Journal of Robotics Research</em>, 17(7), 760–772.
+      </li>
+      <li>
+        van den Berg, J., Lin, M., &amp; Manocha, D. (2008). Reciprocal velocity
+        obstacles for real-time multi-agent navigation.
+        <em>IEEE International Conference on Robotics and Automation (ICRA)</em
+        >, 1928–1935.
+      </li>
+      <li>
+        van den Berg, J., Guy, S.J., Lin, M., &amp; Manocha, D. (2011).
+        Reciprocal n-body collision avoidance.
+        <em>Robotics Research (Springer Tracts in Advanced Robotics)</em>, 3–19.
+      </li>
+      <li>
+        van den Berg, J., Snape, J., Guy, S.J., &amp; Manocha, D. (2011).
+        Optimal reciprocal collision avoidance for multiple agents.
+        <em>International Symposium of Robotics Research (ISRR)</em>.
+      </li>
+      <li>
+        Snape, J., van den Berg, J., Guy, S.J., &amp; Manocha, D. (2011). Smooth
+        and collision-free navigation for multiple robots under
+        differential-drive constraints.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 4584–4589.
+      </li>
+      <li>
+        Guy, S.J., Chhugani, J., Kim, C., Satish, N., Lin, M., Manocha, D.,
+        &amp; Dubey, P. (2010). ClearPath: Highly parallel collision avoidance
+        for multi-agent simulation.
+        <em>ACM SIGGRAPH/Eurographics Symposium on Computer Animation</em>,
+        177–187.
+      </li>
+      <li>
+        Wilkie, D., van den Berg, J., &amp; Manocha, D. (2009). Generalized
+        velocity obstacles.
+        <em
+          >IEEE/RSJ International Conference on Intelligent Robots and Systems
+          (IROS)</em
+        >, 5573–5578.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter16/Lesson1.html">
+          Lesson 1: Sensing Dynamic Obstacles
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter16/Lesson3.html">
+          Lesson 3: Socially Aware Navigation Concepts
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="active-lesson" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

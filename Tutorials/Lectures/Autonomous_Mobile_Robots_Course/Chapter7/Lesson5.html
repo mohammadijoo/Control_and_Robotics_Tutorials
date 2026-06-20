@@ -1,0 +1,1702 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 7: Kalman-Filter Localization for AMR - Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 7: Kalman-Filter Localization for AMR</h1>
+    <h3><strong>Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS</strong></h3>
+    <p>
+      This lab implements and evaluates a multi-rate, multi-sensor localization
+      pipeline for a planar AMR using wheel odometry, IMU (gyro + longitudinal
+      accelerometer), and GPS position fixes. You will derive a concrete
+      stochastic state-space model, implement both EKF and UKF variants, and
+      validate performance via trajectory error and consistency diagnostics.
+      Emphasis is placed on mathematically correct modeling,
+      Jacobians/sigma-point mechanics, and numerically stable covariance
+      propagation and updates.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Setup -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Setup</h2>
+    <div class="down-content">
+      <p>By the end of this lab you should be able to:</p>
+      <ul>
+        <li>
+          Formulate a discrete-time stochastic model for planar motion with
+          IMU-driven propagation and wheel/GPS updates.
+        </li>
+        <li>
+          Derive EKF Jacobians for the specific AMR model and implement a
+          numerically safe covariance update (Joseph form).
+        </li>
+        <li>
+          Implement a UKF with correct sigma-point construction, nonlinear
+          propagation, and angle-aware averaging.
+        </li>
+        <li>
+          Handle multi-rate sensor updates (IMU high-rate; wheel medium-rate;
+          GPS low-rate) in a single filter loop.
+        </li>
+        <li>
+          Evaluate estimation accuracy (RMSE) and basic statistical consistency
+          (innovation gating, NIS/NEES concepts).
+        </li>
+      </ul>
+
+      <p>
+        Recommended software stacks and robotics libraries (you will still
+        implement the core filter “from scratch”):
+      </p>
+      <ul>
+        <li>
+          <strong>\( \text{Python} \)</strong>: NumPy, Matplotlib; (optional)
+          ROS2 <code>rclpy</code>; (reference) <code>filterpy</code>.
+        </li>
+        <li>
+          <strong>\( \text{C++} \)</strong>: Eigen; (reference) ROS2
+          <code>robot_localization</code>.
+        </li>
+        <li>
+          <strong>\( \text{Java} \)</strong>: EJML; (reference) ROSJava
+          bindings.
+        </li>
+        <li>
+          <strong>\( \text{MATLAB/Simulink} \)</strong>: base MATLAB; (optional)
+          Sensor Fusion and Tracking Toolbox; Simulink MATLAB Function blocks.
+        </li>
+        <li>
+          <strong>\( \text{Wolfram Mathematica} \)</strong>: Linear algebra
+          primitives; custom EKF/UKF routines.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Multi-Rate Fusion Architecture -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Multi-Rate Fusion Architecture</h2>
+    <div class="down-content">
+      <p>The lab implements a common real-world arrangement:</p>
+      <ul>
+        <li>
+          IMU provides high-rate inertial increments (gyro yaw-rate and
+          longitudinal acceleration).
+        </li>
+        <li>
+          Wheel odometry provides medium-rate kinematic information (forward
+          speed and yaw-rate from differential wheel speeds).
+        </li>
+        <li>
+          GPS provides low-rate absolute position fixes (2D in a local planar
+          frame).
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Start: x0, P0"] --> B["IMU tick (high-rate)"]
+  B --> C["Predict with IMU: propagate x, P"]
+  C --> D{"Wheel msg available?"}
+  D -->|yes| E["Update with wheel: z=[v_w, omega_w]"]
+  D -->|no| F{"GPS msg available?"}
+  E --> F
+  F -->|yes| G["Update with GPS: z=[x_gps, y_gps]"]
+  F -->|no| H["Log estimate"]
+  G --> H
+  H --> B
+        </pre>
+      </div>
+
+      <p>
+        The key engineering requirement is that the update functions accept
+        measurements whenever they arrive, while the filter state is always
+        propagated to the correct timestamp using the IMU stream. In this lab we
+        assume time alignment is already handled (single timeline), and focus on
+        estimation math.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Stochastic Model for Wheel + IMU + GPS -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Stochastic Model for Wheel + IMU + GPS</h2>
+    <div class="down-content">
+      <p>
+        We use a planar state vector with IMU bias terms:
+        <strong
+          >\( \mathbf{x}_k = [x_k, y_k, \theta_k, v_k, b_{g,k}, b_{a,k}]^\top
+          \)</strong
+        >, where <strong>\( (x,y) \)</strong> is position in a local world
+        frame, <strong>\( \theta \)</strong> is heading,
+        <strong>\( v \)</strong> is forward speed, and
+        <strong>\( b_g, b_a \)</strong> are gyro and longitudinal accelerometer
+        biases.
+      </p>
+
+      <p>
+        IMU measurements (treated as known inputs to the process model) are:
+        <strong>\( \omega_{m,k} \)</strong> (yaw-rate) and
+        <strong>\( a_{m,k} \)</strong> (longitudinal acceleration).
+        Bias-corrected quantities are:
+        <strong>\( \omega_k = \omega_{m,k} - b_{g,k} \)</strong>,
+        <strong>\( a_k = a_{m,k} - b_{a,k} \)</strong>.
+      </p>
+
+      <p>
+        Using forward Euler discretization with timestep
+        <strong>\( \Delta t \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} x_{k+1} &= x_k + v_k \Delta t \cos(\theta_k) \\
+        y_{k+1} &= y_k + v_k \Delta t \sin(\theta_k) \\ \theta_{k+1} &=
+        \mathrm{wrap}\!\left(\theta_k + (\omega_{m,k} - b_{g,k})\Delta t \right)
+        \\ v_{k+1} &= v_k + (a_{m,k} - b_{a,k})\Delta t \\ b_{g,k+1} &= b_{g,k}
+        + w_{bg,k} \\ b_{a,k+1} &= b_{a,k} + w_{ba,k} \end{aligned} \]
+      </h4>
+
+      <p>
+        The noise terms implement the standard decomposition: white IMU noise
+        contributes to <strong>\( \theta \)</strong> and
+        <strong>\( v \)</strong>, while bias states follow random walks. Define
+        a noise vector
+        <strong
+          >\( \mathbf{w}_k = [n_{g,k}, n_{a,k}, w_{bg,k}, w_{ba,k}]^\top
+          \)</strong
+        >
+        with covariance
+        <strong
+          >\( \mathbf{Q}_c = \mathrm{diag}(\sigma_g^2, \sigma_a^2,
+          \sigma_{bg}^2, \sigma_{ba}^2) \)</strong
+        >.
+      </p>
+
+      <p>
+        A simple discrete-time approximation uses a noise injection matrix
+        <strong>\( \mathbf{G}_k \)</strong> such that
+        <strong
+          >\( \mathbf{Q}_d \approx \mathbf{G}_k \mathbf{Q}_c \mathbf{G}_k^\top
+          \)</strong
+        >:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{G}_k = \begin{bmatrix} 0 & 0 & 0 & 0\\ 0 & 0 & 0 & 0\\ \Delta
+        t & 0 & 0 & 0\\ 0 & \Delta t & 0 & 0\\ 0 & 0 & \sqrt{\Delta t} & 0\\ 0 &
+        0 & 0 & \sqrt{\Delta t} \end{bmatrix}, \qquad \mathbf{Q}_d =
+        \mathbf{G}_k \mathbf{Q}_c \mathbf{G}_k^\top. \]
+      </h4>
+
+      <p>Measurement models:</p>
+
+      <p>
+        <strong>Wheel odometry update</strong> uses measurements
+        <strong>\( \mathbf{z}^{(w)}_k = [v_{w,k}, \omega_{w,k}]^\top \)</strong
+        >. We model wheel speed as direct observation of
+        <strong>\( v \)</strong>, and wheel yaw-rate as observation of IMU
+        yaw-rate with bias:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{z}^{(w)}_k = \underbrace{ \begin{bmatrix} v_k\\ \omega_{m,k}
+        - b_{g,k} \end{bmatrix} }_{\mathbf{h}_w(\mathbf{x}_k,\omega_{m,k})} +
+        \mathbf{n}^{(w)}_k, \qquad \mathbf{n}^{(w)}_k \sim
+        \mathcal{N}(\mathbf{0}, \mathbf{R}_w). \]
+      </h4>
+
+      <p>
+        <strong>GPS update</strong> uses measurements
+        <strong>\( \mathbf{z}^{(g)}_k = [x_{gps,k}, y_{gps,k}]^\top \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{z}^{(g)}_k = \underbrace{ \begin{bmatrix} x_k\\ y_k
+        \end{bmatrix} }_{\mathbf{h}_g(\mathbf{x}_k)} + \mathbf{n}^{(g)}_k,
+        \qquad \mathbf{n}^{(g)}_k \sim \mathcal{N}(\mathbf{0}, \mathbf{R}_g). \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: EKF Derivation for This Lab -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. EKF for Wheel + IMU + GPS</h2>
+    <div class="down-content">
+      <p>
+        The EKF applies the Kalman filter equations to the first-order
+        linearization of the nonlinear system around the current estimate.
+        Define the nonlinear propagation function
+        <strong
+          >\( \mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_k,\mathbf{u}_k) +
+          \boldsymbol{\eta}_k \)</strong
+        >, where
+        <strong>\( \mathbf{u}_k = [\omega_{m,k}, a_{m,k}]^\top \)</strong>.
+      </p>
+
+      <p>
+        The EKF prediction uses the Jacobian
+        <strong
+          >\( \mathbf{F}_k = \frac{\partial \mathbf{f}}{\partial
+          \mathbf{x}}\big|_{\hat{\mathbf{x}}_k} \)</strong
+        >:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{F}_k = \begin{bmatrix} 1 & 0 & -v_k\Delta t \sin(\theta_k) &
+        \Delta t\cos(\theta_k) & 0 & 0\\ 0 & 1 & \phantom{-}v_k\Delta t
+        \cos(\theta_k) & \Delta t\sin(\theta_k) & 0 & 0\\ 0 & 0 & 1 & 0 &
+        -\Delta t & 0\\ 0 & 0 & 0 & 1 & 0 & -\Delta t\\ 0 & 0 & 0 & 0 & 1 & 0\\
+        0 & 0 & 0 & 0 & 0 & 1 \end{bmatrix}. \]
+      </h4>
+
+      <p>Prediction step:</p>
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x}}_{k+1|k} =
+        \mathbf{f}(\hat{\mathbf{x}}_{k|k},\mathbf{u}_k), \qquad
+        \mathbf{P}_{k+1|k} = \mathbf{F}_k \mathbf{P}_{k|k}\mathbf{F}_k^\top +
+        \mathbf{Q}_d. \]
+      </h4>
+
+      <p>
+        For an update with measurement model
+        <strong
+          >\( \mathbf{z}_k = \mathbf{h}(\mathbf{x}_k) + \mathbf{n}_k \)</strong
+        >, define the measurement Jacobian
+        <strong
+          >\( \mathbf{H}_k = \frac{\partial \mathbf{h}}{\partial
+          \mathbf{x}}\big|_{\hat{\mathbf{x}}_{k|k-1}} \)</strong
+        >. For wheel and GPS in this lab:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{H}_w = \begin{bmatrix} 0 & 0 & 0 & 1 & 0 & 0\\ 0 & 0 & 0 & 0
+        & -1 & 0 \end{bmatrix}, \qquad \mathbf{H}_g = \begin{bmatrix} 1 & 0 & 0
+        & 0 & 0 & 0\\ 0 & 1 & 0 & 0 & 0 & 0 \end{bmatrix}. \]
+      </h4>
+
+      <p>EKF update (innovation form):</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{y}_k &= \mathbf{z}_k -
+        \mathbf{h}(\hat{\mathbf{x}}_{k|k-1})\\ \mathbf{S}_k &= \mathbf{H}_k
+        \mathbf{P}_{k|k-1} \mathbf{H}_k^\top + \mathbf{R}\\ \mathbf{K}_k &=
+        \mathbf{P}_{k|k-1}\mathbf{H}_k^\top \mathbf{S}_k^{-1}\\
+        \hat{\mathbf{x}}_{k|k} &\leftarrow \hat{\mathbf{x}}_{k|k-1} +
+        \mathbf{K}_k\mathbf{y}_k \end{aligned} \]
+      </h4>
+
+      <p>
+        <strong>PSD-safe covariance update (Joseph form).</strong> To preserve
+        symmetry and positive semidefiniteness under finite precision:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k|k} \;=\;
+        (\mathbf{I}-\mathbf{K}_k\mathbf{H}_k)\mathbf{P}_{k|k-1}(\mathbf{I}-\mathbf{K}_k\mathbf{H}_k)^\top
+        + \mathbf{K}_k\mathbf{R}\mathbf{K}_k^\top. \]
+      </h4>
+
+      <p>
+        <strong>Proof sketch (Joseph form is PSD).</strong>
+        Let
+        <strong>\( \mathbf{A} = (\mathbf{I}-\mathbf{K}\mathbf{H}) \)</strong>.
+        Then
+        <strong
+          >\( \mathbf{P}_{new} = \mathbf{A}\mathbf{P}\mathbf{A}^\top +
+          \mathbf{K}\mathbf{R}\mathbf{K}^\top \)</strong
+        >. If <strong>\( \mathbf{P}\succeq 0 \)</strong> and
+        <strong>\( \mathbf{R}\succeq 0 \)</strong>, both terms are PSD, hence
+        their sum is PSD. This argument is algebraic and does not depend on the
+        linearization details.
+      </p>
+
+      <p>
+        <strong>Interpretation as a local MAP step.</strong> For a (locally)
+        linearized measurement model
+        <strong
+          >\( \mathbf{z} \approx
+          \mathbf{h}(\hat{\mathbf{x}})+\mathbf{H}(\mathbf{x}-\hat{\mathbf{x}})+\mathbf{n}
+          \)</strong
+        >
+        with Gaussian prior
+        <strong
+          >\( \mathbf{x} \sim \mathcal{N}(\hat{\mathbf{x}},\mathbf{P})
+          \)</strong
+        >, the posterior maximizer solves a weighted least-squares problem:
+      </p>
+      <h4 class="mathJax">
+        \[ \hat{\mathbf{x}}_{MAP} \;=\; \arg\min_{\mathbf{x}} \left\{
+        (\mathbf{x}-\hat{\mathbf{x}})^\top
+        \mathbf{P}^{-1}(\mathbf{x}-\hat{\mathbf{x}}) +
+        \left(\mathbf{z}-\mathbf{h}(\hat{\mathbf{x}})-\mathbf{H}(\mathbf{x}-\hat{\mathbf{x}})\right)^\top
+        \mathbf{R}^{-1} \left(\mathbf{z}-\mathbf{h}(\hat{\mathbf{x}})- \\
+        \mathbf{H}(\mathbf{x}-\hat{\mathbf{x}})\right) \right\}, \]
+      </h4>
+      <p>
+        whose normal equations yield the standard Kalman gain update. The EKF
+        repeats this locally at each timestep.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: UKF for This Lab (Sigma Points + Angle Handling) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. UKF for Wheel + IMU + GPS</h2>
+    <div class="down-content">
+      <p>
+        The UKF replaces first-order linearization with the unscented transform:
+        a deterministic set of sigma points is propagated through the nonlinear
+        functions to match the posterior mean and covariance. For state
+        dimension <strong>\( n \)</strong>, define parameters
+        <strong>\( \alpha, \beta, \kappa \)</strong> and
+        <strong>\( \lambda = \alpha^2(n+\kappa)-n \)</strong>.
+      </p>
+
+      <p>
+        Sigma points for <strong>\( \hat{\mathbf{x}} \)</strong> and
+        <strong>\( \mathbf{P} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{X}^{(0)} &= \hat{\mathbf{x}}\\
+        \mathbf{X}^{(i)} &= \hat{\mathbf{x}} +
+        \left[\sqrt{(n+\lambda)\mathbf{P}}\right]_i,\quad i=1,\dots,n\\
+        \mathbf{X}^{(i+n)} &= \hat{\mathbf{x}} -
+        \left[\sqrt{(n+\lambda)\mathbf{P}}\right]_i,\quad i=1,\dots,n
+        \end{aligned} \]
+      </h4>
+
+      <p>Weights:</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} W^{(0)}_m &= \frac{\lambda}{n+\lambda}, \qquad
+        W^{(0)}_c = \frac{\lambda}{n+\lambda} + (1-\alpha^2+\beta)\\ W^{(i)}_m
+        &= W^{(i)}_c = \frac{1}{2(n+\lambda)}, \quad i=1,\dots,2n. \end{aligned}
+        \]
+      </h4>
+
+      <p>
+        Prediction (propagate sigma points through
+        <strong>\( \mathbf{f} \)</strong>):
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{X}^{(i)}_{k+1|k} &=
+        \mathbf{f}(\mathbf{X}^{(i)}_{k|k},\mathbf{u}_k)\\
+        \hat{\mathbf{x}}_{k+1|k} &= \sum_{i=0}^{2n} W^{(i)}_m
+        \mathbf{X}^{(i)}_{k+1|k}\\ \mathbf{P}_{k+1|k} &= \sum_{i=0}^{2n}
+        W^{(i)}_c
+        (\mathbf{X}^{(i)}_{k+1|k}-\hat{\mathbf{x}}_{k+1|k})(\cdot)^\top +
+        \mathbf{Q}_d. \end{aligned} \]
+      </h4>
+
+      <p>
+        <strong>Angle-aware mean and residuals.</strong> For heading
+        <strong>\( \theta \)</strong>, linear averaging fails near wrap
+        boundaries. Use a circular mean:
+      </p>
+      <h4 class="mathJax">
+        \[ \bar{\theta} = \mathrm{atan2}\!\left(\sum_i W^{(i)}_m
+        \sin(\theta^{(i)}),\; \sum_i W^{(i)}_m \cos(\theta^{(i)})\right), \quad
+        \delta\theta^{(i)} = \mathrm{wrap}(\theta^{(i)} - \bar{\theta}). \]
+      </h4>
+
+      <p>
+        <strong>Why UKF helps (formal approximation statement).</strong> For a
+        nonlinear transform
+        <strong>\( \mathbf{y}=\mathbf{g}(\mathbf{x}) \)</strong> with Gaussian
+        <strong>\( \mathbf{x} \)</strong>, the unscented transform matches
+        mean/covariance to higher order than first-order linearization. A Taylor
+        expansion argument shows the UKF captures second-order terms of
+        <strong>\( \mathbf{g} \)</strong> in the moment approximation, whereas
+        the EKF’s covariance propagation is fundamentally first-order in the
+        nonlinearity (through <strong>\( \mathbf{H} \)</strong> /
+        <strong>\( \mathbf{F} \)</strong>). Practically, this lab will show UKF
+        advantage when turning dynamics are stronger and GPS updates are sparse.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Sigma points from (x,P)"] --> P1["Propagate through f(x,u)"]
+  P1 --> M1["Mean/cov (angle-aware for theta)"]
+  M1 --> U1{"Measurement arrives?"}
+  U1 -->|wheel| W1["Transform sigma points via h_w"]
+  U1 -->|gps| G1["Transform sigma points via h_g"]
+  W1 --> K1["Compute S and Pxz, then K"]
+  G1 --> K1
+  K1 --> X1["Update x and P"]
+  X1 --> S
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Practical Lab Checklist (Tuning, Gating, Logging) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Practical Lab Checklist</h2>
+    <div class="down-content">
+      <p>
+        The following items materially determine whether your filter is stable
+        and meaningful:
+      </p>
+      <ul>
+        <li>
+          <strong>Initialization.</strong> Choose
+          <strong>\( \hat{\mathbf{x}}_0 \)</strong> and
+          <strong>\( \mathbf{P}_0 \)</strong> consistent with your real
+          uncertainty. Underestimating <strong>\( \mathbf{P}_0 \)</strong> often
+          yields inconsistency and divergence.
+        </li>
+        <li>
+          <strong>Noise tuning.</strong> Ensure
+          <strong>\( \mathbf{Q} \)</strong> reflects IMU noise and bias drift;
+          ensure <strong>\( \mathbf{R}_g \)</strong> reflects GPS scatter in the
+          chosen local frame; ensure
+          <strong>\( \mathbf{R}_w \)</strong> reflects wheel slip and
+          quantization.
+        </li>
+        <li>
+          <strong>Angle normalization.</strong> After every prediction/update,
+          wrap <strong>\( \theta \)</strong> via
+          <strong>\( \mathrm{wrap}(\cdot) \)</strong>.
+        </li>
+        <li>
+          <strong>Innovation gating (optional).</strong> Use NIS to reject
+          outliers (e.g., GPS multipath). For innovation
+          <strong>\( \mathbf{y}_k \)</strong> and covariance
+          <strong>\( \mathbf{S}_k \)</strong>:
+          <strong
+            >\( \mathrm{NIS}_k = \mathbf{y}_k^\top \mathbf{S}_k^{-1}\mathbf{y}_k
+            \)</strong
+          >. Accept if
+          <strong>\( \mathrm{NIS}_k \le \chi^2_{m,1-\alpha} \)</strong> where
+          <strong>\( m \)</strong> is measurement dimension.
+        </li>
+        <li>
+          <strong>Logging.</strong> Log estimates, ground truth (if available),
+          innovations, and covariances to diagnose inconsistency.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Lab — EKF and UKF (Simulation + Multi-Rate Updates)</h2>
+    <div class="down-content">
+      <p>
+        The Python implementation simulates a trajectory with biased IMU, noisy
+        wheel odometry, and noisy GPS, then runs both EKF and UKF using the
+        model in Sections 3–5.
+      </p>
+
+      <h3>Chapter7_Lesson5.py</h3>
+      <pre><code class="language-python">
+# Chapter7_Lesson5.py
+# EKF/UKF localization lab: Wheel + IMU + GPS (2D ground robot)
+# Dependencies: numpy, matplotlib
+# Optional: scipy (not required)
+
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(7)
+
+def wrap_angle(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+def angle_mean(angles: np.ndarray, w: np.ndarray) -&gt; float:
+    """Weighted circular mean."""
+    s = np.sum(w * np.sin(angles))
+    c = np.sum(w * np.cos(angles))
+    return float(np.arctan2(s, c))
+
+def angle_residual(a: float, b: float) -&gt; float:
+    """Residual a - b for angles."""
+    return wrap_angle(a - b)
+
+# (Full file content is provided in the downloadable ZIP.)
+      </code></pre>
+
+      <h3>Chapter7_Lesson5_Ex1.py</h3>
+      <pre><code class="language-python">
+# Chapter7_Lesson5_Ex1.py
+# Exercise: NIS gating for wheel/GPS updates + basic consistency checks
+# Dependencies: numpy
+
+import numpy as np
+import math
+
+def wrap_angle(a: float) -&gt; float:
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+# (Full file content is provided in the downloadable ZIP.)
+      </code></pre>
+
+      <p>Implementation notes:</p>
+      <ul>
+        <li>
+          Wheel update uses
+          <strong
+            >\( \mathbf{h}_w(\mathbf{x},\omega_m)=[v,\omega_m-b_g]^\top
+            \)</strong
+          >
+          to couple wheel and gyro for bias learning.
+        </li>
+        <li>
+          UKF uses an angle-aware mean for <strong>\( \theta \)</strong> and
+          wraps angular residuals in covariance accumulation.
+        </li>
+        <li>
+          Plots include trajectory, heading, and speed comparisons; you can add
+          innovation plots and gating statistics.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Lab — EKF and UKF with Eigen</h2>
+    <div class="down-content">
+      <p>
+        The C++ implementation mirrors the same simulation and filter structure,
+        using Eigen for matrix operations. In production AMR stacks, you would
+        typically integrate this logic via ROS2 and leverage
+        <code>robot_localization</code>, but implementing it directly clarifies
+        the mathematical mechanics.
+      </p>
+
+      <h3>Chapter7_Lesson5.cpp</h3>
+      <pre><code class="language-cpp">
+// Chapter7_Lesson5.cpp
+// EKF/UKF localization lab: Wheel + IMU + GPS (2D ground robot)
+// Dependencies: Eigen (header-only for basic usage)
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter7_Lesson5.cpp -I /usr/include/eigen3 -o ch7_l5
+
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;random&gt;
+#include &lt;cmath&gt;
+#include &lt;Eigen/Dense&gt;
+
+// (Full file content is provided in the downloadable ZIP.)
+      </code></pre>
+
+      <p>Engineering notes for C++:</p>
+      <ul>
+        <li>
+          Prefer Cholesky (<strong
+            >\( \mathbf{P} = \mathbf{L}\mathbf{L}^\top \)</strong
+          >) for UKF sigma-point generation.
+        </li>
+        <li>
+          Use the Joseph form in EKF updates to improve numerical stability.
+        </li>
+        <li>
+          In ROS2, the same conceptual pipeline maps to callbacks that trigger
+          predict/update operations based on message timestamps.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Lab — EKF and UKF with EJML</h2>
+    <div class="down-content">
+      <p>
+        The Java implementation uses EJML for dense linear algebra. This is
+        useful for Android/embedded JVM robotics prototypes or server-side
+        simulation pipelines.
+      </p>
+
+      <h3>Chapter7_Lesson5.java</h3>
+      <pre><code class="language-java">
+// Chapter7_Lesson5.java
+// EKF/UKF localization lab: Wheel + IMU + GPS (2D ground robot)
+// Dependencies: EJML (Efficient Java Matrix Library)
+
+import org.ejml.data.DMatrixRMaj;
+import org.ejml.dense.row.CommonOps_DDRM;
+
+// (Full file content is provided in the downloadable ZIP.)
+      </code></pre>
+
+      <p>Practical notes:</p>
+      <ul>
+        <li>Angle wrapping must be applied after every state update.</li>
+        <li>
+          For UKF, ensure the Cholesky factorization is computed on
+          <strong>\( (n+\lambda)\mathbf{P} \)</strong>, not
+          <strong>\( \mathbf{P} \)</strong>.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Lab — EKF and UKF + Simulink Hook</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is convenient for rapid prototyping and comparison with toolbox
+        implementations. The provided script runs both EKF and UKF and includes
+        a minimal function to programmatically create a Simulink shell model
+        (students can complete the block wiring using MATLAB Function blocks for
+        predict/update).
+      </p>
+
+      <h3>Chapter7_Lesson5.m</h3>
+      <pre><code class="language-matlab">
+% Chapter7_Lesson5.m
+% EKF/UKF localization lab: Wheel + IMU + GPS (2D ground robot)
+% Requires only base MATLAB. Optional: Sensor Fusion and Tracking Toolbox for comparison.
+
+clear; clc; rng(7);
+
+% (Full file content is provided in the downloadable ZIP.)
+      </code></pre>
+
+      <p>
+        Suggested toolbox cross-check (optional): compare your EKF/UKF output
+        against MATLAB’s filtering tools by constructing an equivalent nonlinear
+        state-space model and feeding measurements at their sample times. Keep
+        the “from scratch” implementation as the ground-truth learning artifact.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Lab — EKF/UKF Scaffold</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is well-suited for symbolic Jacobian verification and rapid
+        linear algebra experimentation. The provided notebook-style source
+        defines the motion model, Jacobian, and EKF/UKF building blocks.
+      </p>
+
+      <h3>Chapter7_Lesson5.nb</h3>
+      <pre><code class="language-mathematica">
+(* Chapter7_Lesson5.nb
+   Wolfram Mathematica notebook-style source (plain text).
+   EKF/UKF localization lab: Wheel + IMU + GPS (2D ground robot)
+*)
+
+ClearAll["Global`*"];
+
+(* (Full file content is provided in the downloadable ZIP.) *)
+      </code></pre>
+
+      <p>Recommended Mathematica workflow:</p>
+      <ul>
+        <li>
+          Symbolically validate EKF Jacobians against finite-difference
+          approximations.
+        </li>
+        <li>
+          Numerically compare EKF and UKF outputs under increased turn rate and
+          reduced GPS rate.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (EKF Jacobian Derivation):</strong>
+        Starting from the discrete model
+        <strong>\( x_{k+1}=x_k+v_k\Delta t\cos(\theta_k) \)</strong>,
+        <strong>\( y_{k+1}=y_k+v_k\Delta t\sin(\theta_k) \)</strong>, derive the
+        partial derivatives
+        <strong>\( \frac{\partial x_{k+1}}{\partial \theta_k} \)</strong>,
+        <strong>\( \frac{\partial x_{k+1}}{\partial v_k} \)</strong>,
+        <strong>\( \frac{\partial y_{k+1}}{\partial \theta_k} \)</strong>,
+        <strong>\( \frac{\partial y_{k+1}}{\partial v_k} \)</strong>
+        and recover the top-left block of <strong>\( \mathbf{F}_k \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} x_{k+1} &= x_k + v_k\Delta t\cos(\theta_k)
+        \;\Rightarrow\; \frac{\partial x_{k+1}}{\partial \theta_k} = v_k\Delta
+        t(-\sin\theta_k),\quad \frac{\partial x_{k+1}}{\partial v_k} = \Delta
+        t\cos\theta_k\\ y_{k+1} &= y_k + v_k\Delta t\sin(\theta_k)
+        \;\Rightarrow\; \frac{\partial y_{k+1}}{\partial \theta_k} = v_k\Delta
+        t(\cos\theta_k),\quad \frac{\partial y_{k+1}}{\partial v_k} = \Delta
+        t\sin\theta_k. \end{aligned} \]
+      </h4>
+      <p>
+        Substituting these into the state ordering
+        <strong>\( [x,y,\theta,v,b_g,b_a]^\top \)</strong> yields the
+        <strong>\( (x,y) \)</strong>-rows of
+        <strong>\( \mathbf{F}_k \)</strong> shown in Section 4.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Joseph Form PSD Guarantee):</strong>
+        Prove that if <strong>\( \mathbf{P}\succeq 0 \)</strong> and
+        <strong>\( \mathbf{R}\succeq 0 \)</strong>, then
+        <strong
+          >\( \mathbf{P}_{new} =
+          (\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}(\mathbf{I}-\mathbf{K}\mathbf{H})^\top
+          + \mathbf{K}\mathbf{R}\mathbf{K}^\top \succeq 0 \)</strong
+        >.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Let <strong>\( \mathbf{A}=\mathbf{I}-\mathbf{K}\mathbf{H} \)</strong>.
+        For any vector <strong>\( \mathbf{v} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{v}^\top \mathbf{P}_{new}\mathbf{v} =
+        (\mathbf{A}^\top\mathbf{v})^\top \mathbf{P}(\mathbf{A}^\top\mathbf{v}) +
+        (\mathbf{K}^\top\mathbf{v})^\top \mathbf{R}(\mathbf{K}^\top\mathbf{v}).
+        \]
+      </h4>
+      <p>
+        Since <strong>\( \mathbf{P}\succeq 0 \)</strong> and
+        <strong>\( \mathbf{R}\succeq 0 \)</strong>, both terms are nonnegative
+        for all <strong>\( \mathbf{v} \)</strong>. Therefore
+        <strong>\( \mathbf{P}_{new}\succeq 0 \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (UKF Weight Normalization):</strong>
+        Show that the mean weights satisfy
+        <strong>\( \sum_{i=0}^{2n} W^{(i)}_m = 1 \)</strong>.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <h4 class="mathJax">
+        \[ \sum_{i=0}^{2n} W^{(i)}_m = \frac{\lambda}{n+\lambda} +
+        2n\cdot\frac{1}{2(n+\lambda)} = \frac{\lambda}{n+\lambda} +
+        \frac{n}{n+\lambda} = \frac{n+\lambda}{n+\lambda} = 1. \]
+      </h4>
+
+      <p>
+        <strong>Problem 4 (Innovation Gating Threshold):</strong>
+        For a 2D GPS update, the innovation dimension is
+        <strong>\( m=2 \)</strong>. Write the acceptance test using NIS for a
+        significance level <strong>\( \alpha \)</strong> and explain its
+        meaning.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        Compute
+        <strong
+          >\( \mathrm{NIS}_k = \mathbf{y}_k^\top \mathbf{S}_k^{-1}\mathbf{y}_k
+          \)</strong
+        >. Accept the measurement if:
+      </p>
+      <h4 class="mathJax">\[ \mathrm{NIS}_k \le \chi^2_{2,1-\alpha}. \]</h4>
+      <p>
+        Under correct modeling (Gaussian assumptions) the NIS is chi-square
+        distributed with <strong>\( m \)</strong> degrees of freedom. Rejecting
+        when the statistic is too large implements a principled outlier detector
+        (e.g., GPS multipath spikes).
+      </p>
+
+      <p>
+        <strong>Problem 5 (Bias Observability Intuition in This Lab):</strong>
+        Explain why the gyro bias <strong>\( b_g \)</strong> becomes estimable
+        when you include both wheel yaw-rate measurements and IMU yaw-rate in
+        the model, but is poorly constrained if GPS is the only correction
+        source.
+      </p>
+
+      <p><strong>Solution:</strong></p>
+      <p>
+        In this lab, wheel yaw-rate <strong>\( \omega_w \)</strong> provides an
+        independent noisy observation of turning rate, while IMU yaw-rate
+        <strong>\( \omega_m \)</strong> enters the process model as
+        <strong>\( \omega_m - b_g \)</strong>. The wheel update equation
+        <strong>\( \omega_w \approx \omega_m - b_g \)</strong> directly couples
+        the residual to <strong>\( b_g \)</strong>, producing a correction
+        direction in state space. If GPS were the only update, gyro bias would
+        influence heading through integration, and heading would only be
+        indirectly constrained via position fixes, which is weaker and can be
+        intermittent—especially during near-stationary periods or low curvature
+        motion where position provides limited heading information.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        You implemented a complete wheel–IMU–GPS localization pipeline with both
+        EKF and UKF variants. The EKF required explicit Jacobians and benefited
+        from PSD-safe covariance updates, while the UKF required careful
+        sigma-point construction and angle-aware mean/residual handling. The
+        multi-rate structure reflects practical AMR deployments and sets the
+        stage for particle-filter localization (next chapter) where non-Gaussian
+        posteriors and multi-modality become central.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Kalman, R.E. (1960). A new approach to linear filtering and prediction
+        problems.
+        <em>Journal of Basic Engineering</em>, 82(1), 35–45.
+      </li>
+      <li>
+        Jazwinski, A.H. (1970).
+        <em>Stochastic Processes and Filtering Theory</em>. Academic Press.
+      </li>
+      <li>
+        Maybeck, P.S. (1979).
+        <em>Stochastic Models, Estimation, and Control</em>, Vol. 1. Academic
+        Press.
+      </li>
+      <li>
+        Julier, S.J., &amp; Uhlmann, J.K. (1997). New extension of the Kalman
+        filter to nonlinear systems. In <em>Proc. SPIE</em> 3068, 182–193.
+      </li>
+      <li>
+        Julier, S.J., &amp; Uhlmann, J.K. (2004). Unscented filtering and
+        nonlinear estimation.
+        <em>Proceedings of the IEEE</em>, 92(3), 401–422.
+      </li>
+      <li>
+        Bar-Shalom, Y., Li, X.R., &amp; Kirubarajan, T. (2001).
+        <em>Estimation with Applications to Tracking and Navigation</em>.
+        Wiley-Interscience.
+      </li>
+      <li>
+        Grewal, M.S., &amp; Andrews, A.P. (2015).
+        <em>Kalman Filtering: Theory and Practice with MATLAB</em> (4th ed.).
+        Wiley.
+      </li>
+      <li>
+        Farrell, J.A. (2008).
+        <em>Aided Navigation: GPS with High Rate Sensors</em>. McGraw-Hill.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter7/Lesson4.html">
+          Lesson 4: Tuning Process/Measurement Noise for AMR
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter8/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Monte Carlo Localization (MCL) Intuition
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="active-lesson" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

@@ -1,0 +1,2498 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 9: Mapping Representations for Mobile Robots - Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 9: Mapping Representations for Mobile Robots</h1>
+    <h3><strong>Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR</strong></h3>
+    <p>
+      This lab implements a full 2D occupancy-grid mapping pipeline from raw LiDAR scans under the
+      <em>known-pose</em> assumption. You will (i) formalize the LiDAR inverse sensor model, (ii) derive the
+      log-odds update from Bayes’ rule, (iii) implement grid ray traversal (Bresenham/DDA) to mark free and
+      occupied cells, and (iv) validate the resulting map quantitatively (entropy/consistency) and visually.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Objectives and Data Assumptions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Objectives and Assumptions</h2>
+    <div class="down-content">
+      <p>
+        By the end of this lab, you should be able to build an occupancy grid map
+        <strong> \( m \)</strong> from a sequence of LiDAR scans <strong> \( z_{1:T} \)</strong>
+        and robot poses <strong> \( x_{1:T} \)</strong>.
+        We make the standard <em>mapping-only</em> assumption (no SLAM yet):
+        the pose trajectory is treated as known (from odometry / localization output).
+      </p>
+
+      <p>
+        The occupancy grid discretizes the plane into cells
+        <strong> \( c_i \)</strong>, each having a binary random variable
+        <strong> \( m_i \in \{0,1\} \)</strong>
+        (0 = free, 1 = occupied). The goal is to compute the posterior
+        <strong> \( p(m \mid z_{1:T}, x_{1:T}) \)</strong>
+        or, cellwise, <strong> \( p(m_i \mid z_{1:T}, x_{1:T}) \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          p(m \mid z_{1:T}, x_{1:T}) \;\propto\; p(z_{1:T} \mid m, x_{1:T})\, p(m).
+        \]
+      </h4>
+
+      <p>
+        In practice we update each cell recursively with an inverse sensor model
+        <strong> \( p(m_i \mid z_t, x_t) \)</strong> and log-odds, as introduced in the previous lessons.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Coordinate Frames and LiDAR Measurement Model -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Coordinate Frames and LiDAR Measurement Model</h2>
+    <div class="down-content">
+      <p>
+        Let the robot pose at time <strong> \( t \)</strong> be
+        <strong> \( x_t = (x_t, y_t, \theta_t) \)</strong>.
+        A 2D LiDAR returns a set of range measurements
+        <strong> \( z_t = \{r_1,\dots,r_K\} \)</strong> at fixed beam angles
+        <strong> \( \phi_k \)</strong> in the robot frame.
+      </p>
+
+      <p>
+        For beam <strong> \( k \)</strong>, define the unit direction in world frame as
+        <strong> \( \mathbf{d}_k(x_t) \)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \mathbf{d}_k(x_t) =
+          \begin{bmatrix}
+          \cos(\theta_t + \phi_k) \\
+          \sin(\theta_t + \phi_k)
+          \end{bmatrix},
+          \quad
+          \mathbf{p}_t =
+          \begin{bmatrix}
+          x_t \\ y_t
+          \end{bmatrix}.
+        \]
+      </h4>
+
+      <p>
+        The ideal (noise-free) range is the first intersection between the ray
+        <strong> \( \mathbf{p}_t + s\,\mathbf{d}_k \)</strong> (for <strong> \( s \ge 0 \)</strong>)
+        and the environment boundary/obstacles. With additive range noise,
+        a simple model is:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          r_k = r^*_k(m, x_t) + \varepsilon_k,\quad
+          \varepsilon_k \sim \mathcal{N}(0,\sigma_r^2),
+          \quad 0 \le r_k \le r_{\max}.
+        \]
+      </h4>
+
+      <p>
+        For the occupancy-grid update, we do not directly evaluate
+        <strong> \( p(z_t \mid m, x_t) \)</strong>.
+        Instead, we use the inverse model <strong> \( p(m_i \mid z_t, x_t) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Discretization and World-to-Grid Mapping -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Discretization and World-to-Grid Mapping</h2>
+    <div class="down-content">
+      <p>
+        Choose grid resolution <strong> \( \Delta \)</strong> (meters/cell) and an origin
+        <strong> \( (x_{\min}, y_{\min}) \)</strong>.
+        For a world coordinate <strong> \( (x,y) \)</strong>, the grid indices
+        <strong> \( (i,j) \)</strong> are:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          i = \left\lfloor \frac{x - x_{\min}}{\Delta} \right\rfloor,\quad
+          j = \left\lfloor \frac{y - y_{\min}}{\Delta} \right\rfloor.
+        \]
+      </h4>
+
+      <p>
+        Conversely, the center of cell <strong> \( (i,j) \)</strong> maps back to:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          x_{c}(i) = x_{\min} + \left(i + \tfrac{1}{2}\right)\Delta,\quad
+          y_{c}(j) = y_{\min} + \left(j + \tfrac{1}{2}\right)\Delta.
+        \]
+      </h4>
+
+      <p>
+        <strong>Design note.</strong> Smaller <strong> \( \Delta \)</strong> increases spatial fidelity but also
+        increases memory and compute. For a map of physical size <strong> \( A \)</strong>,
+        the number of cells scales as <strong> \( O(A/\Delta^2) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Inverse Sensor Model for a Single Beam -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Inverse Sensor Model for a Single Beam</h2>
+    <div class="down-content">
+      <p>
+        Let cell center be <strong> \( \mathbf{c}_i \in \mathbb{R}^2 \)</strong>. Define the cell in the
+        robot frame:
+        <strong> \( \mathbf{u} = \mathbf{R}(\theta_t)^\top (\mathbf{c}_i - \mathbf{p}_t) \)</strong>,
+        where <strong> \( \mathbf{R}(\theta) \)</strong> is the planar rotation matrix.
+        Then <strong> \( \rho = \|\mathbf{u}\| \)</strong> and <strong> \( \varphi = \operatorname{atan2}(u_y,u_x) \)</strong>.
+      </p>
+
+      <p>
+        Beam association uses the closest beam angle. If the angular resolution is
+        <strong> \( \beta \)</strong>, then cell <strong> \( i \)</strong> is “seen” by beam <strong> \( k \)</strong> if
+        <strong> \( |\varphi - \phi_k| \le \beta/2 \)</strong>.
+      </p>
+
+      <p>
+        A widely used <em>piecewise-constant</em> inverse sensor model assigns:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          p(m_i = 1 \mid z_t, x_t) =
+          \begin{cases}
+            p_{\mathrm{occ}} & \text{if } |\varphi - \phi_k| \le \beta/2 \text{ and } \left|\rho - r_k\right| \le \alpha/2 \\
+            p_{\mathrm{free}} & \text{if } |\varphi - \phi_k| \le \beta/2 \text{ and } \rho \le r_k - \alpha/2 \\
+            p_0 & \text{otherwise}
+          \end{cases}
+        \]
+      </h4>
+
+      <p>
+        Here <strong> \( p_0 \)</strong> is the prior occupancy (often 0.5),
+        <strong> \( p_{\mathrm{occ}} \)</strong> and
+        <strong> \( p_{\mathrm{free}} \)</strong> are design parameters
+        (e.g., 0.7 and 0.3), and <strong> \( \alpha \)</strong> is an “obstacle thickness” band (meters).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  R["Robot cell (start)"] --> F["Cells along ray: mark free"]
+  F --> H["Endpoint band: mark occupied if hit"]
+  H --> U["Beyond endpoint: leave unknown"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Max-range case.</strong> If a beam reports near maximum range
+        (<strong> \( r_k \approx r_{\max} \)</strong>), it is common to treat it as “no hit” and update
+        free cells along the ray, without creating an occupied endpoint.
+        In code we use a threshold:
+        <strong> \( r_k &lt; r_{\max} - \alpha/2 \)</strong> implies a hit.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Log-Odds Update and a Short Proof -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Log-Odds Update and a Short Proof</h2>
+    <div class="down-content">
+      <p>
+        Define log-odds for cell <strong> \( i \)</strong> at time <strong> \( t \)</strong>:
+        <strong> \( l_{t,i} = \log \frac{p(m_i=1 \mid z_{1:t},x_{1:t})}{1 - p(m_i=1 \mid z_{1:t},x_{1:t})} \)</strong>.
+        The central computational identity is the additive update:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          l_{t,i} = l_{t-1,i} + \operatorname{logit}\big(p(m_i=1 \mid z_t, x_t)\big) - \operatorname{logit}(p_0).
+        \]
+      </h4>
+
+      <p><strong>Proof sketch (odds form).</strong> Under the conditional independence assumption used in occupancy grids,
+        we approximate the cellwise Bayes update by:
+        <strong> \( p(m_i \mid z_{1:t},x_{1:t}) \propto p(z_t \mid m_i, x_t)\, p(m_i \mid z_{1:t-1},x_{1:t-1}) \)</strong>.
+        Taking odds ratio and logarithm yields:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \log\frac{p(m_i \mid z_{1:t},x_{1:t})}{1-p(m_i \mid z_{1:t},x_{1:t})}
+          =
+          \log\frac{p(z_t \mid m_i=1,x_t)}{p(z_t \mid m_i=0,x_t)} +
+          \log\frac{p(m_i \mid z_{1:t-1},x_{1:t-1})}{1-p(m_i \mid z_{1:t-1},x_{1:t-1})}.
+        \]
+      </h4>
+
+      <p>
+        The inverse model is introduced by a standard rearrangement that makes the update depend on
+        <strong> \( p(m_i \mid z_t,x_t) \)</strong> instead of <strong> \( p(z_t \mid m_i,x_t) \)</strong>,
+        producing the <strong> \( -\operatorname{logit}(p_0) \)</strong> correction term.
+      </p>
+
+      <p>
+        To recover occupancy probabilities for visualization:
+        <strong> \( p_{t,i} = \sigma(l_{t,i}) = \frac{1}{1+\exp(-l_{t,i})} \)</strong>.
+        In implementations, clamp <strong> \( l_{t,i} \)</strong> to <strong> \( [l_{\min},l_{\max}] \)</strong>
+        to prevent numeric saturation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Algorithmic Pipeline (Implementation Checklist) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Algorithmic Pipeline (Implementation Checklist)</h2>
+    <div class="down-content">
+      <p>
+        The lab pipeline is deterministic given poses and scans:
+        for each pose, for each beam, traverse grid cells and update log-odds.
+        The traversal uses Bresenham (integer grid) or DDA (floating stepping).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Inputs: poses x_t and scans z_t"] --> B["For each time t"]
+  B --> C["For each beam k"]
+  C --> D["Compute endpoint in world (x_t + r_k * dir)"]
+  D --> E["Convert start/end to grid indices"]
+  E --> F["Traverse cells along ray (Bresenham/DDA)"]
+  F --> G["Update free cells"]
+  G --> H["If hit: update endpoint as occupied"]
+  H --> I["Clamp log-odds to [lmin, lmax]"]
+  I --> J["After all scans: p = sigmoid(log-odds), visualize"]
+        </pre>
+      </div>
+
+      <p>
+        <strong>Complexity.</strong> For grid resolution <strong> \( \Delta \)</strong>,
+        maximum range <strong> \( r_{\max} \)</strong>, and <strong> \( K \)</strong> beams,
+        a worst-case per-scan cost is
+        <strong> \( O\left(K\,\frac{r_{\max}}{\Delta}\right) \)</strong>,
+        ignoring constant factors (beam association and trig evaluations).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation (Self-Contained Simulation + Mapping)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> <code>Chapter9_Lesson5.py</code></p>
+      <pre><code class="language-python">
+&lt;!-- See downloadable zip for the exact raw code (HTML escaping removed). The below is the same content but HTML-escaped. --&gt;
+"""&quot;&quot;&quot;
+Chapter 9 — Mapping Representations for Mobile Robots
+Lesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR
+
+This script is self-contained:
+1) It defines a simple 2D world with circular obstacles and boundary walls.
+2) It simulates a robot trajectory and a 2D LiDAR (range-only beams).
+3) It builds an occupancy grid using an inverse sensor model + log-odds updates.
+4) It visualizes the resulting occupancy probabilities.
+
+Dependencies: numpy, matplotlib
+Install: pip install numpy matplotlib
+&quot;&quot;&quot;"""
+
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def logit(p: float) -&gt; float:
+    p = min(max(p, 1e-9), 1.0 - 1e-9)
+    return math.log(p / (1.0 - p))
+
+
+def logistic(l: np.ndarray) -&gt; np.ndarray:
+    return 1.0 / (1.0 + np.exp(-l))
+
+
+@dataclass
+class Pose2D:
+    x: float
+    y: float
+    theta: float  # radians
+
+
+@dataclass
+class CircleObs:
+    cx: float
+    cy: float
+    r: float
+
+
+@dataclass
+class World:
+    # axis-aligned bounding box and a list of circular obstacles
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    circles: List[CircleObs]
+
+
+def ray_circle_intersection(px: float, py: float, dx: float, dy: float, c: CircleObs) -&gt; float | None:
+    &quot;&quot;&quot;
+    Ray: p + t d, with t &gt;= 0, ||d|| = 1.
+    Returns smallest t (distance) to circle boundary if intersection exists.
+    &quot;&quot;&quot;
+    ox, oy = px - c.cx, py - c.cy
+    b = 2.0 * (ox * dx + oy * dy)
+    cterm = ox * ox + oy * oy - c.r * c.r
+    disc = b * b - 4.0 * cterm
+    if disc &lt; 0:
+        return None
+    s = math.sqrt(disc)
+    t1 = (-b - s) / 2.0
+    t2 = (-b + s) / 2.0
+    ts = [t for t in (t1, t2) if t &gt;= 0.0]
+    return min(ts) if ts else None
+
+
+def ray_aabb_intersection(px: float, py: float, dx: float, dy: float, xmin: float, xmax: float, ymin: float, ymax: float) -&gt; float | None:
+    &quot;&quot;&quot;
+    Ray-AABB intersection using slab method.
+    Returns smallest positive t where ray hits boundary.
+    &quot;&quot;&quot;
+    tmin, tmax = -math.inf, math.inf
+
+    if abs(dx) &lt; 1e-12:
+        if px &lt; xmin or px &gt; xmax:
+            return None
+    else:
+        tx1 = (xmin - px) / dx
+        tx2 = (xmax - px) / dx
+        tmin = max(tmin, min(tx1, tx2))
+        tmax = min(tmax, max(tx1, tx2))
+
+    if abs(dy) &lt; 1e-12:
+        if py &lt; ymin or py &gt; ymax:
+            return None
+    else:
+        ty1 = (ymin - py) / dy
+        ty2 = (ymax - py) / dy
+        tmin = max(tmin, min(ty1, ty2))
+        tmax = min(tmax, max(ty1, ty2))
+
+    if tmax &lt; 0.0 or tmin &gt; tmax:
+        return None
+    # We want first intersection in front of ray origin
+    t = tmin if tmin &gt;= 0.0 else tmax
+    return t if t &gt;= 0.0 else None
+
+
+def simulate_lidar(world: World, pose: Pose2D, angles_body: np.ndarray, z_max: float, sigma_r: float = 0.01) -&gt; np.ndarray:
+    &quot;&quot;&quot;
+    Returns ranges for each beam angle (in robot/body frame).
+    &quot;&quot;&quot;
+    ranges = np.full_like(angles_body, z_max, dtype=float)
+    px, py, th = pose.x, pose.y, pose.theta
+
+    for k, a in enumerate(angles_body):
+        ang = th + a
+        dx, dy = math.cos(ang), math.sin(ang)
+
+        hits = []
+        # boundary walls
+        tb = ray_aabb_intersection(px, py, dx, dy, world.xmin, world.xmax, world.ymin, world.ymax)
+        if tb is not None:
+            hits.append(tb)
+        # circles
+        for c in world.circles:
+            t = ray_circle_intersection(px, py, dx, dy, c)
+            if t is not None:
+                hits.append(t)
+
+        if hits:
+            r = min(hits)
+            if r &lt;= z_max:
+                r = r + np.random.normal(0.0, sigma_r)
+                ranges[k] = float(np.clip(r, 0.0, z_max))
+
+    return ranges
+
+
+class OccupancyGrid:
+    def __init__(self, width_m: float, height_m: float, res: float, origin_x: float, origin_y: float,
+                 p0: float = 0.5, l_min: float = -10.0, l_max: float = 10.0):
+        self.res = float(res)
+        self.origin_x = float(origin_x)
+        self.origin_y = float(origin_y)
+        self.w = int(math.ceil(width_m / res))
+        self.h = int(math.ceil(height_m / res))
+        self.l0 = logit(p0)
+        self.l_min = float(l_min)
+        self.l_max = float(l_max)
+        self.log_odds = np.full((self.h, self.w), self.l0, dtype=float)
+
+    def world_to_grid(self, x: float, y: float) -&gt; Tuple[int, int] | None:
+        i = int(math.floor((x - self.origin_x) / self.res))
+        j = int(math.floor((y - self.origin_y) / self.res))
+        if 0 &lt;= i &lt; self.w and 0 &lt;= j &lt; self.h:
+            return i, j
+        return None
+
+    def grid_to_world_center(self, i: int, j: int) -&gt; Tuple[float, float]:
+        x = self.origin_x + (i + 0.5) * self.res
+        y = self.origin_y + (j + 0.5) * self.res
+        return x, y
+
+    @staticmethod
+    def bresenham(i0: int, j0: int, i1: int, j1: int) -&gt; List[Tuple[int, int]]:
+        &quot;&quot;&quot;
+        2D Bresenham line traversal (grid indices).
+        Returns list of (i,j) cells on the line including both endpoints.
+        &quot;&quot;&quot;
+        cells = []
+        di = abs(i1 - i0)
+        dj = abs(j1 - j0)
+        si = 1 if i0 &lt; i1 else -1
+        sj = 1 if j0 &lt; j1 else -1
+        err = di - dj
+        i, j = i0, j0
+        while True:
+            cells.append((i, j))
+            if i == i1 and j == j1:
+                break
+            e2 = 2 * err
+            if e2 &gt; -dj:
+                err -= dj
+                i += si
+            if e2 &lt; di:
+                err += di
+                j += sj
+        return cells
+
+    def update_ray(self, pose: Pose2D, angle_body: float, r: float, z_max: float,
+                   l_occ: float, l_free: float, alpha: float = 0.2):
+        &quot;&quot;&quot;
+        Inverse sensor model update along one LiDAR ray.
+        - Cells before endpoint: free
+        - Endpoint cell (if r &lt; z_max - alpha/2): occupied
+        - If no hit (r close to z_max): free up to max range, no occupied endpoint
+        &quot;&quot;&quot;
+        start = self.world_to_grid(pose.x, pose.y)
+        if start is None:
+            return
+        i0, j0 = start
+
+        ang = pose.theta + angle_body
+        ex = pose.x + r * math.cos(ang)
+        ey = pose.y + r * math.sin(ang)
+        end = self.world_to_grid(ex, ey)
+        if end is None:
+            # ray endpoint outside map; clip by stepping until outside (simple approach)
+            return
+        i1, j1 = end
+
+        cells = self.bresenham(i0, j0, i1, j1)
+        if len(cells) &lt;= 1:
+            return
+
+        hit = (r &lt; (z_max - 0.5 * alpha))
+        # free cells: exclude the endpoint; for no-hit, all cells on line are free (excluding robot cell is optional)
+        free_cells = cells[1:-1] if hit else cells[1:]
+        for (i, j) in free_cells:
+            self.log_odds[j, i] = np.clip(self.log_odds[j, i] + (l_free - self.l0), self.l_min, self.l_max)
+
+        if hit:
+            (ie, je) = cells[-1]
+            self.log_odds[je, ie] = np.clip(self.log_odds[je, ie] + (l_occ - self.l0), self.l_min, self.l_max)
+
+    def probs(self) -&gt; np.ndarray:
+        return logistic(self.log_odds)
+
+
+def main():
+    np.random.seed(7)
+
+    # World definition (meters)
+    world = World(
+        xmin=-10.0, xmax=10.0, ymin=-10.0, ymax=10.0,
+        circles=[
+            CircleObs(-3.0, 2.0, 1.2),
+            CircleObs(2.5, -1.0, 1.0),
+            CircleObs(4.0, 4.0, 1.5),
+            CircleObs(-4.5, -4.0, 1.0),
+        ]
+    )
+
+    # LiDAR parameters
+    n_beams = 360
+    z_max = 8.0
+    angles = np.linspace(-math.pi, math.pi, n_beams, endpoint=False)
+
+    # Occupancy grid parameters
+    res = 0.05  # meters/cell
+    grid = OccupancyGrid(width_m=20.0, height_m=20.0, res=0.1, origin_x=-10.0, origin_y=-10.0,
+                         p0=0.5, l_min=-8.0, l_max=8.0)
+
+    # Inverse sensor model probabilities
+    p_occ = 0.70
+    p_free = 0.30
+    l_occ = logit(p_occ)
+    l_free = logit(p_free)
+    alpha = 0.2  # obstacle thickness (m), affects "hit" decision band
+
+    # Robot trajectory (known poses)
+    T = 220
+    poses = []
+    for t in range(T):
+        # a smooth loop
+        ang = 2.0 * math.pi * t / T
+        x = 6.0 * math.cos(ang)
+        y = 6.0 * math.sin(ang)
+        theta = ang + math.pi / 2.0  # tangential heading
+        poses.append(Pose2D(x, y, theta))
+
+    # Mapping loop
+    for pose in poses:
+        z = simulate_lidar(world, pose, angles, z_max=z_max, sigma_r=0.02)
+        for a, r in zip(angles, z):
+            grid.update_ray(pose, a, r, z_max=z_max, l_occ=l_occ, l_free=l_free, alpha=alpha)
+
+    # Visualization
+    P = grid.probs()
+    # Convert to occupancy map: 1=occupied, 0=free
+    fig = plt.figure(figsize=(7, 6))
+    plt.imshow(P, origin='lower', extent=[world.xmin, world.xmax, world.ymin, world.ymax])
+    plt.colorbar(label="p(occupied)")
+    plt.title("2D Occupancy Grid from Simulated LiDAR")
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
+
+    # Plot true obstacles
+    th = np.linspace(0, 2 * math.pi, 200)
+    for c in world.circles:
+        plt.plot(c.cx + c.r * np.cos(th), c.cy + c.r * np.sin(th), linewidth=1.5)
+
+    # Plot trajectory
+    xs = [p.x for p in poses]
+    ys = [p.y for p in poses]
+    plt.plot(xs, ys, linewidth=1.0)
+
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+      <p>
+        Practical extensions (optional): swap the simulator with real data by replacing
+        the <code>simulate_lidar(...)</code> function with your dataset loader and by feeding
+        measured <strong> \( x_t \)</strong> and <strong> \( z_t \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation (No Dependencies, Writes PGM)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> <code>Chapter9_Lesson5.cpp</code></p>
+      <pre><code class="language-cpp">
+// Chapter 9 — Mapping Representations for Mobile Robots
+// Lesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR
+//
+// Self-contained C++17 program:
+// - Simulates a robot trajectory and 2D LiDAR in a 2D world with circular obstacles + boundary walls
+// - Builds occupancy grid using inverse sensor model + log-odds updates + Bresenham ray traversal
+// - Writes result as a PGM image (occupancy probability) so you can view it with any image viewer
+//
+// Build (Linux/macOS):
+//   g++ -O2 -std=c++17 Chapter9_Lesson5.cpp -o ogm
+//   ./ogm
+//
+// Build (Windows, MSVC):
+//   cl /O2 /std:c++17 Chapter9_Lesson5.cpp
+//   Chapter9_Lesson5.exe
+
+#include &lt;cmath&gt;
+#include &lt;cstdint&gt;
+#include &lt;fstream&gt;
+#include &lt;iostream&gt;
+#include &lt;random&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+#include &lt;algorithm&gt;
+
+struct Pose2D {
+  double x, y, theta;
+};
+
+struct Circle {
+  double cx, cy, r;
+};
+
+static inline double clamp(double v, double lo, double hi) {
+  return std::max(lo, std::min(hi, v));
+}
+
+static inline double logit(double p) {
+  p = clamp(p, 1e-9, 1.0 - 1e-9);
+  return std::log(p / (1.0 - p));
+}
+
+// Ray p + t d with t &gt;= 0, ||d||=1
+static bool rayCircleIntersection(double px, double py, double dx, double dy, const Circle&amp; c, double&amp; t_out) {
+  const double ox = px - c.cx;
+  const double oy = py - c.cy;
+  const double b = 2.0 * (ox * dx + oy * dy);
+  const double cterm = ox * ox + oy * oy - c.r * c.r;
+  const double disc = b * b - 4.0 * cterm;
+  if (disc &lt; 0.0) return false;
+  const double s = std::sqrt(disc);
+  const double t1 = (-b - s) / 2.0;
+  const double t2 = (-b + s) / 2.0;
+  double best = 1e300;
+  bool ok = false;
+  if (t1 &gt;= 0.0) { best = std::min(best, t1); ok = true; }
+  if (t2 &gt;= 0.0) { best = std::min(best, t2); ok = true; }
+  if (!ok) return false;
+  t_out = best;
+  return true;
+}
+
+static bool rayAABBIntersection(double px, double py, double dx, double dy,
+                                double xmin, double xmax, double ymin, double ymax,
+                                double&amp; t_out) {
+  double tmin = -1e300, tmax = 1e300;
+
+  if (std::abs(dx) &lt; 1e-12) {
+    if (px &lt; xmin || px &gt; xmax) return false;
+  } else {
+    const double tx1 = (xmin - px) / dx;
+    const double tx2 = (xmax - px) / dx;
+    tmin = std::max(tmin, std::min(tx1, tx2));
+    tmax = std::min(tmax, std::max(tx1, tx2));
+  }
+
+  if (std::abs(dy) &lt; 1e-12) {
+    if (py &lt; ymin || py &gt; ymax) return false;
+  } else {
+    const double ty1 = (ymin - py) / dy;
+    const double ty2 = (ymax - py) / dy;
+    tmin = std::max(tmin, std::min(ty1, ty2));
+    tmax = std::min(tmax, std::max(ty1, ty2));
+  }
+
+  if (tmax &lt; 0.0 || tmin &gt; tmax) return false;
+  const double t = (tmin &gt;= 0.0) ? tmin : tmax;
+  if (t &lt; 0.0) return false;
+  t_out = t;
+  return true;
+}
+
+struct OccupancyGrid {
+  double res;
+  double origin_x, origin_y;
+  int w, h;
+  double l0, lmin, lmax;
+  std::vector&lt;double&gt; logodds; // row-major: j*w + i
+
+  OccupancyGrid(double width_m, double height_m, double res_, double ox, double oy,
+                double p0=0.5, double lmin_=-8.0, double lmax_=8.0)
+      : res(res_), origin_x(ox), origin_y(oy),
+        w((int)std::ceil(width_m / res_)), h((int)std::ceil(height_m / res_)),
+        l0(logit(p0)), lmin(lmin_), lmax(lmax_), logodds((size_t)w * (size_t)h, logit(p0)) {}
+
+  bool worldToGrid(double x, double y, int&amp; i, int&amp; j) const {
+    i = (int)std::floor((x - origin_x) / res);
+    j = (int)std::floor((y - origin_y) / res);
+    if (0 &lt;= i &amp;&amp; i &lt; w &amp;&amp; 0 &lt;= j &amp;&amp; j &lt; h) return true;
+    return false;
+  }
+
+  double&amp; at(int i, int j) { return logodds[(size_t)j * (size_t)w + (size_t)i]; }
+  const double&amp; at(int i, int j) const { return logodds[(size_t)j * (size_t)w + (size_t)i]; }
+
+  static std::vector&lt;std::pair&lt;int,int&gt;&gt; bresenham(int i0, int j0, int i1, int j1) {
+    std::vector&lt;std::pair&lt;int,int&gt;&gt; cells;
+    int di = std::abs(i1 - i0);
+    int dj = std::abs(j1 - j0);
+    int si = (i0 &lt; i1) ? 1 : -1;
+    int sj = (j0 &lt; j1) ? 1 : -1;
+    int err = di - dj;
+    int i = i0, j = j0;
+    while (true) {
+      cells.emplace_back(i, j);
+      if (i == i1 &amp;&amp; j == j1) break;
+      int e2 = 2 * err;
+      if (e2 &gt; -dj) { err -= dj; i += si; }
+      if (e2 &lt;  di) { err += di; j += sj; }
+    }
+    return cells;
+  }
+
+  void updateRay(const Pose2D&amp; pose, double angle_body, double r, double zmax,
+                 double l_occ, double l_free, double alpha=0.2) {
+    int i0, j0;
+    if (!worldToGrid(pose.x, pose.y, i0, j0)) return;
+
+    const double ang = pose.theta + angle_body;
+    const double ex = pose.x + r * std::cos(ang);
+    const double ey = pose.y + r * std::sin(ang);
+
+    int i1, j1;
+    if (!worldToGrid(ex, ey, i1, j1)) return;
+
+    auto cells = bresenham(i0, j0, i1, j1);
+    if (cells.size() &lt;= 1) return;
+
+    const bool hit = (r &lt; (zmax - 0.5 * alpha));
+    const int last = (int)cells.size() - 1;
+
+    // free cells: exclude endpoint if hit; else include all (except robot cell)
+    const int free_end = hit ? (last - 1) : last;
+    for (int k = 1; k &lt;= free_end; ++k) {
+      const auto [i, j] = cells[(size_t)k];
+      at(i, j) = clamp(at(i, j) + (l_free - l0), lmin, lmax);
+    }
+
+    if (hit) {
+      const auto [ie, je] = cells[(size_t)last];
+      at(ie, je) = clamp(at(ie, je) + (l_occ - l0), lmin, lmax);
+    }
+  }
+
+  void writePGM(const std::string&amp; path) const {
+    // p = logistic(l) in [0,1], map to [0..255]
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+      std::cerr &lt;&lt; &quot;Failed to open &quot; &lt;&lt; path &lt;&lt; &quot;\n&quot;;
+      return;
+    }
+    f &lt;&lt; &quot;P5\n&quot; &lt;&lt; w &lt;&lt; &quot; &quot; &lt;&lt; h &lt;&lt; &quot;\n255\n&quot;;
+    for (int j = 0; j &lt; h; ++j) {
+      for (int i = 0; i &lt; w; ++i) {
+        const double l = at(i, j);
+        const double p = 1.0 / (1.0 + std::exp(-l));
+        const uint8_t v = (uint8_t)clamp(std::round(p * 255.0), 0.0, 255.0);
+        f.write((const char*)&amp;v, 1);
+      }
+    }
+  }
+};
+
+int main() {
+  // World (meters)
+  const double xmin = -10.0, xmax = 10.0, ymin = -10.0, ymax = 10.0;
+  std::vector&lt;Circle&gt; circles = {
+      {-3.0,  2.0, 1.2},
+      { 2.5, -1.0, 1.0},
+      { 4.0,  4.0, 1.5},
+      {-4.5, -4.0, 1.0},
+  };
+
+  // LiDAR
+  const int n_beams = 360;
+  const double zmax = 8.0;
+
+  // Grid
+  const double res = 0.1;
+  OccupancyGrid grid(/*width=*/20.0, /*height=*/20.0, res, /*origin_x=*/-10.0, /*origin_y=*/-10.0,
+                     /*p0=*/0.5, /*lmin=*/-8.0, /*lmax=*/8.0);
+
+  // Inverse sensor model params
+  const double p_occ = 0.70, p_free = 0.30;
+  const double l_occ = logit(p_occ), l_free = logit(p_free);
+  const double alpha = 0.2;
+
+  // Randomness
+  std::mt19937 rng(7);
+  std::normal_distribution&lt;double&gt; noise_r(0.0, 0.02);
+
+  // Trajectory
+  const int T = 220;
+  std::vector&lt;Pose2D&gt; poses;
+  poses.reserve(T);
+  for (int t = 0; t &lt; T; ++t) {
+    const double ang = 2.0 * M_PI * (double)t / (double)T;
+    const double x = 6.0 * std::cos(ang);
+    const double y = 6.0 * std::sin(ang);
+    const double theta = ang + M_PI / 2.0;
+    poses.push_back({x, y, theta});
+  }
+
+  // Mapping
+  for (const auto&amp; pose : poses) {
+    for (int k = 0; k &lt; n_beams; ++k) {
+      const double a_body = -M_PI + (2.0 * M_PI) * (double)k / (double)n_beams;
+      const double ang = pose.theta + a_body;
+      const double dx = std::cos(ang);
+      const double dy = std::sin(ang);
+
+      // find nearest hit among walls and circles
+      double best = 1e300;
+      double t_wall;
+      if (rayAABBIntersection(pose.x, pose.y, dx, dy, xmin, xmax, ymin, ymax, t_wall)) {
+        best = std::min(best, t_wall);
+      }
+      for (const auto&amp; c : circles) {
+        double t;
+        if (rayCircleIntersection(pose.x, pose.y, dx, dy, c, t)) {
+          best = std::min(best, t);
+        }
+      }
+
+      double r = zmax;
+      if (best &lt; 1e200 &amp;&amp; best &lt;= zmax) {
+        r = clamp(best + noise_r(rng), 0.0, zmax);
+      }
+      grid.updateRay(pose, a_body, r, zmax, l_occ, l_free, alpha);
+    }
+  }
+
+  grid.writePGM(&quot;Chapter9_Lesson5_map.pgm&quot;);
+  std::cout &lt;&lt; &quot;Wrote occupancy probability PGM: Chapter9_Lesson5_map.pgm\n&quot;;
+  std::cout &lt;&lt; &quot;Tip: open the PGM with an image viewer, or convert it with ImageMagick.\n&quot;;
+  return 0;
+}
+      </code></pre>
+      <p>
+        The output image <code>Chapter9_Lesson5_map.pgm</code> stores
+        <strong> \( p(m_i=1) \)</strong> mapped to 0–255. Higher intensity means higher occupancy probability.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (No Dependencies, Writes PGM)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> <code>Chapter9_Lesson5.java</code></p>
+      <pre><code class="language-java">
+// Chapter 9 — Mapping Representations for Mobile Robots
+// Lesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR
+//
+// Self-contained Java program (no external libraries):
+// - Simulates robot trajectory and 2D LiDAR in a 2D world with circles + boundary walls
+// - Builds occupancy grid using log-odds + Bresenham traversal
+// - Writes PGM image (occupancy probability)
+//
+// Compile:
+//   javac Chapter9_Lesson5.java
+// Run:
+//   java Chapter9_Lesson5
+
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+public class Chapter9_Lesson5 {
+
+  static class Pose2D {
+    double x, y, theta;
+    Pose2D(double x, double y, double theta) { this.x = x; this.y = y; this.theta = theta; }
+  }
+
+  static class Circle {
+    double cx, cy, r;
+    Circle(double cx, double cy, double r) { this.cx = cx; this.cy = cy; this.r = r; }
+  }
+
+  static double clamp(double v, double lo, double hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  static double logit(double p) {
+    p = clamp(p, 1e-9, 1.0 - 1e-9);
+    return Math.log(p / (1.0 - p));
+  }
+
+  static boolean rayCircleIntersection(double px, double py, double dx, double dy, Circle c, double[] tOut) {
+    double ox = px - c.cx;
+    double oy = py - c.cy;
+    double b = 2.0 * (ox * dx + oy * dy);
+    double cterm = ox * ox + oy * oy - c.r * c.r;
+    double disc = b * b - 4.0 * cterm;
+    if (disc &lt; 0.0) return false;
+    double s = Math.sqrt(disc);
+    double t1 = (-b - s) / 2.0;
+    double t2 = (-b + s) / 2.0;
+    double best = 1e300;
+    boolean ok = false;
+    if (t1 &gt;= 0.0) { best = Math.min(best, t1); ok = true; }
+    if (t2 &gt;= 0.0) { best = Math.min(best, t2); ok = true; }
+    if (!ok) return false;
+    tOut[0] = best;
+    return true;
+  }
+
+  static boolean rayAABBIntersection(double px, double py, double dx, double dy,
+                                     double xmin, double xmax, double ymin, double ymax,
+                                     double[] tOut) {
+    double tmin = -1e300, tmax = 1e300;
+
+    if (Math.abs(dx) &lt; 1e-12) {
+      if (px &lt; xmin || px &gt; xmax) return false;
+    } else {
+      double tx1 = (xmin - px) / dx;
+      double tx2 = (xmax - px) / dx;
+      tmin = Math.max(tmin, Math.min(tx1, tx2));
+      tmax = Math.min(tmax, Math.max(tx1, tx2));
+    }
+
+    if (Math.abs(dy) &lt; 1e-12) {
+      if (py &lt; ymin || py &gt; ymax) return false;
+    } else {
+      double ty1 = (ymin - py) / dy;
+      double ty2 = (ymax - py) / dy;
+      tmin = Math.max(tmin, Math.min(ty1, ty2));
+      tmax = Math.min(tmax, Math.max(ty1, ty2));
+    }
+
+    if (tmax &lt; 0.0 || tmin &gt; tmax) return false;
+    double t = (tmin &gt;= 0.0) ? tmin : tmax;
+    if (t &lt; 0.0) return false;
+    tOut[0] = t;
+    return true;
+  }
+
+  static class OccupancyGrid {
+    double res;
+    double originX, originY;
+    int w, h;
+    double l0, lmin, lmax;
+    double[] logOdds; // row-major
+
+    OccupancyGrid(double widthM, double heightM, double res, double originX, double originY,
+                  double p0, double lmin, double lmax) {
+      this.res = res;
+      this.originX = originX;
+      this.originY = originY;
+      this.w = (int)Math.ceil(widthM / res);
+      this.h = (int)Math.ceil(heightM / res);
+      this.l0 = logit(p0);
+      this.lmin = lmin;
+      this.lmax = lmax;
+      this.logOdds = new double[w * h];
+      for (int i = 0; i &lt; w * h; i++) logOdds[i] = this.l0;
+    }
+
+    boolean worldToGrid(double x, double y, int[] outIJ) {
+      int i = (int)Math.floor((x - originX) / res);
+      int j = (int)Math.floor((y - originY) / res);
+      if (0 &lt;= i &amp;&amp; i &lt; w &amp;&amp; 0 &lt;= j &amp;&amp; j &lt; h) {
+        outIJ[0] = i; outIJ[1] = j;
+        return true;
+      }
+      return false;
+    }
+
+    double at(int i, int j) { return logOdds[j * w + i]; }
+    void set(int i, int j, double v) { logOdds[j * w + i] = v; }
+
+    static List&lt;int[]&gt; bresenham(int i0, int j0, int i1, int j1) {
+      List&lt;int[]&gt; cells = new ArrayList&lt;&gt;();
+      int di = Math.abs(i1 - i0);
+      int dj = Math.abs(j1 - j0);
+      int si = (i0 &lt; i1) ? 1 : -1;
+      int sj = (j0 &lt; j1) ? 1 : -1;
+      int err = di - dj;
+      int i = i0, j = j0;
+      while (true) {
+        cells.add(new int[]{i, j});
+        if (i == i1 &amp;&amp; j == j1) break;
+        int e2 = 2 * err;
+        if (e2 &gt; -dj) { err -= dj; i += si; }
+        if (e2 &lt;  di) { err += di; j += sj; }
+      }
+      return cells;
+    }
+
+    void updateRay(Pose2D pose, double angleBody, double r, double zmax,
+                   double lOcc, double lFree, double alpha) {
+      int[] s = new int[2];
+      if (!worldToGrid(pose.x, pose.y, s)) return;
+      int i0 = s[0], j0 = s[1];
+
+      double ang = pose.theta + angleBody;
+      double ex = pose.x + r * Math.cos(ang);
+      double ey = pose.y + r * Math.sin(ang);
+
+      int[] e = new int[2];
+      if (!worldToGrid(ex, ey, e)) return;
+      int i1 = e[0], j1 = e[1];
+
+      List&lt;int[]&gt; cells = bresenham(i0, j0, i1, j1);
+      if (cells.size() &lt;= 1) return;
+
+      boolean hit = (r &lt; (zmax - 0.5 * alpha));
+      int last = cells.size() - 1;
+
+      int freeEnd = hit ? (last - 1) : last;
+      for (int k = 1; k &lt;= freeEnd; k++) {
+        int[] c = cells.get(k);
+        int i = c[0], j = c[1];
+        double v = clamp(at(i, j) + (lFree - l0), lmin, lmax);
+        set(i, j, v);
+      }
+
+      if (hit) {
+        int[] c = cells.get(last);
+        int i = c[0], j = c[1];
+        double v = clamp(at(i, j) + (lOcc - l0), lmin, lmax);
+        set(i, j, v);
+      }
+    }
+
+    void writePGM(String path) throws IOException {
+      try (FileOutputStream f = new FileOutputStream(path)) {
+        String header = &quot;P5\n&quot; + w + &quot; &quot; + h + &quot;\n255\n&quot;;
+        f.write(header.getBytes(StandardCharsets.US_ASCII));
+        for (int j = 0; j &lt; h; j++) {
+          for (int i = 0; i &lt; w; i++) {
+            double l = at(i, j);
+            double p = 1.0 / (1.0 + Math.exp(-l));
+            int v = (int)Math.round(clamp(p * 255.0, 0.0, 255.0));
+            f.write((byte)(v &amp; 0xFF));
+          }
+        }
+      }
+    }
+  }
+
+  static double gaussian(Random rng, double mean, double std) {
+    // Box-Muller
+    double u1 = Math.max(rng.nextDouble(), 1e-12);
+    double u2 = rng.nextDouble();
+    double z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+    return mean + std * z;
+  }
+
+  public static void main(String[] args) throws Exception {
+    // World
+    double xmin = -10.0, xmax = 10.0, ymin = -10.0, ymax = 10.0;
+    List&lt;Circle&gt; circles = List.of(
+        new Circle(-3.0,  2.0, 1.2),
+        new Circle( 2.5, -1.0, 1.0),
+        new Circle( 4.0,  4.0, 1.5),
+        new Circle(-4.5, -4.0, 1.0)
+    );
+
+    // LiDAR
+    int nBeams = 360;
+    double zmax = 8.0;
+
+    // Grid
+    double res = 0.1;
+    OccupancyGrid grid = new OccupancyGrid(20.0, 20.0, res, -10.0, -10.0, 0.5, -8.0, 8.0);
+
+    // Inverse sensor model params
+    double pOcc = 0.70, pFree = 0.30;
+    double lOcc = logit(pOcc), lFree = logit(pFree);
+    double alpha = 0.2;
+
+    Random rng = new Random(7);
+
+    // Trajectory
+    int T = 220;
+    List&lt;Pose2D&gt; poses = new ArrayList&lt;&gt;();
+    for (int t = 0; t &lt; T; t++) {
+      double ang = 2.0 * Math.PI * t / (double)T;
+      double x = 6.0 * Math.cos(ang);
+      double y = 6.0 * Math.sin(ang);
+      double theta = ang + Math.PI / 2.0;
+      poses.add(new Pose2D(x, y, theta));
+    }
+
+    // Mapping
+    double[] tBuf = new double[1];
+    for (Pose2D pose : poses) {
+      for (int k = 0; k &lt; nBeams; k++) {
+        double aBody = -Math.PI + (2.0 * Math.PI) * k / (double)nBeams;
+        double ang = pose.theta + aBody;
+        double dx = Math.cos(ang);
+        double dy = Math.sin(ang);
+
+        double best = 1e300;
+        if (rayAABBIntersection(pose.x, pose.y, dx, dy, xmin, xmax, ymin, ymax, tBuf)) {
+          best = Math.min(best, tBuf[0]);
+        }
+        for (Circle c : circles) {
+          if (rayCircleIntersection(pose.x, pose.y, dx, dy, c, tBuf)) {
+            best = Math.min(best, tBuf[0]);
+          }
+        }
+
+        double r = zmax;
+        if (best &lt; 1e200 &amp;&amp; best &lt;= zmax) {
+          r = clamp(best + gaussian(rng, 0.0, 0.02), 0.0, zmax);
+        }
+        grid.updateRay(pose, aBody, r, zmax, lOcc, lFree, alpha);
+      }
+    }
+
+    grid.writePGM(&quot;Chapter9_Lesson5_map_java.pgm&quot;);
+    System.out.println(&quot;Wrote occupancy probability PGM: Chapter9_Lesson5_map_java.pgm&quot;);
+  }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB code below implements the same logic. For a Simulink-style workflow, you can:
+        (i) represent the log-odds grid as a <em>Data Store Memory</em> block or persistent state in a MATLAB Function block,
+        (ii) stream pose and scan vectors as signals, and (iii) update the grid at each sample time.
+        The core update step is identical (ray traversal + log-odds increments).
+      </p>
+
+      <p><strong>File:</strong> <code>Chapter9_Lesson5.m</code></p>
+      <pre><code class="language-matlab">
+% Chapter 9 — Mapping Representations for Mobile Robots
+% Lesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR
+%
+% Self-contained MATLAB script:
+% - Defines a world with circular obstacles + boundary walls
+% - Simulates robot trajectory and 2D LiDAR ranges
+% - Builds occupancy grid using inverse sensor model + log-odds updates
+% - Visualizes occupancy probabilities
+%
+% Run:
+%   Chapter9_Lesson5
+
+function Chapter9_Lesson5()
+  rng(7);
+
+  % World (meters)
+  world.xmin = -10; world.xmax = 10;
+  world.ymin = -10; world.ymax = 10;
+  circles = [
+    -3.0,  2.0, 1.2;
+     2.5, -1.0, 1.0;
+     4.0,  4.0, 1.5;
+    -4.5, -4.0, 1.0
+  ];
+
+  % LiDAR
+  nBeams = 360;
+  zMax = 8.0;
+  angles = linspace(-pi, pi, nBeams+1); angles(end) = [];
+
+  % Grid
+  res = 0.1;
+  origin = [-10, -10];
+  widthM = 20; heightM = 20;
+  w = ceil(widthM / res);
+  h = ceil(heightM / res);
+
+  p0 = 0.5;
+  l0 = logit(p0);
+  lMin = -8; lMax = 8;
+  logOdds = l0 * ones(h, w);
+
+  % Inverse sensor model params
+  pOcc = 0.70; pFree = 0.30;
+  lOcc = logit(pOcc); lFree = logit(pFree);
+  alpha = 0.2;
+
+  % Trajectory (known poses)
+  T = 220;
+  poses = zeros(T, 3);
+  for t = 1:T
+    ang = 2*pi*(t-1)/T;
+    x = 6*cos(ang);
+    y = 6*sin(ang);
+    theta = ang + pi/2;
+    poses(t, :) = [x, y, theta];
+  end
+
+  % Mapping
+  for t = 1:T
+    pose = poses(t, :);
+    z = simulateLidar(world, circles, pose, angles, zMax, 0.02);
+    for k = 1:nBeams
+      logOdds = updateRay(logOdds, origin, res, pose, angles(k), z(k), zMax, l0, lOcc, lFree, lMin, lMax, alpha);
+    end
+  end
+
+  % Visualization
+  P = logistic(logOdds);
+  figure('Color','w');
+  imagesc([world.xmin world.xmax], [world.ymin world.ymax], P);
+  axis xy equal tight;
+  colormap(parula); colorbar;
+  title('2D Occupancy Grid from Simulated LiDAR');
+  xlabel('x [m]'); ylabel('y [m]');
+  hold on;
+
+  th = linspace(0, 2*pi, 200);
+  for i = 1:size(circles,1)
+    cx = circles(i,1); cy = circles(i,2); r = circles(i,3);
+    plot(cx + r*cos(th), cy + r*sin(th), 'LineWidth', 1.5);
+  end
+  plot(poses(:,1), poses(:,2), 'LineWidth', 1.0);
+  hold off;
+
+  % Optional: save PGM-like image
+  % imwrite(uint8(P*255), 'Chapter9_Lesson5_map_matlab.png');
+end
+
+function l = logit(p)
+  p = min(max(p, 1e-9), 1 - 1e-9);
+  l = log(p/(1-p));
+end
+
+function P = logistic(L)
+  P = 1 ./ (1 + exp(-L));
+end
+
+function z = simulateLidar(world, circles, pose, angles, zMax, sigmaR)
+  n = numel(angles);
+  z = zMax * ones(n,1);
+  px = pose(1); py = pose(2); th = pose(3);
+  for k = 1:n
+    ang = th + angles(k);
+    dx = cos(ang); dy = sin(ang);
+
+    hits = [];
+
+    % boundary walls
+    tb = rayAABB(px, py, dx, dy, world.xmin, world.xmax, world.ymin, world.ymax);
+    if ~isnan(tb), hits(end+1) = tb; end
+
+    % circles
+    for i = 1:size(circles,1)
+      c = circles(i,:);
+      t = rayCircle(px, py, dx, dy, c(1), c(2), c(3));
+      if ~isnan(t), hits(end+1) = t; end
+    end
+
+    if ~isempty(hits)
+      r = min(hits);
+      if r <= zMax
+        z(k) = min(max(r + sigmaR*randn(), 0), zMax);
+      end
+    end
+  end
+end
+
+function t = rayCircle(px, py, dx, dy, cx, cy, r)
+  ox = px - cx; oy = py - cy;
+  b = 2*(ox*dx + oy*dy);
+  cterm = ox^2 + oy^2 - r^2;
+  disc = b^2 - 4*cterm;
+  if disc < 0
+    t = NaN; return;
+  end
+  s = sqrt(disc);
+  t1 = (-b - s)/2;
+  t2 = (-b + s)/2;
+  cand = [t1 t2];
+  cand = cand(cand >= 0);
+  if isempty(cand), t = NaN; else, t = min(cand); end
+end
+
+function t = rayAABB(px, py, dx, dy, xmin, xmax, ymin, ymax)
+  tmin = -Inf; tmax = Inf;
+  if abs(dx) < 1e-12
+    if px < xmin || px > xmax, t = NaN; return; end
+  else
+    tx1 = (xmin - px)/dx; tx2 = (xmax - px)/dx;
+    tmin = max(tmin, min(tx1, tx2));
+    tmax = min(tmax, max(tx1, tx2));
+  end
+  if abs(dy) < 1e-12
+    if py < ymin || py > ymax, t = NaN; return; end
+  else
+    ty1 = (ymin - py)/dy; ty2 = (ymax - py)/dy;
+    tmin = max(tmin, min(ty1, ty2));
+    tmax = min(tmax, max(ty1, ty2));
+  end
+  if tmax < 0 || tmin > tmax, t = NaN; return; end
+  if tmin >= 0, t = tmin; else, t = tmax; end
+  if t < 0, t = NaN; end
+end
+
+function L = updateRay(L, origin, res, pose, angleBody, r, zMax, l0, lOcc, lFree, lMin, lMax, alpha)
+  s = worldToGrid(origin, res, pose(1), pose(2), size(L,2), size(L,1));
+  if any(isnan(s)), return; end
+  i0 = s(1); j0 = s(2);
+
+  ang = pose(3) + angleBody;
+  ex = pose(1) + r*cos(ang);
+  ey = pose(2) + r*sin(ang);
+  e = worldToGrid(origin, res, ex, ey, size(L,2), size(L,1));
+  if any(isnan(e)), return; end
+  i1 = e(1); j1 = e(2);
+
+  cells = bresenham(i0, j0, i1, j1);
+  if size(cells,1) <= 1, return; end
+
+  hit = (r < (zMax - 0.5*alpha));
+  if hit
+    freeCells = cells(2:end-1, :);
+  else
+    freeCells = cells(2:end, :);
+  end
+
+  for idx = 1:size(freeCells,1)
+    i = freeCells(idx,1); j = freeCells(idx,2);
+    L(j,i) = min(max(L(j,i) + (lFree - l0), lMin), lMax);
+  end
+
+  if hit
+    ie = cells(end,1); je = cells(end,2);
+    L(je,ie) = min(max(L(je,ie) + (lOcc - l0), lMin), lMax);
+  end
+end
+
+function ij = worldToGrid(origin, res, x, y, w, h)
+  i = floor((x - origin(1))/res) + 1; % MATLAB 1-based
+  j = floor((y - origin(2))/res) + 1;
+  if i < 1 || i > w || j < 1 || j > h
+    ij = [NaN, NaN];
+  else
+    ij = [i, j];
+  end
+end
+
+function cells = bresenham(i0, j0, i1, j1)
+  di = abs(i1 - i0);
+  dj = abs(j1 - j0);
+  si = 1; if i0 > i1, si = -1; end
+  sj = 1; if j0 > j1, sj = -1; end
+  err = di - dj;
+  i = i0; j = j0;
+  cells = [];
+  while true
+    cells(end+1,:) = [i, j]; %#ok<AGROW>
+    if i == i1 && j == j1, break; end
+    e2 = 2*err;
+    if e2 > -dj
+      err = err - dj;
+      i = i + si;
+    end
+    if e2 < di
+      err = err + di;
+      j = j + sj;
+    end
+  end
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> <code>Chapter9_Lesson5.nb</code></p>
+      <pre><code class="language-mathematica">
+(* ::Package:: *)
+
+(* Chapter 9 — Mapping Representations for Mobile Robots
+   Lesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR
+
+   This Mathematica notebook is provided as plain-text .nb content.
+   Open it in Wolfram Mathematica; it will evaluate as a notebook expression.
+
+   It simulates a 2D world, LiDAR scans, and constructs an occupancy grid using log-odds.
+*)
+
+Notebook[{
+  Cell["Chapter 9 — Mapping Representations for Mobile Robots\nLesson 5 (Lab): Build a 2D Occupancy Grid from LiDAR", "Title"],
+
+  Cell["1. Utilities: logit/logistic and simple ray intersections", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    logit[p_] := Log[ Clip[p, {10^-9, 1 - 10^-9}] / (1 - Clip[p, {10^-9, 1 - 10^-9}]) ];
+    logistic[l_] := 1/(1 + Exp[-l]);
+
+    rayCircleIntersection[p_, d_, c_, r_] := Module[{o = p - c, b, cterm, disc, s, t1, t2, cand},
+      b = 2 (o.d);
+      cterm = (o.o) - r^2;
+      disc = b^2 - 4 cterm;
+      If[disc &lt; 0, Infinity,
+        s = Sqrt[disc];
+        t1 = (-b - s)/2; t2 = (-b + s)/2;
+        cand = Select[{t1, t2}, # &gt;= 0 &amp;];
+        If[cand === {}, Infinity, Min[cand]]
+      ]
+    ];
+
+    rayAABBIntersection[p_, d_, xmin_, xmax_, ymin_, ymax_] := Module[{px=p[[1]], py=p[[2]], dx=d[[1]], dy=d[[2]],
+      tmin=-Infinity, tmax=Infinity, tx1, tx2, ty1, ty2},
+      If[Abs[dx] &lt; 10^-12, If[px &lt; xmin || px &gt; xmax, Return[Infinity]],
+        tx1 = (xmin - px)/dx; tx2 = (xmax - px)/dx;
+        tmin = Max[tmin, Min[tx1, tx2]];
+        tmax = Min[tmax, Max[tx1, tx2]];
+      ];
+      If[Abs[dy] &lt; 10^-12, If[py &lt; ymin || py &gt; ymax, Return[Infinity]],
+        ty1 = (ymin - py)/dy; ty2 = (ymax - py)/dy;
+        tmin = Max[tmin, Min[ty1, ty2]];
+        tmax = Min[tmax, Max[ty1, ty2]];
+      ];
+      If[tmax &lt; 0 || tmin &gt; tmax, Infinity, If[tmin &gt;= 0, tmin, tmax]]
+    ];
+  ], "Input"],
+
+  Cell["2. World, LiDAR simulation, and occupancy-grid mapping", "Section"],
+  Cell[BoxData @ ToBoxes @ HoldForm[
+    SeedRandom[7];
+
+    (* World bounds and obstacles *)
+    bounds = &lt;|"xmin"-&gt;-10, "xmax"-&gt;10, "ymin"-&gt;-10, "ymax"-&gt;10|&gt;;
+    circles = {
+      &lt;|"c"-&gt;{-3.0,  2.0}, "r"-&gt;1.2|&gt;,
+      &lt;|"c"-&gt;{ 2.5, -1.0}, "r"-&gt;1.0|&gt;,
+      &lt;|"c"-&gt;{ 4.0,  4.0}, "r"-&gt;1.5|&gt;,
+      &lt;|"c"-&gt;{-4.5, -4.0}, "r"-&gt;1.0|&gt;
+    };
+
+    (* LiDAR params *)
+    nBeams = 360; zMax = 8.0;
+    angles = Subdivide[-Pi, Pi, nBeams + 1][[;; -2]];
+
+    (* Grid params *)
+    res = 0.1; origin = {-10, -10}; widthM = 20; heightM = 20;
+    w = Ceiling[widthM/res]; h = Ceiling[heightM/res];
+    l0 = logit[0.5]; lMin = -8; lMax = 8;
+    logOdds = ConstantArray[l0, {h, w}];
+
+    (* Sensor model *)
+    pOcc = 0.70; pFree = 0.30;
+    lOcc = logit[pOcc]; lFree = logit[pFree];
+    alpha = 0.2;
+
+    worldToGrid[{x_, y_}] := Module[{i, j},
+      i = Floor[(x - origin[[1]])/res] + 1;
+      j = Floor[(y - origin[[2]])/res] + 1;
+      If[1 &lt;= i &lt;= w &amp;&amp; 1 &lt;= j &lt;= h, {i, j}, Missing["OutOfBounds"]]
+    ];
+
+    bresenham[{i0_, j0_}, {i1_, j1_}] := Module[{di = Abs[i1 - i0], dj = Abs[j1 - j0],
+      si = If[i0 &lt; i1, 1, -1], sj = If[j0 &lt; j1, 1, -1], err, i=i0, j=j0, cells = {} , e2},
+      err = di - dj;
+      While[True,
+        AppendTo[cells, {i, j}];
+        If[i == i1 &amp;&amp; j == j1, Break[]];
+        e2 = 2 err;
+        If[e2 &gt; -dj, err -= dj; i += si];
+        If[e2 &lt;  di, err += di; j += sj];
+      ];
+      cells
+    ];
+
+    simulateScan[{x_, y_, th_}] := Module[{ranges, px=x, py=y, hits, dx, dy, tWall, tCirc, a, ang, best},
+      ranges = ConstantArray[zMax, nBeams];
+      Do[
+        a = angles[[k]];
+        ang = th + a;
+        dx = Cos[ang]; dy = Sin[ang];
+        hits = {};
+        tWall = rayAABBIntersection[{px, py}, {dx, dy}, bounds["xmin"], bounds["xmax"], bounds["ymin"], bounds["ymax"]];
+        If[tWall &lt; Infinity, AppendTo[hits, tWall]];
+        Do[
+          tCirc = rayCircleIntersection[{px, py}, {dx, dy}, circles[[m]]["c"], circles[[m]]["r"]];
+          If[tCirc &lt; Infinity, AppendTo[hits, tCirc]],
+          {m, Length[circles]}
+        ];
+        If[hits =!= {}, best = Min[hits]; If[best &lt;= zMax, ranges[[k]] = Clip[best + RandomVariate[NormalDistribution[0, 0.02]], {0, zMax}]]],
+        {k, nBeams}
+      ];
+      ranges
+    ];
+
+    updateRay[{x_, y_, th_}, aBody_, r_] := Module[{start, end, cells, hit, freeCells, i, j, ie, je, ex, ey, ang},
+      start = worldToGrid[{x, y}];
+      If[start === Missing["OutOfBounds"], Return[]];
+      ang = th + aBody;
+      ex = x + r Cos[ang]; ey = y + r Sin[ang];
+      end = worldToGrid[{ex, ey}];
+      If[end === Missing["OutOfBounds"], Return[]];
+      cells = bresenham[start, end];
+      If[Length[cells] &lt;= 1, Return[]];
+      hit = r &lt; (zMax - 0.5 alpha);
+      freeCells = If[hit, cells[[2 ;; -2]], cells[[2 ;;]]];
+      Do[
+        {i, j} = freeCells[[q]];
+        logOdds[[j, i]] = Clip[logOdds[[j, i]] + (lFree - l0), {lMin, lMax}],
+        {q, Length[freeCells]}
+      ];
+      If[hit,
+        {ie, je} = Last[cells];
+        logOdds[[je, ie]] = Clip[logOdds[[je, ie]] + (lOcc - l0), {lMin, lMax}]
+      ];
+    ];
+
+    (* Trajectory *)
+    T = 220;
+    poses = Table[
+      ang = 2 Pi (t - 1)/T;
+      {6 Cos[ang], 6 Sin[ang], ang + Pi/2},
+      {t, T}
+    ];
+
+    Do[
+      scan = simulateScan[poses[[t]]];
+      Do[ updateRay[poses[[t]], angles[[k]], scan[[k]]], {k, nBeams} ],
+      {t, T}
+    ];
+
+    P = logistic[logOdds];
+
+    ArrayPlot[P, ColorFunction -&gt; "SolarColors", Frame -&gt; False,
+      PlotLabel -&gt; "2D Occupancy Grid from Simulated LiDAR (p(occ))"]
+  ], "Input"]
+}]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+
+      <p>
+        <strong>Problem 1 (Derive the log-odds recursion):</strong>
+        Starting from Bayes’ rule and the odds definition,
+        derive the update
+        <strong> \( l_{t,i} = l_{t-1,i} + \operatorname{logit}(p(m_i=1 \mid z_t, x_t)) - \operatorname{logit}(p_0) \)</strong>.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Write posterior odds:
+        <strong> \( O_{t,i} = \frac{p(m_i=1 \mid z_{1:t},x_{1:t})}{p(m_i=0 \mid z_{1:t},x_{1:t})} \)</strong>.
+        Under the occupancy-grid conditional independence approximation,
+        <strong> \( O_{t,i} = \frac{p(z_t \mid m_i=1,x_t)}{p(z_t \mid m_i=0,x_t)} O_{t-1,i} \)</strong>.
+        Taking log gives additivity:
+        <strong> \( l_{t,i} = l_{t-1,i} + \log\frac{p(z_t \mid m_i=1,x_t)}{p(z_t \mid m_i=0,x_t)} \)</strong>.
+        The inverse-model form follows from Bayes’ rule applied to
+        <strong> \( p(m_i \mid z_t,x_t) \)</strong> and subtracting the prior term
+        <strong> \( \operatorname{logit}(p_0) \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Repeated updates and saturation):</strong>
+        Suppose a fixed cell is observed as “free” <strong> \( n_f \)</strong> times and “occupied”
+        <strong> \( n_o \)</strong> times, with constants
+        <strong> \( p_{\mathrm{free}} \)</strong> and <strong> \( p_{\mathrm{occ}} \)</strong>.
+        Show that without clamping:
+        <strong> \( l = l_0 + n_f(\operatorname{logit}(p_{\mathrm{free}})-l_0) + n_o(\operatorname{logit}(p_{\mathrm{occ}})-l_0) \)</strong>.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Each event adds a constant increment to log-odds. Summing increments yields the expression.
+        Clamping to <strong> \( [l_{\min},l_{\max}] \)</strong> prevents extreme probabilities
+        from dominating later evidence.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Resolution vs. runtime scaling):</strong>
+        Assume <strong> \( K \)</strong> beams per scan, maximum range <strong> \( r_{\max} \)</strong>,
+        and resolution <strong> \( \Delta \)</strong>.
+        Estimate the asymptotic runtime for processing <strong> \( T \)</strong> scans.
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        Each ray traverses at most <strong> \( O(r_{\max}/\Delta) \)</strong> cells, so
+        total work is:
+      </p>
+      <h4 class="mathJax">
+        \[
+          O\left(T\,K\,\frac{r_{\max}}{\Delta}\right).
+        \]
+      </h4>
+
+      <p>
+        <strong>Problem 4 (Noise band and hit decision):</strong>
+        Suppose range noise is Gaussian with standard deviation <strong> \( \sigma_r \)</strong>.
+        If you declare a “hit” when <strong> \( r_k &lt; r_{\max} - \alpha/2 \)</strong>,
+        how should <strong> \( \alpha \)</strong> scale with <strong> \( \sigma_r \)</strong> to reduce
+        false occupied endpoints caused by near-max-range returns?
+      </p>
+
+      <p>
+        <strong>Solution:</strong>
+        A practical guideline is <strong> \( \alpha \approx c\,\sigma_r \)</strong> with
+        <strong> \( c \in [3,6] \)</strong>. Larger <strong> \( \alpha \)</strong> increases robustness
+        by widening the ambiguous band near <strong> \( r_{\max} \)</strong>, but also reduces the spatial
+        sharpness of occupied markings. This is a bias–variance tradeoff.
+      </p>
+
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        You implemented a complete 2D occupancy-grid mapping loop from LiDAR scans under the known-pose assumption.
+        The key technical steps were (i) an inverse sensor model that classifies cells along each beam as free/occupied/unknown,
+        (ii) a log-odds recursion derived from Bayes’ rule enabling stable incremental updates, and
+        (iii) discrete ray traversal (Bresenham/DDA) to update exactly the set of cells intersected by each beam.
+        This lab output (an occupancy probability grid) is the primary map representation used by many AMR stacks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical / Foundational Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Moravec, H.P., &amp; Elfes, A. (1985). High resolution maps from wide angle sonar.
+        <em>Proceedings of the IEEE International Conference on Robotics and Automation (ICRA)</em>.
+      </li>
+      <li>
+        Elfes, A. (1989). Using occupancy grids for mobile robot perception and navigation.
+        <em>Computer</em>, 22(6), 46–57.
+      </li>
+      <li>
+        Konolige, K. (1997). Improved occupancy grids for map building.
+        <em>Proceedings of the IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)</em>.
+      </li>
+      <li>
+        Thrun, S. (2002). Robotic mapping: A survey.
+        <em>Exploring Artificial Intelligence in the New Millennium</em>.
+      </li>
+      <li>
+        Thrun, S., Burgard, W., &amp; Fox, D. (2005). Probabilistic robotics: Occupancy grid mapping foundations.
+        <em>MIT Press</em>.
+      </li>
+      <li>
+        Fox, D. (1999). Markov localization: A probabilistic framework for mobile robot localization and navigation.
+        <em>Ph.D. thesis / foundational probabilistic robotics work</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter9/Lesson4.html">
+          Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter10/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Point-Cloud / Scan Registration Goals
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="active-lesson" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

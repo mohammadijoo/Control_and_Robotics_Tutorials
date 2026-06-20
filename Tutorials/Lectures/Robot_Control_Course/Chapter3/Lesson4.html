@@ -1,0 +1,1865 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 3: Model-Based Nonlinear Control - Lesson 4: Implementation Details (filters, saturation, rate limits) | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 3: Model-Based Nonlinear Control</h1>
+    <h3>
+      <strong
+        >Lesson 4: Implementation Details (filters, saturation, rate
+        limits)</strong
+      >
+    </h3>
+    <p>
+      This lesson bridges the gap between ideal model-based nonlinear control
+      laws and real robot hardware. We study how measurement filters, actuator
+      saturation, and torque/velocity rate limits modify the computed-torque
+      controller, and how to implement these effects rigorously in discrete time
+      using Python, C++, Java, MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Role of Implementation Nonlinearities -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Why Filters, Saturation, and Rate Limits Matter</h2>
+    <div class="down-content">
+      <p>
+        In previous lessons, we derived ideal model-based controllers for a
+        robot manipulator with dynamics of the form
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{M}(\mathbf{q})\ddot{\mathbf{q}} +
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}(\mathbf{q}) = \boldsymbol{&bsol;tau} + \mathbf{d}, \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{q} \in \mathbb{R}^n \)</strong> is the joint
+        configuration,
+        <strong>\( \boldsymbol{&bsol;tau} \in \mathbb{R}^n \)</strong> the
+        control torques, and <strong>\( \mathbf{d} \)</strong> represents
+        disturbances and modeling errors. In practice, three major
+        implementation effects intervene between the ideal control law and the
+        physical actuators:
+      </p>
+      <ul>
+        <li>
+          <strong>Signal filtering:</strong> joint positions are measured by
+          encoders, and velocities are usually <em>estimated</em> by numerical
+          differentiation plus low-pass filtering to attenuate sensor noise.
+        </li>
+        <li>
+          <strong>Actuator saturation:</strong> motors and current amplifiers
+          can only generate torques within bounds
+          <strong
+            >\( \boldsymbol{&bsol;tau}_{\min}, \boldsymbol{&bsol;tau}_{\max}
+            \)</strong
+          >.
+        </li>
+        <li>
+          <strong>Rate limits:</strong> physical and safety limits constrain
+          <strong>\( \dot{\boldsymbol{&bsol;tau}} \)</strong> and sometimes
+          <strong>\( \ddot{\mathbf{q}} \)</strong>.
+        </li>
+      </ul>
+      <p>
+        If these effects are ignored, the closed-loop behavior can deviate
+        drastically from the theoretical Lyapunov analysis of computed-torque or
+        feedback-linearized controllers. Correct implementation requires:
+      </p>
+      <ol>
+        <li>Mathematical models for saturation and rate limiters.</li>
+        <li>Discretization consistent with the controller sampling time.</li>
+        <li>Awareness of their impact on stability and tracking accuracy.</li>
+      </ol>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  Qd["Desired joint trajectory q_d(t)"] --> CT["Model-based controller (ideal)"]
+  CT --> LIM["Saturation + rate limiting block"]
+  LIM --> ACT["Actuators"]
+  ACT --> ROB["Robot dynamics"]
+  ROB --> SENS["Encoders / sensors"]
+  SENS --> FILT["Digital filters (q, q_dot)"]
+  FILT --> CT
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Mathematical Models of Saturation and Rate Limiting -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Mathematical Models of Saturation and Rate Limiting</h2>
+    <div class="down-content">
+      <p>
+        Consider a single joint control input <strong>\( u \)</strong> (e.g.,
+        torque command). A <em>saturation nonlinearity</em> with lower and upper
+        bounds <strong>\( u_{\min}, u_{\max} \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{sat}(u) = \begin{cases} u_{\max} &amp; \text{if } u
+        \geq u_{\max},\\ u_{\min} &amp; \text{if } u \leq u_{\min},\\ u &amp;
+        \text{otherwise.} \end{cases} \]
+      </h4>
+      <p>
+        For a vector input <strong>\( \mathbf{u} \in \mathbb{R}^n \)</strong>,
+        saturation is typically applied <em>componentwise</em>, i.e.
+        <strong
+          >\( \boldsymbol{\operatorname{sat}}(\mathbf{u}) =
+          [\operatorname{sat}(u_1),\dots,\operatorname{sat}(u_n)]' \)</strong
+        >.
+      </p>
+      <p>
+        A <strong>rate limiter</strong> constrains the rate of change of the
+        commanded input. In continuous time, with internal state
+        <strong>\( u_r(t) \)</strong>,
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{u}_r(t) = \begin{cases} \dot{u}_{\max} &amp; \text{if }
+        \dot{u}_{\text{cmd}}(t) \geq \dot{u}_{\max},\\ \dot{u}_{\min} &amp;
+        \text{if } \dot{u}_{\text{cmd}}(t) \leq \dot{u}_{\min},\\
+        \dot{u}_{\text{cmd}}(t) &amp; \text{otherwise,} \end{cases} \quad
+        u_{\text{out}}(t) = u_r(t), \]
+      </h4>
+      <p>
+        where <strong>\( \dot{u}_{\text{cmd}}(t) \)</strong> is the derivative
+        of the <em>ideal</em> input (e.g., from computed-torque law), and
+        <strong>\( \dot{u}_{\min}\leq 0 \leq \dot{u}_{\max} \)</strong>. In
+        discrete time with sampling time <strong>\( T_s \)</strong>, a simple
+        approximation is
+      </p>
+      <h4 class="mathJax">
+        \[ u_{\text{out}}[k] = \operatorname{clip}\!\Big( u_{\text{out}}[k-1] +
+        \delta u[k],\; u_{\min},\; u_{\max} \Big), \]
+      </h4>
+      <p>
+        where
+        <strong
+          >\( \delta u[k] = \operatorname{clip}(u_{\text{cmd}}[k] -
+          u_{\text{out}}[k-1],\; \dot{u}_{\min} T_s,\; \dot{u}_{\max} T_s)
+          \)</strong
+        >
+        and <strong>\( \operatorname{clip} \)</strong> denotes projection onto
+        the specified interval.
+      </p>
+      <p>
+        Both saturation and rate limiting are <em>memoryless</em> or low-order
+        nonlinearities. In Lyapunov analysis they are often treated via sector
+        bounds, e.g., for scalar saturation one can show
+      </p>
+      <h4 class="mathJax">
+        \[ 0 \leq \frac{\operatorname{sat}(u)}{u} \leq 1 \quad \text{for all } u
+        \neq 0, \]
+      </h4>
+      <p>
+        which means <strong>\( \operatorname{sat}(u) \)</strong> lies in the
+        sector <strong>\( [0,1] \)</strong> and allows the use of absolute
+        stability tools. We will not go into full Lur'e system theory here, but
+        it is important to understand that saturation is a
+        <em>structured</em> nonlinearity with useful bounds.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Discrete-Time Filtering of Measurements -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Discrete-Time Filtering of Joint Measurements</h2>
+    <div class="down-content">
+      <p>
+        Joint positions <strong>\( \mathbf{q}[k] \)</strong> are measured by
+        encoders at discrete instants. Numerical differentiation magnifies
+        high-frequency noise, so velocities are estimated using a
+        <em>dirty derivative</em>:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}_{\text{est}}[k] = \alpha
+        \,\dot{\mathbf{q}}_{\text{est}}[k-1] +
+        (1-\alpha)\,\frac{\mathbf{q}[k]-\mathbf{q}[k-1]}{T_s}, \quad 0 &lt;
+        \alpha &lt; 1. \]
+      </h4>
+      <p>
+        This is a first-order low-pass filter applied to the raw finite
+        difference. The corresponding transfer function in the \( z \)-domain
+        for each joint is
+      </p>
+      <h4 class="mathJax">
+        \[ H(z) = \frac{(1-\alpha)(1 - z^{-1})}{1 - \alpha z^{-1}}. \]
+      </h4>
+      <p>
+        For small sampling time <strong>\( T_s \)</strong>, the approximate
+        continuous-time pole is located at
+        <strong>\( s = -\frac{1-\alpha}{\alpha T_s} \)</strong>. Choosing a
+        cutoff frequency <strong>\( \omega_c \)</strong> yields
+      </p>
+      <h4 class="mathJax">\[ \alpha \approx \frac{1}{1 + \omega_c T_s}. \]</h4>
+      <p>
+        <strong>Proof (approximate):</strong> Comparing the discrete pole
+        <strong>\( z_p = \alpha \)</strong> with the first-order mapping
+        <strong>\( z_p \approx \mathrm{e}^{-T_s \omega_c} \)</strong> gives
+        <strong>\( \alpha \approx \mathrm{e}^{-T_s \omega_c} \)</strong>. For
+        small <strong>\( T_s \omega_c \)</strong>, using the first-order
+        expansion
+        <strong
+          >\( \mathrm{e}^{-T_s \omega_c} \approx 1 - T_s \omega_c \)</strong
+        >
+        and the continuous-time model
+        <strong>\( \dot{x} = -\omega_c x + \omega_c u \)</strong>, one obtains
+        the rational approximation
+        <strong>\( \alpha \approx \frac{1}{1 + \omega_c T_s} \)</strong>, which
+        is convenient for controller tuning.
+      </p>
+      <p>
+        In many implementations, <strong>\( \mathbf{q} \)</strong> is also
+        low-pass filtered to remove quantization noise:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{q}_{\text{f}}[k] = \beta\,\mathbf{q}_{\text{f}}[k-1] +
+        (1-\beta)\,\mathbf{q}[k], \quad 0 &lt; \beta &lt; 1. \]
+      </h4>
+      <p>
+        The filtered signals
+        <strong
+          >\( \mathbf{q}_{\text{f}}, \dot{\mathbf{q}}_{\text{est}} \)</strong
+        >
+        are then fed into the nonlinear control law (e.g. computed-torque)
+        instead of the raw measurements.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Computed-Torque with Practical Nonlinearities -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Computed-Torque with Filters, Saturation, and Rate Limits</h2>
+    <div class="down-content">
+      <p>
+        Recall the ideal computed-torque structure for tracking a desired
+        trajectory
+        <strong
+          >\( \mathbf{q}_d, \dot{\mathbf{q}}_d, \ddot{\mathbf{q}}_d \)</strong
+        >:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{&bsol;tau}_{\text{ideal}} = \mathbf{M}(\mathbf{q})\Big(
+        \ddot{\mathbf{q}}_d + \mathbf{K}_d \tilde{\dot{\mathbf{q}}} +
+        \mathbf{K}_p \tilde{\mathbf{q}} \Big) +
+        \mathbf{C}(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}} +
+        \mathbf{g}(\mathbf{q}), \]
+      </h4>
+      <p>
+        with tracking errors
+        <strong>\( \tilde{\mathbf{q}} = \mathbf{q}_d - \mathbf{q} \)</strong>
+        and
+        <strong
+          >\( \tilde{\dot{\mathbf{q}}} = \dot{\mathbf{q}}_d - \dot{\mathbf{q}}
+          \)</strong
+        >. In implementation, we replace <strong>\( \mathbf{q} \)</strong> and
+        <strong>\( \dot{\mathbf{q}} \)</strong> by their filtered counterparts
+        <strong
+          >\( \mathbf{q}_{\text{f}}, \dot{\mathbf{q}}_{\text{est}} \)</strong
+        >, and we apply saturation and rate limiting:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \tilde{\mathbf{q}}_{\text{f}} &amp;= \mathbf{q}_d -
+        \mathbf{q}_{\text{f}},\\ \tilde{\dot{\mathbf{q}}}_{\text{f}} &amp;=
+        \dot{\mathbf{q}}_d - \dot{\mathbf{q}}_{\text{est}},\\[4pt]
+        \boldsymbol{&bsol;tau}_{\text{pre}} &amp;=
+        \mathbf{M}(\mathbf{q}_{\text{f}})\Big( \ddot{\mathbf{q}}_d +
+        \mathbf{K}_d \tilde{\dot{\mathbf{q}}}_{\text{f}} + \mathbf{K}_p
+        \tilde{\mathbf{q}}_{\text{f}} \Big) +
+        \mathbf{C}(\mathbf{q}_{\text{f}},\dot{\mathbf{q}}_{\text{est}})\dot{\mathbf{q}}_{\text{est}}
+        + \mathbf{g}(\mathbf{q}_{\text{f}}),\\[4pt]
+        \boldsymbol{&bsol;tau}_{\text{sat}}[k] &amp;=
+        \boldsymbol{\operatorname{sat}}\Big(
+        \boldsymbol{&bsol;tau}_{\text{rl}}[k] \Big),\\[4pt]
+        \boldsymbol{&bsol;tau}_{\text{rl}}[k] &amp;= \text{rate_limit}\Big(
+        \boldsymbol{&bsol;tau}_{\text{pre}}[k],\;
+        \boldsymbol{&bsol;tau}_{\text{sat}}[k-1] \Big). \end{aligned} \]
+      </h4>
+      <p>
+        Here <strong>\( \boldsymbol{&bsol;tau}_{\text{rl}} \)</strong> is the
+        rate-limited torque command before final saturation (for safety), and
+        <strong>\( \boldsymbol{&bsol;tau}_{\text{sat}} \)</strong> is the actual
+        torque sent to actuators. In practice, saturation and rate limiting may
+        be implemented in the low-level drive firmware; when that is the case,
+        the high-level controller should still be designed under the knowledge
+        that these nonlinearities exist.
+      </p>
+      <p>
+        <strong>Local stability insight.</strong> If the reference trajectory
+        and gain matrices are chosen so that the ideal controller is locally
+        exponentially stabilizing, then there exists a bounded neighborhood of
+        the origin in which all components of
+        <strong>\( \boldsymbol{&bsol;tau}_{\text{pre}} \)</strong> stay strictly
+        inside the saturation limits. In that region, the actual closed-loop is
+        identical to the ideal system, and the Lyapunov proof carries over.
+        Thus, for small enough tracking errors, the original stability
+        properties are preserved. The practical design task is to choose gains
+        and reference trajectories so that the operating region of interest lies
+        inside this domain of linear behavior.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Algorithmic Loop with Implementation Details -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Control Loop Algorithm with Implementation Details</h2>
+    <div class="down-content">
+      <p>
+        The following flow summarizes a typical discrete-time joint control loop
+        for model-based nonlinear control, incorporating measurement filtering,
+        saturation, and rate limiting.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  START["Start of control cycle (k)"] --> READ["Read encoders q[k]"]
+  READ --> QF["Update filters for q_f[k], qdot_est[k]"]
+  QF --> ERRS["Compute errors: e_q, e_qdot"]
+  ERRS --> TAUIP["Compute tau_pre from model-based law"]
+  TAUIP --> RL["Apply rate limiter: tau_rl[k]"]
+  RL --> SAT["Apply saturation: tau_sat[k]"]
+  SAT --> SEND["Send tau_sat[k] to actuators"]
+  SEND --> NEXT["Wait until next sample k+1"]
+        </pre>
+      </div>
+      <p>
+        In a real-time implementation, steps from reading encoders to sending
+        torques must be completed within the sampling period
+        <strong>\( T_s \)</strong>. Multi-rate schemes (inner current loop,
+        outer torque loop, and outermost kinematic loop) are often used, but we
+        postpone that discussion to the chapter on digital control.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation (with Robotics Libraries) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Implementation (with Robotics Libraries)</h2>
+    <div class="down-content">
+      <p>
+        In Python, typical libraries for robot dynamics and kinematics include
+        <code>roboticstoolbox-python</code> and the Python bindings of
+        <code>pinocchio</code>. Below is a simplified joint-space controller
+        loop using <code>numpy</code> only for clarity; in a real system,
+        <code>roboticstoolbox</code> can be used to obtain
+        <strong
+          >\( \mathbf{M}(\mathbf{q}), \mathbf{C}(\mathbf{q},\dot{\mathbf{q}}),
+          \mathbf{g}(\mathbf{q}) \)</strong
+        >.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+
+class JointFilter:
+    def __init__(self, n_joints, Ts, omega_c_vel, omega_c_pos=None):
+        self.n = n_joints
+        self.Ts = Ts
+        # Dirty derivative parameters
+        self.alpha_vel = 1.0 / (1.0 + omega_c_vel * Ts)
+        self.q_prev = np.zeros(n_joints)
+        self.qf = np.zeros(n_joints)
+        self.qdot_est = np.zeros(n_joints)
+        if omega_c_pos is not None:
+            self.beta_pos = 1.0 / (1.0 + omega_c_pos * Ts)
+        else:
+            self.beta_pos = None
+
+    def update(self, q_meas):
+        if self.beta_pos is None:
+            self.qf = q_meas.copy()
+        else:
+            self.qf = self.beta_pos * self.qf + (1.0 - self.beta_pos) * q_meas
+
+        dq_raw = (q_meas - self.q_prev) / self.Ts
+        self.qdot_est = (self.alpha_vel * self.qdot_est
+                         + (1.0 - self.alpha_vel) * dq_raw)
+        self.q_prev = q_meas.copy()
+        return self.qf, self.qdot_est
+
+
+def saturate(u, u_min, u_max):
+    return np.minimum(np.maximum(u, u_min), u_max)
+
+
+def rate_limit(u_cmd, u_prev, du_min, du_max):
+    du = u_cmd - u_prev
+    du = np.minimum(np.maximum(du, du_min), du_max)
+    return u_prev + du
+
+
+class ComputedTorqueController:
+    def __init__(self, robot_model, Kp, Kd, Ts,
+                 tau_min, tau_max, dtau_min, dtau_max,
+                 omega_c_vel, omega_c_pos=None):
+        """
+        robot_model: object with methods M(q), C(q, qdot), g(q)
+        Kp, Kd: diagonal gain matrices (as np.array)
+        tau_min, tau_max: joint torque bounds
+        dtau_min, dtau_max: per-sample torque increment bounds
+        """
+        self.robot = robot_model
+        self.Kp = Kp
+        self.Kd = Kd
+        self.Ts = Ts
+        self.tau_min = tau_min
+        self.tau_max = tau_max
+        self.dtau_min = dtau_min
+        self.dtau_max = dtau_max
+        self.filter = JointFilter(len(tau_min), Ts,
+                                  omega_c_vel, omega_c_pos)
+        self.tau_prev = np.zeros_like(tau_min)
+
+    def step(self, q_meas, qd, qd_dot, qd_ddot):
+        # 1) Filtering
+        qf, qdot_est = self.filter.update(q_meas)
+
+        # 2) Errors
+        e_q = qd - qf
+        e_qdot = qd_dot - qdot_est
+
+        # 3) Dynamics terms
+        M = self.robot.M(qf)
+        C = self.robot.C(qf, qdot_est)
+        g = self.robot.g(qf)
+
+        v = qd_ddot + self.Kd @ e_qdot + self.Kp @ e_q
+        tau_pre = M @ v + C @ qdot_est + g
+
+        # 4) Rate limiting then saturation
+        tau_rl = rate_limit(tau_pre, self.tau_prev,
+                            self.dtau_min, self.dtau_max)
+        tau_sat = saturate(tau_rl, self.tau_min, self.tau_max)
+
+        self.tau_prev = tau_sat.copy()
+        return tau_sat
+      </code></pre>
+      <p>
+        In a real application, <code>robot_model</code> can be a wrapper around
+        <code>roboticstoolbox</code> or <code>pinocchio</code>, and
+        <code>step</code> is called at each control cycle with the latest
+        encoder readings and reference trajectory values.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation (Eigen + Common Robotics Libraries) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Implementation (Eigen and Robotics Libraries)</h2>
+    <div class="down-content">
+      <p>
+        In C++, matrix computations are typically handled with
+        <code>Eigen</code>, while common robotics dynamics libraries include
+        <code>pinocchio</code>, <code>RBDL</code>, and <code>Orocos KDL</code>.
+        The snippet below sketches a discrete-time controller using
+        <code>Eigen</code>, assuming that a <code>RobotModel</code> interface
+        provides <code>M(q), C(q, qdot), g(q)</code>.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+#include &lt;algorithm&gt;
+
+using Vector = Eigen::VectorXd;
+using Matrix = Eigen::MatrixXd;
+
+struct RobotModel {
+    Matrix M(const Vector&amp; q) const;
+    Matrix C(const Vector&amp; q, const Vector&amp; qdot) const;
+    Vector g(const Vector&amp; q) const;
+};
+
+class JointFilter {
+public:
+    JointFilter(int n, double Ts, double omega_c_vel, double omega_c_pos = -1.0)
+        : n_(n), Ts_(Ts),
+          q_prev_(Vector::Zero(n)),
+          qf_(Vector::Zero(n)),
+          qdot_est_(Vector::Zero(n)) {
+
+        alpha_vel_ = 1.0 / (1.0 + omega_c_vel * Ts_);
+        if (omega_c_pos &gt; 0.0) {
+            beta_pos_ = 1.0 / (1.0 + omega_c_pos * Ts_);
+        } else {
+            beta_pos_ = -1.0; // disabled
+        }
+    }
+
+    void update(const Vector&amp; q_meas) {
+        if (beta_pos_ &gt; 0.0) {
+            qf_ = beta_pos_ * qf_ + (1.0 - beta_pos_) * q_meas;
+        } else {
+            qf_ = q_meas;
+        }
+
+        Vector dq_raw = (q_meas - q_prev_) / Ts_;
+        qdot_est_ = alpha_vel_ * qdot_est_
+                  + (1.0 - alpha_vel_) * dq_raw;
+
+        q_prev_ = q_meas;
+    }
+
+    const Vector&amp; q_filtered() const { return qf_; }
+    const Vector&amp; qdot_est() const { return qdot_est_; }
+
+private:
+    int n_;
+    double Ts_;
+    double alpha_vel_;
+    double beta_pos_;
+    Vector q_prev_;
+    Vector qf_;
+    Vector qdot_est_;
+};
+
+inline Vector saturate(const Vector&amp; u,
+                       const Vector&amp; u_min,
+                       const Vector&amp; u_max) {
+    Vector out = u;
+    for (int i = 0; i &lt; u.size(); ++i) {
+        out[i] = std::min(std::max(out[i], u_min[i]), u_max[i]);
+    }
+    return out;
+}
+
+inline Vector rateLimit(const Vector&amp; u_cmd,
+                        const Vector&amp; u_prev,
+                        const Vector&amp; du_min,
+                        const Vector&amp; du_max) {
+    Vector out = u_prev;
+    for (int i = 0; i &lt; u_cmd.size(); ++i) {
+        double du = u_cmd[i] - u_prev[i];
+        du = std::min(std::max(du, du_min[i]), du_max[i]);
+        out[i] += du;
+    }
+    return out;
+}
+
+class ComputedTorqueController {
+public:
+    ComputedTorqueController(const RobotModel* robot,
+                             const Vector&amp; Kp_diag,
+                             const Vector&amp; Kd_diag,
+                             double Ts,
+                             const Vector&amp; tau_min,
+                             const Vector&amp; tau_max,
+                             const Vector&amp; dtau_min,
+                             const Vector&amp; dtau_max,
+                             double omega_c_vel,
+                             double omega_c_pos = -1.0)
+        : robot_(robot),
+          Kp_(Kp_diag.asDiagonal()),
+          Kd_(Kd_diag.asDiagonal()),
+          Ts_(Ts),
+          tau_min_(tau_min),
+          tau_max_(tau_max),
+          dtau_min_(dtau_min),
+          dtau_max_(dtau_max),
+          filter_(tau_min.size(), Ts, omega_c_vel, omega_c_pos),
+          tau_prev_(Vector::Zero(tau_min.size())) {}
+
+    Vector step(const Vector&amp; q_meas,
+                const Vector&amp; qd,
+                const Vector&amp; qd_dot,
+                const Vector&amp; qd_ddot) {
+        // 1) Filtering
+        filter_.update(q_meas);
+        const Vector&amp; qf = filter_.q_filtered();
+        const Vector&amp; qdot_est = filter_.qdot_est();
+
+        // 2) Errors
+        Vector e_q = qd - qf;
+        Vector e_qdot = qd_dot - qdot_est;
+
+        // 3) Dynamics
+        Matrix M = robot_-&gt;M(qf);
+        Matrix C = robot_-&gt;C(qf, qdot_est);
+        Vector g = robot_-&gt;g(qf);
+
+        Vector v = qd_ddot + Kd_ * e_qdot + Kp_ * e_q;
+        Vector tau_pre = M * v + C * qdot_est + g;
+
+        // 4) Rate limit and saturate
+        Vector tau_rl = rateLimit(tau_pre, tau_prev_, dtau_min_, dtau_max_);
+        Vector tau_sat = saturate(tau_rl, tau_min_, tau_max_);
+        tau_prev_ = tau_sat;
+        return tau_sat;
+    }
+
+private:
+    const RobotModel* robot_;
+    Matrix Kp_;
+    Matrix Kd_;
+    double Ts_;
+    Vector tau_min_, tau_max_;
+    Vector dtau_min_, dtau_max_;
+    JointFilter filter_;
+    Vector tau_prev_;
+};
+      </code></pre>
+      <p>
+        This structure can be integrated into a
+        <code>ros_control</code> controller by calling <code>step</code> inside
+        <code>update</code>, using joint state and reference messages from ROS
+        topics.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation (Using EJML for Linear Algebra) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Implementation (EJML-Based Controller)</h2>
+    <div class="down-content">
+      <p>
+        Java has fewer robotics-specific libraries, but the linear algebra can
+        be handled with
+        <code>EJML</code>. Robot dynamics may be computed in native code (C++)
+        and accessed via JNI, or implemented directly in Java for simpler
+        manipulators.
+      </p>
+      <pre><code class="language-java">
+import org.ejml.simple.SimpleMatrix;
+
+public class JointFilter {
+    private final double Ts;
+    private final double alphaVel;
+    private final double betaPos;
+    private SimpleMatrix qPrev;
+    private SimpleMatrix qf;
+    private SimpleMatrix qdotEst;
+    private final boolean filterPos;
+
+    public JointFilter(int n, double Ts, double omegaCVel, Double omegaCPos) {
+        this.Ts = Ts;
+        this.alphaVel = 1.0 / (1.0 + omegaCVel * Ts);
+        this.qPrev = new SimpleMatrix(n, 1);
+        this.qf = new SimpleMatrix(n, 1);
+        this.qdotEst = new SimpleMatrix(n, 1);
+        if (omegaCPos != null &amp;&amp; omegaCPos &gt; 0.0) {
+            this.betaPos = 1.0 / (1.0 + omegaCPos * Ts);
+            this.filterPos = true;
+        } else {
+            this.betaPos = -1.0;
+            this.filterPos = false;
+        }
+    }
+
+    public void update(SimpleMatrix qMeas) {
+        if (filterPos) {
+            qf = qf.scale(betaPos).plus(qMeas.scale(1.0 - betaPos));
+        } else {
+            qf = qMeas.copy();
+        }
+        SimpleMatrix dqRaw = qMeas.minus(qPrev).divide(Ts);
+        qdotEst = qdotEst.scale(alphaVel)
+                .plus(dqRaw.scale(1.0 - alphaVel));
+        qPrev = qMeas.copy();
+    }
+
+    public SimpleMatrix getQf() { return qf; }
+    public SimpleMatrix getQdotEst() { return qdotEst; }
+}
+
+public class Saturation {
+    public static SimpleMatrix saturate(SimpleMatrix u,
+                                        SimpleMatrix uMin,
+                                        SimpleMatrix uMax) {
+        SimpleMatrix out = u.copy();
+        for (int i = 0; i &lt; u.getNumElements(); ++i) {
+            double val = out.get(i);
+            val = Math.min(Math.max(val, uMin.get(i)), uMax.get(i));
+            out.set(i, val);
+        }
+        return out;
+    }
+
+    public static SimpleMatrix rateLimit(SimpleMatrix uCmd,
+                                         SimpleMatrix uPrev,
+                                         SimpleMatrix duMin,
+                                         SimpleMatrix duMax) {
+        SimpleMatrix out = uPrev.copy();
+        for (int i = 0; i &lt; uCmd.getNumElements(); ++i) {
+            double du = uCmd.get(i) - uPrev.get(i);
+            du = Math.min(Math.max(du, duMin.get(i)), duMax.get(i));
+            out.set(i, uPrev.get(i) + du);
+        }
+        return out;
+    }
+}
+
+public interface RobotModel {
+    SimpleMatrix M(SimpleMatrix q);
+    SimpleMatrix C(SimpleMatrix q, SimpleMatrix qdot);
+    SimpleMatrix g(SimpleMatrix q);
+}
+
+public class ComputedTorqueController {
+    private final RobotModel robot;
+    private final SimpleMatrix Kp;
+    private final SimpleMatrix Kd;
+    private final double Ts;
+    private final SimpleMatrix tauMin;
+    private final SimpleMatrix tauMax;
+    private final SimpleMatrix dtauMin;
+    private final SimpleMatrix dtauMax;
+    private final JointFilter filter;
+    private SimpleMatrix tauPrev;
+
+    public ComputedTorqueController(RobotModel robot,
+                                    SimpleMatrix KpDiag,
+                                    SimpleMatrix KdDiag,
+                                    double Ts,
+                                    SimpleMatrix tauMin,
+                                    SimpleMatrix tauMax,
+                                    SimpleMatrix dtauMin,
+                                    SimpleMatrix dtauMax,
+                                    double omegaCVel,
+                                    Double omegaCPos) {
+        this.robot = robot;
+        this.Kp = SimpleMatrix.diag(KpDiag.getDDRM());
+        this.Kd = SimpleMatrix.diag(KdDiag.getDDRM());
+        this.Ts = Ts;
+        this.tauMin = tauMin;
+        this.tauMax = tauMax;
+        this.dtauMin = dtauMin;
+        this.dtauMax = dtauMax;
+        int n = tauMin.getNumElements();
+        this.filter = new JointFilter(n, Ts, omegaCVel, omegaCPos);
+        this.tauPrev = new SimpleMatrix(n, 1);
+    }
+
+    public SimpleMatrix step(SimpleMatrix qMeas,
+                             SimpleMatrix qd,
+                             SimpleMatrix qdDot,
+                             SimpleMatrix qdDdot) {
+        filter.update(qMeas);
+        SimpleMatrix qf = filter.getQf();
+        SimpleMatrix qdotEst = filter.getQdotEst();
+
+        SimpleMatrix eQ = qd.minus(qf);
+        SimpleMatrix eQdot = qdDot.minus(qdotEst);
+
+        SimpleMatrix M = robot.M(qf);
+        SimpleMatrix C = robot.C(qf, qdotEst);
+        SimpleMatrix g = robot.g(qf);
+
+        SimpleMatrix v = qdDdot
+                .plus(Kd.mult(eQdot))
+                .plus(Kp.mult(eQ));
+        SimpleMatrix tauPre = M.mult(v).plus(C.mult(qdotEst)).plus(g);
+
+        SimpleMatrix tauRl = Saturation.rateLimit(tauPre, tauPrev, dtauMin, dtauMax);
+        SimpleMatrix tauSat = Saturation.saturate(tauRl, tauMin, tauMax);
+        tauPrev = tauSat.copy();
+        return tauSat;
+    }
+}
+      </code></pre>
+      <p>
+        Such Java code can be integrated into real-time JVM frameworks or used
+        in simulation environments for teaching and prototyping.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        MATLAB has built-in support for robotic dynamics via the Robotics System
+        Toolbox and functions such as <code>robotics.RigidBodyTree</code>.
+        Simulink offers ready-made blocks for saturation, rate limiting, and
+        low-pass filtering. The MATLAB function below encapsulates the
+        discrete-time controller for use in a Simulink MATLAB Function block.
+      </p>
+      <pre><code class="language-matlab">
+function tau_sat = ct_controller_step(q_meas, qd, qd_dot, qd_ddot)
+%#codegen
+% Global or persistent variables can store state between calls
+% (for q_prev, qf, qdot_est, tau_prev)
+
+persistent Ts Kp Kd tau_min tau_max dtau_min dtau_max ...
+           q_prev qf qdot_est tau_prev alpha_vel beta_pos robot
+
+if isempty(Ts)
+    Ts = 0.001;
+    n = numel(q_meas);
+
+    Kp = diag(100 * ones(1,n));
+    Kd = diag(20 * ones(1,n));
+
+    tau_min = -50 * ones(n,1);
+    tau_max =  50 * ones(n,1);
+    dtau_min = -200 * Ts * ones(n,1);
+    dtau_max =  200 * Ts * ones(n,1);
+
+    omega_c_vel = 2 * pi * 20;   % 20 Hz cut-off
+    omega_c_pos = 2 * pi * 5;    % 5 Hz cut-off
+
+    alpha_vel = 1 / (1 + omega_c_vel * Ts);
+    beta_pos  = 1 / (1 + omega_c_pos * Ts);
+
+    q_prev = q_meas;
+    qf = q_meas;
+    qdot_est = zeros(n,1);
+    tau_prev = zeros(n,1);
+
+    % robot: RigidBodyTree created in base workspace
+    robot = evalin('base', 'robot');
+end
+
+% 1) Filtering
+qf = beta_pos * qf + (1 - beta_pos) * q_meas;
+dq_raw = (q_meas - q_prev) / Ts;
+qdot_est = alpha_vel * qdot_est + (1 - alpha_vel) * dq_raw;
+q_prev = q_meas;
+
+% 2) Errors
+e_q = qd - qf;
+e_qdot = qd_dot - qdot_est;
+
+% 3) Dynamics using RigidBodyTree
+M = massMatrix(robot, qf');
+Cqdot = velocityProduct(robot, qf', qdot_est');
+g = gravityTorque(robot, qf');
+
+v = qd_ddot + Kd * e_qdot + Kp * e_q;
+tau_pre = M * v + Cqdot' + g';
+
+% 4) Rate limiting
+du = tau_pre - tau_prev;
+du = min(max(du, dtau_min), dtau_max);
+tau_rl = tau_prev + du;
+
+% 5) Saturation
+tau_sat = min(max(tau_rl, tau_min), tau_max);
+tau_prev = tau_sat;
+      </code></pre>
+      <p>
+        In Simulink, one can instead construct the loop using built-in
+        <em>Derivative</em> (with filter), <em>Transfer Fcn</em> for low-pass
+        filters, and the <em>Saturation</em> and <em>Rate Limiter</em>
+        blocks, with robot dynamics implemented via a MATLAB Function block or
+        prebuilt dynamics block.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        Wolfram Mathematica is useful both for symbolic manipulation of dynamics
+        and for simulating the effect of saturation, rate limiting, and
+        filtering in continuous or discrete time.
+      </p>
+      <pre><code class="language-mathematica">
+(* Example: scalar joint with computed torque-like control *)
+
+Ts = 0.001;
+omegaCVel = 2 Pi 20;
+alphaVel = 1/(1 + omegaCVel Ts);
+
+(* Low-pass "dirty derivative" *)
+updateFilter[{qPrev_, qdotEst_}, qMeas_] :=
+ Module[{dqRaw, qdotEstNew},
+  dqRaw = (qMeas - qPrev)/Ts;
+  qdotEstNew = alphaVel qdotEst + (1 - alphaVel) dqRaw;
+  {qMeas, qdotEstNew}
+ ]
+
+saturate[u_, uMin_, uMax_] := Min[Max[u, uMin], uMax];
+
+rateLimit[uCmd_, uPrev_, duMin_, duMax_] :=
+ Module[{du = uCmd - uPrev},
+  du = Min[Max[du, duMin], duMax];
+  uPrev + du
+ ]
+
+(* Toy single-DOF dynamics: M(q) = m, C = 0, g(q) = g0 Sin[q] *)
+m = 1.0; g0 = 9.81;
+Kp = 100.; Kd = 20.;
+
+tauMin = -5.; tauMax = 5.;
+dtauMin = -200. Ts; dtauMax = 200. Ts;
+
+(* Discrete-time simulation *)
+steps = 5000;
+qd[k_] := 0.5 Sin[0.5 k Ts]; (* desired trajectory *)
+qdDot[k_] := 0.5 0.5 Cos[0.5 k Ts];
+qdDdot[k_] := -0.5 0.5^2 Sin[0.5 k Ts];
+
+q = ConstantArray[0., steps + 1];
+qdot = ConstantArray[0., steps + 1];
+tau = ConstantArray[0., steps + 1];
+
+qPrev = 0.; qdotEst = 0.;
+tauPrev = 0.;
+
+Do[
+  (* filter update *)
+  {qPrev, qdotEst} = updateFilter[{qPrev, qdotEst}, q[[k]]];
+
+  (* errors *)
+  eQ = qd[k] - qPrev;
+  eQdot = qdDot[k] - qdotEst;
+
+  (* computed torque *)
+  v = qdDdot[k] + Kd eQdot + Kp eQ;
+  tauPre = m v + g0 Sin[qPrev];
+
+  (* rate limit and saturation *)
+  tauRl = rateLimit[tauPre, tauPrev, dtauMin, dtauMax];
+  tau[[k]] = saturate[tauRl, tauMin, tauMax];
+  tauPrev = tau[[k]];
+
+  (* update dynamics (semi-implicit Euler) *)
+  qdot[[k + 1]] = qdot[[k]] + Ts (1/m) (tau[[k]] - g0 Sin[q[[k]]]);
+  q[[k + 1]] = q[[k]] + Ts qdot[[k + 1]];
+ , {k, 1, steps}];
+
+ListLinePlot[
+ {
+  Table[{k Ts, q[[k]]}, {k, 1, steps}],
+  Table[{k Ts, qd[k]}, {k, 1, steps}]
+ },
+ PlotLegends -&gt; {"q(t)", "q_d(t)"},
+ AxesLabel -&gt; {"t [s]", "angle"}
+]
+      </code></pre>
+      <p>
+        Symbolic tools in Mathematica can also be used to derive the robot
+        dynamics
+        <strong>\( \mathbf{M}, \mathbf{C}, \mathbf{g} \)</strong> and then
+        automatically generate C or C++ code for use in real-time controllers
+        that contain the implementation nonlinearities discussed.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+
+    <p>
+      <strong>Problem 1 (Filter Design):</strong>
+      A joint is sampled at <strong>\( T_s = 1 \,\text{ms} \)</strong>. You want
+      a dirty derivative on position with approximate cutoff frequency
+      <strong>\( \omega_c = 2\pi \times 50 \,\text{rad/s} \)</strong>. Compute
+      the parameter <strong>\( \alpha \)</strong> of the first-order filter
+      <strong
+        >\( \dot{q}_{\text{est}}[k] = \alpha \dot{q}_{\text{est}}[k-1] +
+        (1-\alpha)(q[k]-q[k-1])/T_s \)</strong
+      >. Comment on how increasing <strong>\( \alpha \)</strong> affects noise
+      attenuation and phase lag.
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      Using the approximation
+      <strong>\( \alpha \approx \frac{1}{1 + \omega_c T_s} \)</strong>, we
+      obtain
+    </p>
+    <h4 class="mathJax">
+      \[ \alpha \approx \frac{1}{1 + \omega_c T_s} = \frac{1}{1 + (2\pi \cdot
+      50)\cdot 0.001} = \frac{1}{1 + 0.314} \approx 0.761. \]
+    </h4>
+    <p>
+      Larger <strong>\( \alpha \)</strong> places the pole closer to one, giving
+      stronger smoothing (better noise attenuation) but also more phase lag,
+      i.e., the estimated velocity is more delayed relative to the true
+      velocity. Smaller <strong>\( \alpha \)</strong> tracks rapid changes
+      better but lets more noise through.
+    </p>
+
+    <p>
+      <strong>Problem 2 (Saturation and Local Stability Region):</strong>
+      Consider a single-DOF system with ideal error dynamics under computed
+      torque given by
+      <strong>\( \ddot{e} + k_d \dot{e} + k_p e = 0 \)</strong>, where
+      <strong>\( e = q_d - q \)</strong>. Suppose the control torque is
+      proportional to the virtual input
+      <strong>\( v = \ddot{q}_d + k_d \dot{e} + k_p e \)</strong>, with scalar
+      inertia <strong>\( m \)</strong>, so that the ideal torque is
+      <strong>\( &bsol;tau_{\text{ideal}} = m v \)</strong>. Actuator saturation
+      enforces
+      <strong
+        >\( &bsol;tau_{\min} \leq &bsol;tau \leq &bsol;tau_{\max} \)</strong
+      >. Derive a bound on <strong>\( e \)</strong> and
+      <strong>\( \dot{e} \)</strong> such that saturation never becomes active.
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      The magnitude of the ideal torque satisfies
+    </p>
+    <h4 class="mathJax">
+      \[ |&bsol;tau_{\text{ideal}}| = m|\ddot{q}_d + k_d \dot{e} + k_p e| \leq
+      m\big(|\ddot{q}_d|_{\max} + k_d|\dot{e}| + k_p|e|\big), \]
+    </h4>
+    <p>
+      where <strong>\( |\ddot{q}_d|_{\max} \)</strong> is an upper bound on the
+      desired acceleration. If we require
+      <strong>\( |&bsol;tau_{\text{ideal}}| \leq &bsol;tau_{\max} \)</strong>,
+      then any pair <strong>\( (e,\dot{e}) \)</strong> in the set
+    </p>
+    <h4 class="mathJax">
+      \[ \mathcal{D} = \Big\{ (e,\dot{e}) : m\big(|\ddot{q}_d|_{\max} +
+      k_d|\dot{e}| + k_p|e|\big) \leq &bsol;tau_{\max} \Big\} \]
+    </h4>
+    <p>
+      guarantees that saturation is inactive. This is a diamond-shaped region in
+      the
+      <strong>\( (e,\dot{e}) \)</strong> plane. Inside
+      <strong>\( \mathcal{D} \)</strong>, the closed-loop dynamics coincide with
+      the ideal linear system, and the exponential stability proven by linear
+      analysis holds.
+    </p>
+
+    <p>
+      <strong>Problem 3 (Discrete Rate Limiter Design):</strong>
+      A joint torque command should not change by more than
+      <strong>\( 150 \,\text{Nm/s} \)</strong>. The controller sampling time is
+      <strong>\( T_s = 2 \,\text{ms} \)</strong>. What are appropriate bounds
+      <strong>\( \Delta &bsol;tau_{\min}, \Delta &bsol;tau_{\max} \)</strong>
+      for the per-step torque increment used in a discrete rate limiter? If the
+      ideal command jumps from 0 to 50 Nm in one step, how many samples are
+      required for the rate-limited command to reach 50 Nm?
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      The per-step rate bounds are
+    </p>
+    <h4 class="mathJax">
+      \[ \Delta &bsol;tau_{\max} = 150 \,\text{Nm/s} \cdot T_s = 150 \cdot 0.002
+      = 0.3 \,\text{Nm}, \quad \Delta &bsol;tau_{\min} = -0.3 \,\text{Nm}. \]
+    </h4>
+    <p>
+      With these bounds, starting from <strong>\( &bsol;tau[0] = 0 \)</strong>,
+      the command evolves as <strong>\( &bsol;tau[k] = 0.3k \)</strong> until it
+      reaches 50 Nm. The number of samples needed is
+    </p>
+    <h4 class="mathJax">
+      \[ k = \left\lceil \frac{50}{0.3} \right\rceil = \left\lceil
+      166.\overline{6} \right\rceil = 167, \]
+    </h4>
+    <p>
+      corresponding to
+      <strong>\( 167 \times 0.002 \approx 0.334 \,\text{s} \)</strong>.
+    </p>
+
+    <p>
+      <strong>Problem 4 (Filter Pole and Noise Amplification):</strong>
+      Consider the dirty derivative transfer function
+      <strong
+        >\( H(z) = \frac{(1-\alpha)(1 - z^{-1})}{1 - \alpha z^{-1}} \)</strong
+      >. Show that <strong>\( H(1) = 0 \)</strong> (zero steady-state gain for
+      constant inputs) and compute <strong>\( |H(-1)| \)</strong> in terms of
+      <strong>\( \alpha \)</strong>. Interpret this result in terms of
+      high-frequency noise amplification.
+    </p>
+    <p>
+      <strong>Solution:</strong>
+      Evaluating at <strong>\( z = 1 \)</strong>,
+    </p>
+    <h4 class="mathJax">
+      \[ H(1) = \frac{(1-\alpha)(1 - 1)}{1 - \alpha \cdot 1} = 0, \]
+    </h4>
+    <p>
+      so constant signals are rejected, as desired for a derivative. At the
+      Nyquist frequency,
+      <strong>\( z = -1 \)</strong>, we have
+    </p>
+    <h4 class="mathJax">
+      \[ H(-1) = \frac{(1-\alpha)(1 - (-1)^{-1})}{1 - \alpha (-1)^{-1}} =
+      \frac{(1-\alpha)(1 + 1)}{1 + \alpha} = \frac{2(1-\alpha)}{1 + \alpha}. \]
+    </h4>
+    <p>
+      Thus <strong>\( |H(-1)| = \frac{2(1-\alpha)}{1 + \alpha} \)</strong>. As
+      <strong>\( \alpha \to 1 \)</strong>, this gain tends to zero (strong
+      attenuation of high-frequency components), while for smaller
+      <strong>\( \alpha \)</strong> the gain approaches two, meaning more
+      amplification of high-frequency noise.
+    </p>
+
+    <p>
+      <strong>Problem 5 (Conceptual Design Flow):</strong>
+      Sketch the design steps for choosing filter parameters and saturation /
+      rate limits for a given robot, assuming the model-based controller gains
+      are already designed.
+    </p>
+    <p><strong>Solution (design flow):</strong> A reasonable sequence is</p>
+    <div class="diagram-wrapper">
+      <pre class="mermaid">
+flowchart TD
+  PSTART["Specify torque and speed capabilities"] --> F1["Choose actuator torque bounds"]
+  F1 --> F2["Choose rate limits based on thermal and mechanical limits"]
+  F2 --> F3["Choose filter cut-offs from noise spectrum and phase margin"]
+  F3 --> F4["Simulate closed-loop with realistic trajectories"]
+  F4 --> F5["Adjust bounds and filters to trade off tracking vs safety"]
+      </pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        This lesson translated ideal computed-torque and feedback-linearizing
+        controllers into realizable digital implementations. We modeled actuator
+        saturation and rate limits mathematically, derived discrete-time
+        filtering schemes for joint measurements, and examined their impact on
+        closed-loop stability and performance. We then implemented a complete
+        controller loop in Python, C++, Java, MATLAB/Simulink, and Wolfram
+        Mathematica, tying each to common robotics libraries. These
+        implementation details are essential for bridging theoretical nonlinear
+        control with actual robot hardware, and they set the stage for
+        robustness and adaptive strategies in later chapters.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Slotine, J.-J. E., &amp; Li, W. (1991).
+        <em>Applied Nonlinear Control</em>. Prentice Hall.
+      </li>
+      <li>
+        Spong, M. W., Hutchinson, S., &amp; Vidyasagar, M. (2006).
+        <em>Robot Modeling and Control</em>. Wiley.
+      </li>
+      <li>
+        Scherer, C., &amp; Weiland, S. (2000). Linear matrix inequalities in
+        control.
+        <em>Lecture Notes</em>, Dutch Institute of Systems and Control.
+      </li>
+      <li>
+        Tarbouriech, S., Garcia, G., da Silva Jr., J. M., &amp; Queinnec, I.
+        (2011).
+        <em
+          >Stability and Stabilization of Linear Systems with Saturating
+          Actuators</em
+        >. Springer.
+      </li>
+      <li>
+        Teel, A. R. (1992). Global stabilization and restricted tracking for
+        multiple integrators with bounded controls.
+        <em>Systems &amp; Control Letters</em>, 18(3), 165–171.
+      </li>
+      <li>
+        Khalil, H. K. (2002).
+        <em>Nonlinear Systems</em> (3rd ed.). Prentice Hall.
+      </li>
+      <li>
+        Ortega, R., Spong, M. W., Gómez-Estern, F., &amp; Blankenstein, G.
+        (2002). Stabilization of a class of underactuated mechanical systems via
+        interconnection and damping assignment.
+        <em>IEEE Transactions on Automatic Control</em>, 47(8), 1218–1233.
+      </li>
+      <li>
+        Sontag, E. D. (1989). Smooth stabilization implies coprime
+        factorization.
+        <em>IEEE Transactions on Automatic Control</em>, 34(4), 435–443.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Navigation Buttons -->
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter3/Lesson3.html">
+          Lesson 3: Stability &amp; Robustness Properties
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter3/Lesson5.html">
+          Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="active-lesson" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

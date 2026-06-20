@@ -1,0 +1,1997 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 11: SLAM I — Filter-Based SLAM - Lesson 4: Data Association Challenges | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 11: SLAM I — Filter-Based SLAM</h1>
+    <h3><strong>Lesson 4: Data Association Challenges</strong></h3>
+    <p>
+      Filter-based SLAM (e.g., EKF-SLAM and FastSLAM) repeatedly fuses a stream
+      of noisy observations into a single, growing state estimate. The
+      <em>core difficulty</em> is that the filter update requires knowing which
+      landmark (if any) generated each observation. This lesson formalizes data
+      association as a statistical decision problem, derives innovation-based
+      gating from first principles, and studies why association becomes brittle
+      in realistic mobile environments (aliasing, clutter, missed detections,
+      and correlated uncertainty in SLAM).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview: Why Data Association Dominates SLAM Failure</h2>
+    <div class="down-content">
+      <p>
+        In EKF-SLAM, the state mean stacks robot pose and landmark states:
+        <strong
+          >\( \boldsymbol{\mu}_k = [x_k, y_k, \theta_k, m_{1x}, m_{1y}, \dots,
+          m_{Nx}, m_{Ny}]^\top \)</strong
+        >, with covariance <strong>\( \mathbf{P}_k \)</strong>. A sensor
+        produces a set of measurements at time <strong>\( k \)</strong>, for
+        example range–bearing returns
+        <strong>\( \mathbf{z}_k^i \in \mathbb{R}^2 \)</strong>.
+      </p>
+      <p>
+        The filter update needs a <em>correspondence variable</em>
+        <strong>\( c_k^i \)</strong> that identifies which mapped landmark
+        generated measurement <strong>\( i \)</strong>. If
+        <strong>\( c_k^i \)</strong> is wrong, the update injects a systematic
+        error that can rapidly make <em>both</em> the robot and map estimates
+        inconsistent.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Predicted belief: mu_{k|k-1}, P_{k|k-1}"] --> B["Incoming measurements: z_k^1..z_k^M"]
+  B --> C["For each z_k^i: predict zhat^j for all landmarks j"]
+  C --> D["Compute innovation nu_ij and S_ij"]
+  D --> E["Gate: accept pairs with d2_ij = nu_ij^T * inv(S_ij) * nu_ij <= gamma"]
+  E --> F["Decide association: NN / global assignment / JCBB"]
+  F --> G["Update filter for \nassociated measurements"]
+  F --> H["If no match: new landmark init \nor reject as outlier"]
+  G --> I["mu_k, P_k (posterior)"]
+  H --> I
+        </pre>
+      </div>
+
+      <p>
+        The rest of this lesson answers three questions: (i) how to derive the
+        gate <strong>\( d^2 \)</strong> and its threshold statistically, (ii)
+        why independent “nearest-neighbor” decisions fail for multiple
+        measurements, and (iii) what structural properties of SLAM make
+        association harder than in pure localization.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Measurement Model and Innovation Statistics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Measurement Model and Innovation-Based Gating</h2>
+    <div class="down-content">
+      <p>
+        Assume a (possibly nonlinear) landmark sensor model with additive
+        Gaussian noise:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{z}_k^i = h(\mathbf{x}_k, \mathbf{m}_{c_k^i}) +
+        \mathbf{v}_k^i, \quad \mathbf{v}_k^i \sim \mathcal{N}(\mathbf{0},
+        \mathbf{R}) \]
+      </h4>
+      <p>
+        Given a candidate landmark <strong>\( j \)</strong>, define the
+        predicted measurement
+        <strong
+          >\( \hat{\mathbf{z} }_k^j = h(\hat{\mathbf{x} }_{k|k-1},
+          \hat{\mathbf{m} }_j) \)</strong
+        >
+        and innovation (residual)
+        <strong
+          >\( \boldsymbol{\nu}_k^{i,j} = \mathbf{z}_k^i - \hat{\mathbf{z} }_k^j
+          \)</strong
+        >. Under first-order linearization, the innovation covariance is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{S}_k^{i,j} =
+        \mathbf{H}_k^{i,j}\,\mathbf{P}_{k|k-1}\,(\mathbf{H}_k^{i,j})^\top +
+        \mathbf{R}, \quad \mathbf{H}_k^{i,j} = \left.\frac{\partial h}{\partial
+        \boldsymbol{\mu} }\right|_{\boldsymbol{\mu}_{k|k-1},\,j} \]
+      </h4>
+      <p>
+        The <em>Normalized Innovation Squared</em> (NIS) / Mahalanobis distance
+        is <strong>\( d_{i,j}^2 \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ d_{i,j}^2 = (\boldsymbol{\nu}_k^{i,j})^\top
+        (\mathbf{S}_k^{i,j})^{-1}\,\boldsymbol{\nu}_k^{i,j}. \]
+      </h4>
+
+      <p>
+        <strong>Proposition (Chi-square gating).</strong>
+        If the candidate association is correct, linearization is accurate, and
+        the filter covariance is consistent, then
+        <strong>\( d_{i,j}^2 \sim \chi^2_m \)</strong> where
+        <strong>\( m = \dim(\mathbf{z}) \)</strong> (e.g.,
+        <strong>\( m=2 \)</strong> for range–bearing).
+      </p>
+      <p>
+        <strong>Proof sketch.</strong> Under the above assumptions, the
+        innovation is Gaussian
+        <strong
+          >\( \boldsymbol{\nu} \sim \mathcal{N}(\mathbf{0}, \mathbf{S})
+          \)</strong
+        >. Let
+        <strong>\( \mathbf{w} = \mathbf{S}^{-1/2}\boldsymbol{\nu} \)</strong>.
+        Then
+        <strong
+          >\( \mathbf{w} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}_m) \)</strong
+        >
+        and
+        <strong
+          >\( d^2 = \boldsymbol{\nu}^\top \mathbf{S}^{-1} \boldsymbol{\nu} =
+          \mathbf{w}^\top \mathbf{w} = \sum_{\ell=1}^m w_\ell^2 \)</strong
+        >, which is chi-square with <strong>\( m \)</strong> degrees of freedom.
+      </p>
+
+      <p>
+        Therefore, a statistical gate at confidence level
+        <strong>\( \alpha \)</strong> is
+        <strong>\( d_{i,j}^2 \le \gamma_\alpha \)</strong> with
+        <strong>\( \gamma_\alpha = F_{\chi^2_m}^{-1}(\alpha) \)</strong>. For
+        range–bearing, the common choice
+        <strong>\( \alpha=0.99 \)</strong> yields a relatively permissive gate.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Decision Rules and SLAM Coupling -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      3. Association as Statistical Decision: Likelihood, MAP, and Correlated
+      Uncertainty
+    </h2>
+    <div class="down-content">
+      <p>
+        After gating, one must still <em>choose</em> among remaining candidates.
+        The (approximate) likelihood that landmark
+        <strong>\( j \)</strong> generated measurement
+        <strong>\( i \)</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{L}(j \mid \mathbf{z}_k^i) \propto
+        \frac{\exp\!\left(-\tfrac{1}{2}
+        d_{i,j}^2\right)}{\sqrt{\det(\mathbf{S}_k^{i,j})} }. \]
+      </h4>
+      <p>
+        If we attach a prior probability <strong>\( \pi_j \)</strong> for
+        observing landmark <strong>\( j \)</strong>
+        (visibility, field-of-view, persistence), a MAP rule selects
+        <strong
+          >\( j^\star = \arg\max_j \; \pi_j\,\mathcal{L}(j \mid \mathbf{z}_k^i)
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>SLAM-specific coupling.</strong> Unlike localization on a fixed
+        map, the covariance <strong>\( \mathbf{P} \)</strong> in SLAM couples
+        robot pose and landmarks, so innovations for different candidates are
+        <em>not</em> independent. Intuitively, if the pose estimate shifts, the
+        predicted bearings/ranges to <em>all</em> landmarks shift together. This
+        coupling is a key reason why greedy, per-measurement choices can be
+        wrong even when each individual match looks plausible.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Multiple Measurements and Joint Compatibility -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Multiple Measurements: Assignment and Joint Compatibility (JCBB)</h2>
+    <div class="down-content">
+      <p>
+        With <strong>\( M \)</strong> measurements in a scan, deciding
+        correspondences independently can yield conflicts (two measurements
+        assigned to one landmark) and can ignore the fact that the
+        <em>set</em> of assignments must be jointly consistent. For an
+        association set
+        <strong>\( \mathcal{A} = \{(i_1,j_1),\dots,(i_K,j_K)\} \)</strong>,
+        define a stacked innovation:
+      </p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\nu}_\mathcal{A} = \begin{bmatrix}
+        \boldsymbol{\nu}_k^{i_1,j_1} \\ \vdots \\ \boldsymbol{\nu}_k^{i_K,j_K}
+        \end{bmatrix}, \quad \mathbf{S}_\mathcal{A} =
+        \mathbf{H}_\mathcal{A}\mathbf{P}\mathbf{H}_\mathcal{A}^\top +
+        \mathbf{R}_\mathcal{A} \]
+      </h4>
+      <p>The <em>joint</em> NIS test is:</p>
+      <h4 class="mathJax">
+        \[ d_\mathcal{A}^2 = \boldsymbol{\nu}_\mathcal{A}^\top
+        \mathbf{S}_\mathcal{A}^{-1} \boldsymbol{\nu}_\mathcal{A} \;\le\;
+        F_{\chi^2_{mK} }^{-1}(\alpha), \quad m=\dim(\mathbf{z}). \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start with i=1"] --> B["Branch: choose landmark j from gated candidates"]
+  B --> T["Check joint test for current pairs"]
+  T -->|"pass"| NXT["i = i + 1 (extend partial assignment)"]
+  T -->|"fail"| PR["Prune branch"]
+  NXT --> B
+  B --> U["Alternative branch: mark measurement i unassigned"]
+  U --> T2["Joint test (unchanged)"]
+  T2 -->|"pass"| NXT
+  T2 -->|"fail"| PR
+  NXT -->|"i > M"| OUT["Return best set (max K)"]
+        </pre>
+      </div>
+
+      <p>
+        JCBB searches over assignments and prunes branches that fail joint
+        compatibility early. It is exponential in the worst case, but becomes
+        practical when individual gates remove most candidates.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Failure Modes and Mitigations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. What Makes Data Association Hard in Mobile Robotics</h2>
+    <div class="down-content">
+      <ul>
+        <li>
+          <strong>Perceptual aliasing:</strong> repeated structures (doors,
+          pillars, shelves) create ambiguous matches.
+        </li>
+        <li>
+          <strong>Clutter and spurious returns:</strong> dynamic obstacles
+          produce measurements with no corresponding landmark.
+        </li>
+        <li>
+          <strong>Missed detections / occlusions:</strong> correct landmarks
+          disappear temporarily; greedy rules can “steal” observations.
+        </li>
+        <li>
+          <strong>Linearization error:</strong> EKF linearization can
+          underestimate uncertainty, shrinking gates and causing false
+          rejections.
+        </li>
+        <li>
+          <strong>Correlation growth:</strong> pose–map correlations create
+          joint constraints not captured by independent matching.
+        </li>
+      </ul>
+      <p>
+        Mitigations: conservative gating early, delayed initialization (confirm
+        landmarks over multiple frames), explicit “null” hypothesis, and adding
+        discriminative descriptors (if available) to reduce aliasing.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python — NIS Gating, NN, and JCBB (from scratch)</h2>
+    <div class="down-content">
+      <pre><code class="language-python">
+# Chapter11_Lesson4.py
+"""
+AMR Course — Chapter 11 (SLAM I — Filter-Based SLAM)
+Lesson 4: Data Association Challenges
+
+Implements innovation-based data association for EKF-SLAM:
+  - Chi-square gating with Normalized Innovation Squared (NIS)
+  - Nearest-Neighbor (NN) association
+  - Joint Compatibility Branch-and-Bound (JCBB) for small measurement sets
+
+State mean:
+  mu = [x, y, theta, m1x, m1y, ..., mNx, mNy]^T
+Measurement:
+  z = [range, bearing]^T (bearing relative to robot heading)
+
+Dependencies: numpy (required). SciPy is NOT required.
+"""
+
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
+
+import numpy as np
+
+
+# ---------------------------
+# Numerics
+# ---------------------------
+def wrap_to_pi(a: float) -&gt; float:
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def erfinv_winitzki(x: float) -&gt; float:
+    x = min(0.999999, max(-0.999999, x))
+    a = 0.147
+    ln = math.log(1.0 - x * x)
+    t = 2.0 / (math.pi * a) + ln / 2.0
+    return math.copysign(math.sqrt(math.sqrt(t * t - ln / a) - t), x)
+
+
+def chi2inv_approx(p: float, dof: int) -&gt; float:
+    """
+    Chi-square inverse CDF via Wilson–Hilferty approximation.
+    Good enough for gating thresholds in demos.
+    """
+    z = math.sqrt(2.0) * erfinv_winitzki(2.0 * p - 1.0)  # Normal quantile approx
+    k = float(dof)
+    return k * (1.0 - 2.0 / (9.0 * k) + z * math.sqrt(2.0 / (9.0 * k))) ** 3
+
+
+# ---------------------------
+# EKF-SLAM container (mean + covariance)
+# ---------------------------
+@dataclass
+class EKFSLAMState:
+    mu: np.ndarray  # (3+2N,)
+    P: np.ndarray   # (3+2N, 3+2N)
+    N: int
+
+    @staticmethod
+    def demo(pose: np.ndarray, landmarks: np.ndarray, seed: int = 7) -&gt; "EKFSLAMState":
+        N = landmarks.shape[0]
+        mu = np.concatenate([pose, landmarks.reshape(-1)], axis=0)
+
+        dim = 3 + 2 * N
+        rng = np.random.RandomState(seed)
+        A = rng.randn(dim, dim)
+        P = A @ A.T
+
+        S = np.diag([0.2, 0.2, 0.05] + [0.5] * (2 * N))
+        P = S @ (P / np.max(np.diag(P))) @ S
+        return EKFSLAMState(mu=mu, P=P, N=N)
+
+
+# ---------------------------
+# Range-bearing model and Jacobian
+# ---------------------------
+def predict_z(pose: np.ndarray, lm: np.ndarray) -&gt; np.ndarray:
+    dx = lm[0] - pose[0]
+    dy = lm[1] - pose[1]
+    r = math.hypot(dx, dy)
+    b = wrap_to_pi(math.atan2(dy, dx) - pose[2])
+    return np.array([r, b], dtype=float)
+
+
+def jacobian_H(pose: np.ndarray, lm: np.ndarray, j: int, N: int) -&gt; np.ndarray:
+    dx = lm[0] - pose[0]
+    dy = lm[1] - pose[1]
+    q = dx * dx + dy * dy
+    r = math.sqrt(q)
+
+    H = np.zeros((2, 3 + 2 * N), dtype=float)
+
+    # wrt pose (x,y,theta)
+    H[0, 0] = -dx / r
+    H[0, 1] = -dy / r
+    H[1, 0] = dy / q
+    H[1, 1] = -dx / q
+    H[1, 2] = -1.0
+
+    # wrt landmark j (mx,my)
+    idx = 3 + 2 * j
+    H[0, idx + 0] = dx / r
+    H[0, idx + 1] = dy / r
+    H[1, idx + 0] = -dy / q
+    H[1, idx + 1] = dx / q
+    return H
+
+
+def innovation_and_S(st: EKFSLAMState, z: np.ndarray, j: int, R: np.ndarray) -&gt; Tuple[np.ndarray, np.ndarray]:
+    pose = st.mu[0:3]
+    lm = st.mu[3 + 2 * j: 3 + 2 * j + 2]
+    zhat = predict_z(pose, lm)
+
+    nu = z - zhat
+    nu[1] = wrap_to_pi(float(nu[1]))
+
+    H = jacobian_H(pose, lm, j, st.N)
+    S = H @ st.P @ H.T + R
+    return nu, S
+
+
+def nis(nu: np.ndarray, S: np.ndarray) -&gt; float:
+    return float(nu.T @ np.linalg.solve(S, nu))
+
+
+# ---------------------------
+# NN association (single measurement)
+# ---------------------------
+def associate_nn(st: EKFSLAMState, z: np.ndarray, R: np.ndarray, gate_prob: float = 0.99) -&gt; Optional[int]:
+    gamma = chi2inv_approx(gate_prob, 2)
+    best_j, best_d2 = None, float("inf")
+
+    for j in range(st.N):
+        nu, S = innovation_and_S(st, z, j, R)
+        d2 = nis(nu, S)
+        if d2 &lt;= gamma and d2 &lt; best_d2:
+            best_j, best_d2 = j, d2
+    return best_j
+
+
+# ---------------------------
+# JCBB (multiple measurements)
+# ---------------------------
+def joint_compatibility(st: EKFSLAMState,
+                        pairs: List[Tuple[int, int]],
+                        Z: List[np.ndarray],
+                        R: np.ndarray,
+                        gate_prob: float = 0.99) -&gt; bool:
+    k = len(pairs)
+    if k == 0:
+        return True
+
+    nus, Hs = [], []
+    for (i, j) in pairs:
+        pose = st.mu[0:3]
+        lm = st.mu[3 + 2 * j: 3 + 2 * j + 2]
+        zhat = predict_z(pose, lm)
+        nu = Z[i] - zhat
+        nu[1] = wrap_to_pi(float(nu[1]))
+        H = jacobian_H(pose, lm, j, st.N)
+        nus.append(nu)
+        Hs.append(H)
+
+    nu_stack = np.concatenate(nus, axis=0)
+    H_stack = np.vstack(Hs)
+    R_stack = np.kron(np.eye(k), R)
+    S = H_stack @ st.P @ H_stack.T + R_stack
+
+    d2 = float(nu_stack.T @ np.linalg.solve(S, nu_stack))
+    gamma = chi2inv_approx(gate_prob, 2 * k)
+    return d2 &lt;= gamma
+
+
+def jcbb(st: EKFSLAMState, Z: List[np.ndarray], R: np.ndarray, gate_prob: float = 0.99) -&gt; Dict[int, int]:
+    """
+    Returns meas_index -&gt; landmark_index for the *largest* jointly compatible set.
+    Complexity is exponential in worst case: keep M small (e.g., M&lt;=6).
+    """
+    M, N = len(Z), st.N
+    gamma2 = chi2inv_approx(gate_prob, 2)
+
+    candidates: List[List[int]] = []
+    for i in range(M):
+        js = []
+        for j in range(N):
+            nu, S = innovation_and_S(st, Z[i], j, R)
+            if nis(nu, S) &lt;= gamma2:
+                js.append(j)
+        candidates.append(js)
+
+    best: List[Tuple[int, int]] = []
+
+    def rec(i: int, used: set, pairs: List[Tuple[int, int]]) -&gt; None:
+        nonlocal best
+        if len(pairs) + (M - i) &lt; len(best):
+            return
+        if i == M:
+            if len(pairs) &gt; len(best):
+                best = pairs.copy()
+            return
+
+        for j in candidates[i]:
+            if j in used:
+                continue
+            new_pairs = pairs + [(i, j)]
+            if joint_compatibility(st, new_pairs, Z, R, gate_prob):
+                used.add(j)
+                rec(i + 1, used, new_pairs)
+                used.remove(j)
+
+        rec(i + 1, used, pairs)  # leave measurement i unassigned
+
+    rec(0, set(), [])
+    return {i: j for (i, j) in best}
+
+
+# ---------------------------
+# Demo
+# ---------------------------
+def main() -&gt; None:
+    np.set_printoptions(precision=3, suppress=True)
+
+    pose_true = np.array([2.0, 1.0, 0.4])
+    lms_true = np.array([[5.0, 2.0],
+                         [4.0, -1.5],
+                         [1.0, 4.0],
+                         [7.0, 5.0],
+                         [6.0, -2.0]], dtype=float)
+
+    pose_est = pose_true + np.array([0.1, -0.05, 0.03])
+    lms_est = lms_true + np.array([0.2, -0.1])
+
+    st = EKFSLAMState.demo(pose_est, lms_est)
+
+    sigma_r = 0.15
+    sigma_b = math.radians(2.0)
+    R = np.diag([sigma_r**2, sigma_b**2])
+
+    # Three noisy measurements from landmarks 0,2,4
+    rng = np.random.RandomState(1)
+    ids = [0, 2, 4]
+    Z = []
+    for idx in ids:
+        z = predict_z(pose_true, lms_true[idx]) + rng.multivariate_normal(np.zeros(2), R)
+        z[1] = wrap_to_pi(float(z[1]))
+        Z.append(z)
+
+    print("Measurements:")
+    for i, z in enumerate(Z):
+        print(f"  z[{i}] = {z}")
+
+    print("\nNN associations:")
+    for i, z in enumerate(Z):
+        print(f"  meas {i} -&gt; {associate_nn(st, z, R, 0.99)}")
+
+    print("\nJCBB associations:")
+    print(" ", jcbb(st, Z, R, 0.99))
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ — NIS Gating and NN (Eigen-based)</h2>
+    <div class="down-content">
+      <pre><code class="language-cpp">
+// Chapter11_Lesson4.cpp
+// Chapter 11 (SLAM I) — Lesson 4: Data Association Challenges
+// Minimal C++ demo: chi-square gating + nearest-neighbor association (range-bearing).
+//
+// Dependency: Eigen (header-only)
+
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+#include &lt;limits&gt;
+#include &lt;Eigen/Dense&gt;
+
+static double wrapToPi(double a) {
+    a = std::fmod(a + M_PI, 2.0 * M_PI);
+    if (a &lt; 0) a += 2.0 * M_PI;
+    return a - M_PI;
+}
+
+// Wilson–Hilferty chi2 inverse (approx) for gating.
+static double erfinvApprox(double x) {
+    x = std::max(-0.999999, std::min(0.999999, x));
+    const double a = 0.147;
+    const double ln = std::log(1.0 - x * x);
+    const double t  = 2.0 / (M_PI * a) + ln / 2.0;
+    const double s  = std::sqrt(std::sqrt(t * t - ln / a) - t);
+    return (x &gt;= 0 ? s : -s);
+}
+static double chi2invApprox(double p, int dof) {
+    const double z = std::sqrt(2.0) * erfinvApprox(2.0 * p - 1.0);
+    const double k = static_cast&lt;double&gt;(dof);
+    return k * std::pow(1.0 - 2.0 / (9.0 * k) + z * std::sqrt(2.0 / (9.0 * k)), 3.0);
+}
+
+static Eigen::Vector2d predictZ(const Eigen::Vector3d&amp; pose, const Eigen::Vector2d&amp; lm) {
+    const double dx = lm(0) - pose(0);
+    const double dy = lm(1) - pose(1);
+    const double r  = std::hypot(dx, dy);
+    const double b  = wrapToPi(std::atan2(dy, dx) - pose(2));
+    return {r, b};
+}
+
+static Eigen::MatrixXd jacobianH(const Eigen::Vector3d&amp; pose, const Eigen::Vector2d&amp; lm, int j, int N) {
+    const double dx = lm(0) - pose(0);
+    const double dy = lm(1) - pose(1);
+    const double q  = dx*dx + dy*dy;
+    const double r  = std::sqrt(q);
+
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(2, 3 + 2*N);
+
+    H(0,0) = -dx/r;  H(0,1) = -dy/r;
+    H(1,0) =  dy/q;  H(1,1) = -dx/q;  H(1,2) = -1.0;
+
+    const int idx = 3 + 2*j;
+    H(0,idx+0) = dx/r;   H(0,idx+1) = dy/r;
+    H(1,idx+0) = -dy/q;  H(1,idx+1) = dx/q;
+    return H;
+}
+
+static double nis(const Eigen::Vector2d&amp; nu, const Eigen::Matrix2d&amp; S) {
+    return nu.transpose() * S.ldlt().solve(nu);
+}
+
+static int associateNN(const Eigen::VectorXd&amp; mu,
+                       const Eigen::MatrixXd&amp; P,
+                       int N,
+                       const Eigen::Vector2d&amp; z,
+                       const Eigen::Matrix2d&amp; R,
+                       double gateProb = 0.99) {
+    const double gamma = chi2invApprox(gateProb, 2);
+    int bestJ = -1;
+    double bestD2 = std::numeric_limits&lt;double&gt;::infinity();
+
+    Eigen::Vector3d pose = mu.segment&lt;3&gt;(0);
+
+    for (int j = 0; j &lt; N; ++j) {
+        Eigen::Vector2d lm = mu.segment&lt;2&gt;(3 + 2*j);
+        Eigen::Vector2d zhat = predictZ(pose, lm);
+
+        Eigen::Vector2d nu = z - zhat;
+        nu(1) = wrapToPi(nu(1));
+
+        Eigen::MatrixXd H = jacobianH(pose, lm, j, N);
+        Eigen::Matrix2d S = (H * P * H.transpose()).eval() + R;
+
+        const double d2 = nis(nu, S);
+        if (d2 &lt;= gamma &amp;&amp; d2 &lt; bestD2) { bestD2 = d2; bestJ = j; }
+    }
+    return bestJ; // -1: no association
+}
+
+int main() {
+    Eigen::Vector3d poseTrue(2.0, 1.0, 0.4);
+    std::vector&lt;Eigen::Vector2d&gt; lms = { {5,2},{4,-1.5},{1,4},{7,5},{6,-2} };
+
+    Eigen::Vector3d poseEst = poseTrue + Eigen::Vector3d(0.1,-0.05,0.03);
+    std::vector&lt;Eigen::Vector2d&gt; lmsEst;
+    for (auto&amp; p : lms) lmsEst.push_back(p + Eigen::Vector2d(0.2,-0.1));
+
+    const int N = (int)lmsEst.size();
+    Eigen::VectorXd mu(3 + 2*N);
+    mu.segment&lt;3&gt;(0) = poseEst;
+    for (int j=0;j&lt;N;++j) mu.segment&lt;2&gt;(3+2*j) = lmsEst[j];
+
+    // demo SPD covariance
+    int dim = 3 + 2*N;
+    Eigen::MatrixXd A = Eigen::MatrixXd::Random(dim, dim);
+    Eigen::MatrixXd P = A*A.transpose();
+    P /= P.diagonal().maxCoeff();
+    Eigen::VectorXd s(dim); s &lt;&lt; 0.2,0.2,0.05, Eigen::VectorXd::Constant(2*N,0.5);
+    P = s.asDiagonal()*P*s.asDiagonal();
+
+    double sigmaR = 0.15, sigmaB = 2.0*M_PI/180.0;
+    Eigen::Matrix2d R = Eigen::Matrix2d::Zero();
+    R(0,0) = sigmaR*sigmaR; R(1,1) = sigmaB*sigmaB;
+
+    std::vector&lt;Eigen::Vector2d&gt; Z = { predictZ(poseTrue, lms[0]),
+                                       predictZ(poseTrue, lms[2]),
+                                       predictZ(poseTrue, lms[4]) };
+
+    for (int i=0;i&lt;(int)Z.size();++i) {
+        int j = associateNN(mu, P, N, Z[i], R, 0.99);
+        std::cout &lt;&lt; "meas " &lt;&lt; i &lt;&lt; " -&gt; landmark " &lt;&lt; j &lt;&lt; "\n";
+    }
+    return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java — NIS Gating and NN (EJML-based)</h2>
+    <div class="down-content">
+      <pre><code class="language-java">
+// Chapter11_Lesson4.java
+// Chapter 11 (SLAM I) — Lesson 4: Data Association Challenges
+// Minimal Java demo: chi-square gating + nearest-neighbor association (range-bearing).
+//
+// Dependency: EJML (ejml-simple) https://ejml.org/
+
+import org.ejml.simple.SimpleMatrix;
+import java.util.*;
+
+public class Chapter11_Lesson4 {
+
+    static double wrapToPi(double a) {
+        double twoPi = 2.0 * Math.PI;
+        a = (a + Math.PI) % twoPi;
+        if (a &lt; 0) a += twoPi;
+        return a - Math.PI;
+    }
+
+    // Winitzki erfinv + Wilson–Hilferty chi2 inverse (approx).
+    static double erfinvApprox(double x) {
+        x = Math.max(-0.999999, Math.min(0.999999, x));
+        double a = 0.147;
+        double ln = Math.log(1.0 - x * x);
+        double t  = 2.0 / (Math.PI * a) + ln / 2.0;
+        double s  = Math.sqrt(Math.sqrt(t * t - ln / a) - t);
+        return (x &gt;= 0 ? s : -s);
+    }
+    static double chi2invApprox(double p, int dof) {
+        double z = Math.sqrt(2.0) * erfinvApprox(2.0 * p - 1.0);
+        double k = (double)dof;
+        return k * Math.pow(1.0 - 2.0/(9.0*k) + z*Math.sqrt(2.0/(9.0*k)), 3.0);
+    }
+
+    static double[] predictZ(double[] pose, double[] lm) {
+        double dx = lm[0] - pose[0];
+        double dy = lm[1] - pose[1];
+        double r  = Math.hypot(dx, dy);
+        double b  = wrapToPi(Math.atan2(dy, dx) - pose[2]);
+        return new double[]{r, b};
+    }
+
+    static SimpleMatrix jacobianH(double[] pose, double[] lm, int j, int N) {
+        double dx = lm[0] - pose[0];
+        double dy = lm[1] - pose[1];
+        double q  = dx*dx + dy*dy;
+        double r  = Math.sqrt(q);
+
+        int dim = 3 + 2*N;
+        SimpleMatrix H = new SimpleMatrix(2, dim);
+
+        H.set(0,0, -dx/r);  H.set(0,1, -dy/r);
+        H.set(1,0,  dy/q);  H.set(1,1, -dx/q);  H.set(1,2, -1.0);
+
+        int idx = 3 + 2*j;
+        H.set(0, idx+0, dx/r);   H.set(0, idx+1, dy/r);
+        H.set(1, idx+0, -dy/q);  H.set(1, idx+1, dx/q);
+        return H;
+    }
+
+    static double nis(SimpleMatrix nu, SimpleMatrix S) {
+        return nu.transpose().mult(S.invert()).mult(nu).get(0,0);
+    }
+
+    static int associateNN(SimpleMatrix mu, SimpleMatrix P, int N, double[] z, SimpleMatrix R, double gateProb) {
+        double gamma = chi2invApprox(gateProb, 2);
+        int bestJ = -1;
+        double bestD2 = Double.POSITIVE_INFINITY;
+
+        double[] pose = new double[]{mu.get(0,0), mu.get(1,0), mu.get(2,0)};
+
+        for (int j=0;j&lt;N;j++) {
+            double[] lm = new double[]{mu.get(3+2*j,0), mu.get(3+2*j+1,0)};
+            double[] zhat = predictZ(pose, lm);
+
+            SimpleMatrix nu = new SimpleMatrix(2,1);
+            nu.set(0,0, z[0] - zhat[0]);
+            nu.set(1,0, wrapToPi(z[1] - zhat[1]));
+
+            SimpleMatrix H = jacobianH(pose, lm, j, N);
+            SimpleMatrix S = H.mult(P).mult(H.transpose()).plus(R);
+
+            double d2 = nis(nu, S);
+            if (d2 &lt;= gamma &amp;&amp; d2 &lt; bestD2) { bestD2 = d2; bestJ = j; }
+        }
+        return bestJ;
+    }
+
+    public static void main(String[] args) {
+        double[] poseTrue = {2.0, 1.0, 0.4};
+        double[][] lms = { {5,2},{4,-1.5},{1,4},{7,5},{6,-2} };
+
+        double[] poseEst = {poseTrue[0]+0.1, poseTrue[1]-0.05, poseTrue[2]+0.03};
+
+        int N = lms.length;
+        SimpleMatrix mu = new SimpleMatrix(3 + 2*N, 1);
+        mu.set(0,0, poseEst[0]); mu.set(1,0, poseEst[1]); mu.set(2,0, poseEst[2]);
+        for (int j=0;j&lt;N;j++) {
+            mu.set(3+2*j,0, lms[j][0]+0.2);
+            mu.set(3+2*j+1,0, lms[j][1]-0.1);
+        }
+
+        // demo SPD covariance
+        int dim = 3 + 2*N;
+        SimpleMatrix A = SimpleMatrix.random_DDRM(dim, dim, -1, 1, new Random(7));
+        SimpleMatrix P = A.mult(A.transpose());
+        double maxDiag = 0;
+        for (int i=0;i&lt;dim;i++) maxDiag = Math.max(maxDiag, P.get(i,i));
+        P = P.divide(maxDiag);
+        double[] s = new double[dim]; s[0]=0.2; s[1]=0.2; s[2]=0.05; for(int i=3;i&lt;dim;i++) s[i]=0.5;
+        SimpleMatrix Sscale = SimpleMatrix.diag(s);
+        P = Sscale.mult(P).mult(Sscale);
+
+        double sigmaR = 0.15, sigmaB = Math.toRadians(2.0);
+        SimpleMatrix R = new SimpleMatrix(2,2);
+        R.set(0,0, sigmaR*sigmaR); R.set(1,1, sigmaB*sigmaB);
+
+        double[][] Z = { predictZ(poseTrue, lms[0]),
+                         predictZ(poseTrue, lms[2]),
+                         predictZ(poseTrue, lms[4]) };
+
+        for (int i=0;i&lt;Z.length;i++) {
+            int j = associateNN(mu, P, N, Z[i], R, 0.99);
+            System.out.println("meas " + i + " -&gt; landmark " + j);
+        }
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB/Simulink — NN Gating and a Toy Model</h2>
+    <div class="down-content">
+      <pre><code class="language-matlab">
+% Chapter11_Lesson4.m
+% Chapter 11 (SLAM I) — Lesson 4: Data Association Challenges
+% MATLAB demo: chi-square gating (NIS) + NN association + programmatic Simulink model.
+
+function Chapter11_Lesson4()
+clc;
+
+poseTrue = [2.0; 1.0; 0.4];
+lmsTrue  = [5 2; 4 -1.5; 1 4; 7 5; 6 -2];
+
+poseEst  = poseTrue + [0.1; -0.05; 0.03];
+lmsEst   = lmsTrue + repmat([0.2 -0.1], size(lmsTrue,1), 1);
+N = size(lmsEst,1);
+
+% demo SPD covariance
+dim = 3 + 2*N;
+rng(7); A = randn(dim, dim);
+P = A*A'; P = P ./ max(diag(P));
+S = diag([0.2 0.2 0.05 repmat(0.5, 1, 2*N)]);
+P = S*P*S;
+
+sigma_r = 0.15; sigma_b = deg2rad(2.0);
+R = diag([sigma_r^2, sigma_b^2]);
+
+% generate 3 noisy measurements from landmarks 1,3,5
+ids = [1 3 5]; rng(1);
+Z = zeros(2, numel(ids));
+for i=1:numel(ids)
+    z = predictZ(poseTrue, lmsTrue(ids(i),:)');
+    z = z + mvnrnd([0 0], R)'; %#ok&lt;MVNRND&gt;
+    z(2) = wrapToPi(z(2));
+    Z(:,i) = z;
+end
+
+disp('Measurements [range, bearing]:'), disp(Z')
+
+disp('NN association with gating:')
+for i=1:size(Z,2)
+    j = associateNN(poseEst, lmsEst, P, Z(:,i), R, 0.99);
+    fprintf('  meas %d -&gt; landmark %d\n', i, j);
+end
+
+buildSimulinkNN('Chapter11_Lesson4_Simulink', N);
+disp('Created Simulink model: Chapter11_Lesson4_Simulink.slx')
+end
+
+
+% ---------- model ----------
+function z = predictZ(pose, lm)
+dx = lm(1) - pose(1); dy = lm(2) - pose(2);
+z = [hypot(dx,dy); wrapToPi(atan2(dy,dx) - pose(3))];
+end
+
+function a = wrapToPi(a)
+a = mod(a + pi, 2*pi) - pi;
+end
+
+function H = jacobianH(pose, lm, j, N)
+dx = lm(1) - pose(1); dy = lm(2) - pose(2);
+q = dx^2 + dy^2; r = sqrt(q);
+H = zeros(2, 3 + 2*N);
+H(1,1)=-dx/r; H(1,2)=-dy/r;
+H(2,1)= dy/q; H(2,2)=-dx/q; H(2,3)=-1;
+idx = 3 + 2*(j-1) + 1;
+H(1,idx)=dx/r; H(1,idx+1)=dy/r;
+H(2,idx)=-dy/q; H(2,idx+1)=dx/q;
+end
+
+function [nu,S] = innovAndS(pose, lms, P, z, j, R)
+N = size(lms,1);
+lm = lms(j,:)';
+zhat = predictZ(pose, lm);
+nu = z - zhat; nu(2)=wrapToPi(nu(2));
+H = jacobianH(pose, lm, j, N);
+S = H*P*H' + R;
+end
+
+function gamma = chi2invApprox(p, dof)
+% toolbox-free chi2 inverse (Wilson–Hilferty)
+z = sqrt(2)*erfinv(2*p - 1);
+k = dof;
+gamma = k*(1 - 2/(9*k) + z*sqrt(2/(9*k)))^3;
+end
+
+function bestJ = associateNN(pose, lms, P, z, R, gateProb)
+N = size(lms,1);
+gamma = chi2invApprox(gateProb, 2);
+bestJ = 0; bestD2 = inf;
+for j=1:N
+    [nu,S] = innovAndS(pose, lms, P, z, j, R);
+    d2 = nu'*(S\nu);
+    if d2 &lt;= gamma &amp;&amp; d2 &lt; bestD2
+        bestD2 = d2; bestJ = j;
+    end
+end
+end
+
+
+% ---------- Simulink ----------
+function buildSimulinkNN(modelName, N)
+if bdIsLoaded(modelName), close_system(modelName, 0); end
+if exist([modelName '.slx'], 'file') == 2, delete([modelName '.slx']); end
+
+new_system(modelName); open_system(modelName);
+
+add_block('simulink/Sources/Constant', [modelName '/z'], 'Position',[30 50 120 90], 'Value','[1;0]');
+add_block('simulink/Sources/Constant', [modelName '/zhat'], 'Position',[30 120 120 160], 'Value',sprintf('zeros(%d,1)',2*N));
+add_block('simulink/Sources/Constant', [modelName '/Sdiag'], 'Position',[30 190 120 230], 'Value',sprintf('ones(%d,1)',2*N));
+
+add_block('simulink/User-Defined Functions/MATLAB Function', [modelName '/NN_Gate'], 'Position',[220 80 380 200]);
+add_block('simulink/Sinks/Display', [modelName '/Display'], 'Position',[430 120 500 160]);
+
+code = sprintf([ ...
+'function idx = f(z, zhat, Sdiag)\n' ...
+'N = length(zhat)/2;\n' ...
+'gamma = chi2invApprox(0.99, 2);\n' ...
+'best = 1e9; idx = 0;\n' ...
+'for j=1:N\n' ...
+'  nu = z - zhat(2*j-1:2*j);\n' ...
+'  nu(2) = wrapToPi(nu(2));\n' ...
+'  S = diag(Sdiag(2*j-1:2*j));\n' ...
+'  d2 = nu''*(S\\nu);\n' ...
+'  if d2 &lt;= gamma &amp;&amp; d2 &lt; best\n' ...
+'    best = d2; idx = j;\n' ...
+'  end\n' ...
+'end\n' ...
+'end\n\n' ...
+'function a = wrapToPi(a)\n' ...
+'a = mod(a + pi, 2*pi) - pi;\n' ...
+'end\n\n' ...
+'function g = chi2invApprox(p, dof)\n' ...
+'z = sqrt(2)*erfinv(2*p - 1);\n' ...
+'k = dof;\n' ...
+'g = k*(1 - 2/(9*k) + z*sqrt(2/(9*k)))^3;\n' ...
+'end\n' ...
+]);
+
+set_param([modelName '/NN_Gate'], 'Script', code);
+
+add_line(modelName, 'z/1', 'NN_Gate/1');
+add_line(modelName, 'zhat/1', 'NN_Gate/2');
+add_line(modelName, 'Sdiag/1', 'NN_Gate/3');
+add_line(modelName, 'NN_Gate/1', 'Display/1');
+
+save_system(modelName);
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica — NIS and NN (illustrative)</h2>
+    <div class="down-content">
+      <pre><code class="language-mathematica">
+(* Chapter11_Lesson4.nb *)
+Notebook[{
+  Cell["Autonomous Mobile Robots — Chapter 11 (SLAM I — Filter-Based SLAM)\nLesson 4: Data Association Challenges", "Title"],
+  Cell["This notebook demonstrates innovation-based gating (NIS) and nearest-neighbor association for a range-bearing sensor.", "Text"],
+
+  Cell["1) Utilities", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      wrapToPi[a_] := Mod[a + Pi, 2 Pi] - Pi;
+      predictZ[pose_, lm_] := Module[{dx, dy, r, b},
+        dx = lm[[1]] - pose[[1]];
+        dy = lm[[2]] - pose[[2]];
+        r = Sqrt[dx^2 + dy^2];
+        b = wrapToPi[ArcTan[dx, dy] - pose[[3]]]; (* ArcTan[x,y] gives atan2(y,x) in Mathematica *)
+        {r, b}
+      ];
+    ], "Input"],
+
+  Cell["2) Gating: NIS and chi-square threshold", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      nis[nu_, S_] := nu . LinearSolve[S, nu];
+      gatePassQ[nu_, S_, p_:0.99] := Module[{gamma},
+        gamma = Quantile[ChiSquareDistribution[Length[nu]], p];
+        nis[nu, S] <= gamma
+      ];
+    ], "Input"],
+
+  Cell["3) Nearest-Neighbor association", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      associateNN[pose_, landmarks_, z_, R_, p_:0.99] := Module[
+        {N = Length[landmarks], best = Infinity, bestJ = None, j, zhat, nu, S, d2, gamma},
+        gamma = Quantile[ChiSquareDistribution[2], p];
+        For[j = 1, j <= N, j++,
+          zhat = predictZ[pose, landmarks[[j]]];
+          nu = z - zhat;
+          nu[[2]] = wrapToPi[nu[[2]]];
+          (* Simple covariance for demo: S = R (in practice use H P H^T + R) *)
+          S = R;
+          d2 = nis[nu, S];
+          If[d2 <= gamma && d2 < best,
+            best = d2; bestJ = j;
+          ];
+        ];
+        bestJ
+      ];
+    ], "Input"],
+
+  Cell["4) Demo", "Section"],
+  Cell[BoxData@ToBoxes@
+    HoldForm[
+      poseTrue = {2.0, 1.0, 0.4};
+      landmarks = { {5.0, 2.0}, {4.0, -1.5}, {1.0, 4.0}, {7.0, 5.0}, {6.0, -2.0} };
+      poseEst = poseTrue + {0.1, -0.05, 0.03};
+
+      sigmaR = 0.15; sigmaB = 2 Degree;
+      R = DiagonalMatrix[{sigmaR^2, sigmaB^2}];
+
+      (* Generate one noisy measurement of landmark 1 *)
+      z = predictZ[poseTrue, landmarks[[1]]] + RandomVariate[MultinormalDistribution[{0,0}, R]];
+      z[[2]] = wrapToPi[z[[2]]];
+
+      Print["z = ", z];
+      jHat = associateNN[poseEst, landmarks, z, R, 0.99];
+      Print["NN association -> landmark index: ", jHat];
+    ], "Input"]
+}]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Innovation whitening and chi-square).</strong>
+        Let
+        <strong
+          >\( \boldsymbol{\nu} \sim \mathcal{N}(\mathbf{0}, \mathbf{S})
+          \)</strong
+        >
+        with SPD <strong>\( \mathbf{S}\in\mathbb{R}^{m\times m} \)</strong>.
+        Prove
+        <strong
+          >\(
+          d^2=\boldsymbol{\nu}^\top\mathbf{S}^{-1}\boldsymbol{\nu}\sim\chi^2_m
+          \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution.</strong> Let
+        <strong>\( \mathbf{S}=\mathbf{L}\mathbf{L}^\top \)</strong> (Cholesky)
+        and define
+        <strong>\( \mathbf{w}=\mathbf{L}^{-1}\boldsymbol{\nu} \)</strong>. Then
+        <strong>\( \mathbf{w}\sim\mathcal{N}(\mathbf{0},\mathbf{I}) \)</strong>
+        and
+        <strong
+          >\( d^2=\mathbf{w}^\top\mathbf{w}=\sum_{\ell=1}^m w_\ell^2 \)</strong
+        >, hence chi-square.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Gate threshold for range–bearing).</strong>
+        For <strong>\( m=2 \)</strong> and <strong>\( \alpha=0.99 \)</strong>,
+        what is <strong>\( \gamma_\alpha \)</strong> approximately?
+      </p>
+      <p>
+        <strong>Solution.</strong>
+        <strong>\( F^{-1}_{\chi^2_2}(0.99)\approx 9.21 \)</strong>, so accept if
+        <strong>\( d^2\le 9.21 \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Independent NN vs joint compatibility).</strong>
+        Explain why joint compatibility can reject an assignment even when each
+        pair passes individual gating.
+      </p>
+      <p>
+        <strong>Solution.</strong> Individual gates test
+        <strong>\( d_{i,j}^2 \)</strong> separately. Joint tests use the stacked
+        statistic
+        <strong
+          >\(
+          d_\mathcal{A}^2=\boldsymbol{\nu}_\mathcal{A}^\top\mathbf{S}_\mathcal{A}^{-1}\boldsymbol{\nu}_\mathcal{A}
+          \)</strong
+        >. In SLAM, <strong>\( \mathbf{S}_\mathcal{A} \)</strong> contains
+        cross-covariances, so correlated residuals can make the joint statistic
+        large.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Association vs clutter, likelihood ratio).</strong>
+        With clutter likelihood
+        <strong>\( p(\mathbf{z}\mid H_0)=1/V \)</strong>, derive the likelihood
+        ratio comparing a landmark hypothesis.
+      </p>
+      <p>
+        <strong>Solution.</strong> Under <strong>\( H_j \)</strong>,
+        <strong
+          >\( p(\mathbf{z}\mid H_j)\approx
+          \mathcal{N}(\boldsymbol{\nu};\mathbf{0},\mathbf{S}_j) \)</strong
+        >. The likelihood ratio is
+      </p>
+      <h4 class="mathJax">
+        \[ \Lambda_j(\mathbf{z}) = V \cdot \frac{\exp\!\left(-\tfrac{1}{2}
+        d_j^2\right)}{\sqrt{(2\pi)^m\det(\mathbf{S}_j)} }. \]
+      </h4>
+
+      <p>
+        <strong>Problem 5 (JCBB pruning bound).</strong>
+        Justify pruning when
+        <strong
+          >\( |\mathcal{A}| + (M-i) &lt; |\mathcal{A}_\text{best}| \)</strong
+        >.
+      </p>
+      <p>
+        <strong>Solution.</strong> Even if all remaining
+        <strong>\( (M-i) \)</strong> measurements match, the branch can reach at
+        most <strong>\( |\mathcal{A}| + (M-i) \)</strong>. If this is smaller
+        than the best-so-far cardinality, the branch cannot win.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        We treated data association as a statistical decision problem, derived
+        NIS chi-square gating, and explained why SLAM correlations motivate
+        joint compatibility (JCBB). These tools are essential for the EKF-SLAM
+        lab in the next lesson, where incorrect correspondences can destabilize
+        the entire filter.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Neira, J., &amp; Tardós, J.D. (2001). Data association in stochastic
+        mapping using the joint compatibility test. <em>IEEE T-RA</em>, 17(6),
+        890–897.
+      </li>
+      <li>
+        Reid, D.B. (1979). An algorithm for tracking multiple targets.
+        <em>IEEE TAC</em>, 24(6), 843–854.
+      </li>
+      <li>
+        Bar-Shalom, Y., &amp; Tse, E. (1975). Tracking in a cluttered
+        environment with probabilistic data association. <em>Automatica</em>,
+        11(5), 451–460.
+      </li>
+      <li>
+        Munkres, J. (1957). Algorithms for the assignment and transportation
+        problems. <em>SIAM J.</em>, 5(1), 32–38.
+      </li>
+      <li>
+        Bailey, T., &amp; Durrant-Whyte, H. (2006). Simultaneous localization
+        and mapping (SLAM): Part II. <em>IEEE RAM</em>, 13(3), 108–117.
+      </li>
+      <li>
+        Durrant-Whyte, H., &amp; Bailey, T. (2006). Simultaneous localization
+        and mapping: Part I. <em>IEEE RAM</em>, 13(2), 99–110.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter11/Lesson3.html">
+          Lesson 3: FastSLAM and Rao–Blackwellization
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter11/Lesson5.html">
+          Lesson 5: Lab: EKF-SLAM in a Small World
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="active-lesson" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

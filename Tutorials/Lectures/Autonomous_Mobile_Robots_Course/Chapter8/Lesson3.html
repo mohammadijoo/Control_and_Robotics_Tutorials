@@ -1,0 +1,2662 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 8: Particle-Filter Localization - Lesson 3: Sensor Likelihoods for LiDAR and Vision | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 8: Particle-Filter Localization</h1>
+    <h3><strong>Lesson 3: Sensor Likelihoods for LiDAR and Vision</strong></h3>
+    <p>
+      This lesson builds the observation model
+      <strong>\( p(\mathbf{z}_t \mid \mathbf{x}_t, \mathbf{m}) \)</strong> for
+      Monte Carlo Localization (MCL). We derive rigorous likelihoods for 2D
+      LiDAR range scans and vision-based measurements under explicit noise and
+      outlier processes, and we show how numerical stability (log-likelihoods,
+      temperature scaling) directly impacts particle weight degeneracy.
+      Implementations are provided in Python, C++, Java, MATLAB/Simulink, and
+      Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 8, Lessons 1–2, we established the MCL update: the particle
+        set represents a belief <strong>\( bel(\mathbf{x}_t) \)</strong>, and
+        importance weights are assigned by the observation likelihood:
+        <strong
+          >\( w_t^{(n)} \propto p(\mathbf{z}_t \mid \mathbf{x}_t^{(n)},
+          \mathbf{m}) \)</strong
+        >. The core design question is how to specify
+        <strong>\( p(\mathbf{z}_t \mid \mathbf{x}_t, \mathbf{m}) \)</strong>
+        so that it is (i) physically meaningful, (ii) robust to outliers and
+        dynamics, and (iii) computationally tractable.
+      </p>
+
+      <p>
+        Throughout this lesson, we use the conditional-independence
+        factorization (an approximation that must be validated empirically):
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(\mathbf{z}_t \mid \mathbf{x}_t, \mathbf{m}) \;\approx\;
+        \prod_{i=1}^K p(z_t^i \mid \mathbf{x}_t, \mathbf{m}), \quad K \text{
+        beams/features}. \]
+      </h4>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Particle pose x_n"] --> B["Predict measurement from map"]
+  B --> C["LiDAR: endpoints -> distance-to-obstacle d"]
+  B --> D["Vision: matched landmarks -> bearing residual e"]
+  C --> E["Compute log p_lidar = sum log p_i"]
+  D --> F["Compute log p_vision = sum log p_i"]
+  E --> G["Fuse: logw = log p_lidar + log p_vision"]
+  F --> G
+  G --> H["Normalize weights (log-sum-exp)"]
+  H --> I["Resample (Lesson 2)"]
+        </pre>
+      </div>
+
+      <p>
+        The remainder of the lesson develops two families of sensor likelihoods:
+        (A) LiDAR range-scan likelihoods (beam model and likelihood-field
+        model), and (B) vision likelihoods based on landmark-bearing residuals
+        with explicit outlier modeling.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: LiDAR Beam Model as a Robust Mixture -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. LiDAR Beam Model as a Robust Mixture</h2>
+    <div class="down-content">
+      <p>
+        Consider a 2D LiDAR providing ranges
+        <strong>\( z^i \in [0, z_{\max}] \)</strong> at relative beam angles
+        <strong>\( \phi_i \)</strong> (in the robot frame). Given a particle
+        pose <strong>\( \mathbf{x}=(x,y,\theta) \)</strong> and a known map
+        <strong>\( \mathbf{m} \)</strong>, let
+        <strong>\( z^{\ast i}=z^{\ast}(\mathbf{x},\phi_i,\mathbf{m}) \)</strong>
+        denote the <em>expected</em> range from ray casting (intersection with
+        the nearest mapped obstacle along that direction).
+      </p>
+
+      <p>
+        The classical beam model decomposes measurement causes into a mixture of
+        components: (i) a correct hit near <strong>\( z^{\ast i} \)</strong>,
+        (ii) an unexpected short reading due to an unmodeled obstacle, (iii) a
+        max-range failure reading, and (iv) a random measurement due to spurious
+        returns. For one beam:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(z^i \mid \mathbf{x},\mathbf{m}) \;=\; w_{\text{hit}
+        }\,p_{\text{hit} }(z^i \mid z^{\ast i}) + w_{\text{short}
+        }\,p_{\text{short} }(z^i \mid z^{\ast i}) + w_{\text{max}
+        }\,p_{\text{max} }(z^i) + \\ w_{\text{rand} }\,p_{\text{rand} }(z^i),
+        \quad \sum_k w_k = 1,\; w_k \ge 0. \]
+      </h4>
+
+      <p>A standard instantiation is:</p>
+
+      <h4 class="mathJax">
+        \[ p_{\text{hit} }(z \mid z^{\ast}) = \eta_{\text{hit} }
+        \exp\!\left(-\frac{(z-z^{\ast})^2}{2\sigma_{\text{hit} }^2}\right)
+        \mathbf{1}_{0 \le z \le z_{\max} }, \qquad \eta_{\text{hit} }^{-1} =
+        \int_0^{z_{\max} }
+        \exp\!\left(-\frac{(z-z^{\ast})^2}{2\sigma_{\text{hit} }^2}\right)\,dz.
+        \]
+      </h4>
+
+      <h4 class="mathJax">
+        \[ p_{\text{short} }(z \mid z^{\ast}) = \eta_{\text{short} }\,
+        \lambda\,e^{-\lambda z} \mathbf{1}_{0 \le z \le z^{\ast} }, \qquad
+        \eta_{\text{short} }^{-1} = \int_0^{z^{\ast} } \lambda e^{-\lambda
+        z}\,dz = 1-e^{-\lambda z^{\ast} }. \]
+      </h4>
+
+      <h4 class="mathJax">
+        \[ p_{\text{max} }(z)=\mathbf{1}_{z=z_{\max} }, \qquad p_{\text{rand}
+        }(z)=\frac{1}{z_{\max} }\mathbf{1}_{0 \le z \le z_{\max} }. \]
+      </h4>
+
+      <p>
+        <strong>Proof (valid probability density).</strong>
+        Assume each component is a valid density/mass function on
+        <strong>\([0,z_{\max}]\)</strong>:
+        <strong>\(\int p_{\text{hit} }=1\)</strong>,
+        <strong>\(\int p_{\text{short} }=1\)</strong>,
+        <strong>\(\int p_{\text{rand} }=1\)</strong>, and
+        <strong>\(p_{\text{max} }\)</strong> integrates to 1 as a point mass at
+        <strong>\(z_{\max}\)</strong>. Then, for the mixture:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \int_0^{z_{\max} } p(z\mid\mathbf{x},\mathbf{m})\,dz = \sum_k w_k
+        \int_0^{z_{\max} } p_k(z)\,dz = \sum_k w_k = 1. \]
+      </h4>
+
+      <p>
+        Therefore the mixture is normalized and nonnegative. This proof
+        generalizes immediately to mixtures that include additional components
+        (e.g., a “no-return” region), provided each component is normalized.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Likelihood-Field Model (Endpoint-to-Map Distance) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Likelihood-Field Model (Endpoint-to-Map Distance)</h2>
+    <div class="down-content">
+      <p>
+        The beam model can be accurate but computationally demanding because
+        each particle requires ray casting to obtain
+        <strong>\( z^{\ast i} \)</strong>. A widely used alternative is the
+        <strong>likelihood-field model</strong>, which replaces explicit ray
+        casting with a precomputed distance transform on the occupancy grid.
+      </p>
+
+      <p>
+        Let the beam endpoint in the world frame be
+        <strong
+          >\( \mathbf{p}^i(\mathbf{x},z^i)=\big[x + z^i\cos(\theta+\phi_i),\; y
+          + z^i\sin(\theta+\phi_i)\big]^\top \)</strong
+        >. Let <strong>\( d(\mathbf{p}) \)</strong> denote the Euclidean
+        distance from point <strong>\(\mathbf{p}\)</strong>
+        to the nearest obstacle in the map (obtained from a distance field).
+      </p>
+
+      <p>
+        A principled derivation starts by modeling the endpoint noise as
+        isotropic Gaussian around the (unknown) true hit point on the obstacle
+        boundary. If <strong>\(\mathbf{p}^\ast\)</strong> is the closest
+        obstacle point and the measured endpoint is
+        <strong>\(\mathbf{p} = \mathbf{p}^\ast + \boldsymbol{\epsilon}\)</strong
+        >, with
+        <strong
+          >\(\boldsymbol{\epsilon}\sim\mathcal{N}(\mathbf{0},\sigma^2\mathbf{I})\)</strong
+        >, then:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(\mathbf{p}\mid\mathbf{x},\mathbf{m}) \propto
+        \exp\!\left(-\frac{\|\mathbf{p}-\mathbf{p}^\ast\|^2}{2\sigma^2}\right) =
+        \exp\!\left(-\frac{d(\mathbf{p})^2}{2\sigma^2}\right), \]
+      </h4>
+
+      <p>
+        where the last equality uses
+        <strong
+          >\( d(\mathbf{p})=\min_{\mathbf{q}\in\partial\mathbf{m}
+          }\|\mathbf{p}-\mathbf{q}\| \)</strong
+        >, i.e., the distance to the closest obstacle boundary point. This
+        yields the per-beam likelihood:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(z^i \mid \mathbf{x},\mathbf{m}) \approx w_{\text{hit} }\,
+        \exp\!\left(-\frac{d(\mathbf{p}^i(\mathbf{x},z^i))^2}{2\sigma_{\text{hit}
+        }^2}\right) + w_{\text{rand} }\,\frac{1}{z_{\max} }. \]
+      </h4>
+
+      <p>
+        <strong>Remark (why the uniform term matters).</strong>
+        Without the <strong>\(w_{\text{rand} }\)</strong> term, a single beam
+        that lands in free space far from obstacles can force
+        <strong>\(p(z^i\mid\mathbf{x},\mathbf{m})\)</strong> to be exponentially
+        tiny, dominating the product and causing weight collapse in the presence
+        of dynamic obstacles, glass, or missing map structure.
+      </p>
+
+      <p>
+        <strong>Proof sketch (MAP equivalence under log transform).</strong>
+        For any particle pose, define the scan likelihood as a product. Since
+        <strong>\(\log\)</strong> is strictly increasing:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \arg\max_\mathbf{x} \prod_{i=1}^K p_i(\mathbf{x}) \;=\;
+        \arg\max_\mathbf{x} \sum_{i=1}^K \log p_i(\mathbf{x}). \]
+      </h4>
+
+      <p>
+        Thus log-likelihood computation preserves the maximum-likelihood pose
+        while improving numerical stability.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Vision Likelihoods via Landmark Bearings (with Outliers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Vision Likelihoods via Landmark Bearings (with Outliers)</h2>
+    <div class="down-content">
+      <p>
+        Vision measurements can be incorporated into MCL when the map includes
+        recognizable landmarks (e.g., fiducials, corners, keypoints with
+        descriptors) with known world positions. This lesson uses a minimal
+        <strong>bearing-only</strong> model to avoid requiring full camera
+        calibration and depth estimation.
+      </p>
+
+      <p>
+        Suppose the measurement set is
+        <strong>\(\mathbf{z}^V = \{(j_i, \beta_i)\}_{i=1}^M\)</strong>, where
+        <strong>\(j_i\)</strong> is the associated landmark ID (from feature
+        matching) and <strong>\(\beta_i\)</strong> is the observed bearing in
+        the robot frame. With landmark position
+        <strong>\(\boldsymbol{\ell}_j=(\ell_{j,x},\ell_{j,y})\)</strong>, the
+        predicted bearing is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \beta_i^\ast(\mathbf{x},j_i) = \operatorname{wrap}\!\Big(
+        \operatorname{atan2}(\ell_{j_i,y}-y,\;\ell_{j_i,x}-x) - \theta \Big),
+        \qquad e_i = \operatorname{wrap}(\beta_i - \beta_i^\ast). \]
+      </h4>
+
+      <p>
+        A Gaussian bearing noise model on the circle can be approximated (for
+        small errors) by a wrapped Gaussian:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p_{\text{in} }(\beta_i \mid \mathbf{x},j_i) \approx
+        \frac{1}{\sqrt{2\pi\sigma_\beta^2} }
+        \exp\!\left(-\frac{e_i^2}{2\sigma_\beta^2}\right). \]
+      </h4>
+
+      <p>
+        Real feature matching has outliers (wrong associations, transient
+        objects, motion blur). A robust likelihood mixes the inlier model with a
+        uniform outlier model on <strong>\([ -\pi, \pi )\)</strong>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ p(\beta_i \mid \mathbf{x},j_i) = (1-\epsilon)\,p_{\text{in} }(\beta_i
+        \mid \mathbf{x},j_i) + \epsilon\,\frac{1}{2\pi}, \quad 0 \le \epsilon
+        \le 1. \]
+      </h4>
+
+      <p>
+        <strong>Proof (normalization on the circle).</strong>
+        Since <strong>\(p_{\text{in} }\)</strong> integrates to 1 over one
+        period and the uniform term integrates to 1:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \int_{-\pi}^\pi p(\beta\mid\mathbf{x},j)\,d\beta = (1-\epsilon)\cdot
+        1 + \epsilon\cdot 1 = 1. \]
+      </h4>
+
+      <p>Finally, assuming conditional independence across matched features:</p>
+
+      <h4 class="mathJax">
+        \[ p(\mathbf{z}^V \mid \mathbf{x},\mathbf{m}) \approx \prod_{i=1}^M
+        p(\beta_i \mid \mathbf{x},j_i). \]
+      </h4>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Weight Scaling, Underflow, and Log-Sum-Exp Normalization -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Weight Scaling, Underflow, and Log-Sum-Exp Normalization</h2>
+    <div class="down-content">
+      <p>
+        Products of many small likelihoods frequently underflow in
+        floating-point arithmetic. Therefore, implementations should accumulate
+        <em>log-likelihoods</em>:
+        <strong>\(\log w^{(n)} = \sum_i \log p_i\)</strong>. Normalization can
+        then be performed by the log-sum-exp identity:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \operatorname{LSE}(\ell_1,\dots,\ell_N) = \log\left(\sum_{n=1}^N
+        e^{\ell_n}\right) = m + \log\left(\sum_{n=1}^N e^{\ell_n-m}\right),
+        \quad m = \max_n \ell_n. \]
+      </h4>
+
+      <p>The normalized weights are then:</p>
+
+      <h4 class="mathJax">
+        \[ \bar{w}^{(n)} = \frac{e^{\ell_n} }{\sum_{j=1}^N e^{\ell_j} } =
+        e^{\ell_n - \operatorname{LSE}(\ell_1,\dots,\ell_N)}. \]
+      </h4>
+
+      <p>
+        <strong>Proposition (invariance to additive constants).</strong>
+        For any constant <strong>\(c\)</strong>, replacing all log-likelihoods
+        by <strong>\(\ell_n' = \ell_n + c\)</strong>
+        leaves normalized weights unchanged.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \bar{w}'^{(n)} = \frac{e^{\ell_n+c} }{\sum_j e^{\ell_j+c} } =
+        \frac{e^c e^{\ell_n} }{e^c \sum_j e^{\ell_j} } = \bar{w}^{(n)}. \]
+      </h4>
+
+      <p>
+        <strong>Temperature scaling (controlled peakiness).</strong>
+        If the observation model is “too peaked” (common with dense scans), use
+        <strong>\(\alpha \in (0,1]\)</strong> and define
+        <strong>\(\ell_n^{(\alpha)} = \alpha\,\ell_n\)</strong>, i.e.,
+        <strong>\( p^{\alpha}(\mathbf{z}\mid\mathbf{x}) \)</strong>. This
+        preserves the maximum-likelihood particle (since scaling by
+        <strong>\(\alpha&gt;0\)</strong> is monotone) but increases effective
+        sample size by reducing variance of weights.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementation Notes and Code (Python/C++/Java/MATLAB/Wolfram) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementations (with Robotics Libraries Context)</h2>
+    <div class="down-content">
+      <p>
+        The following implementations are <em>likelihood evaluators</em> that
+        you can plug into an MCL loop (Lesson 2). In practice, you will: (i)
+        build or load a map, (ii) precompute the distance field once, (iii)
+        compute
+        <strong>\(\log p(\mathbf{z}\mid\mathbf{x}^{(n)},\mathbf{m})\)</strong>
+        per particle, and (iv) normalize and resample.
+      </p>
+
+      <p>
+        <strong>Typical integration points:</strong><br />
+        Python: ROS2 <code>rclpy</code>, <code>sensor_msgs/LaserScan</code>,
+        NumPy/SciPy.<br />
+        C++: ROS2 <code>rclcpp</code>, Eigen,
+        <code>nav_msgs/OccupancyGrid</code> (or costmaps).<br />
+        Java: OpenCV Java for feature extraction; ROS Java variants where
+        available.<br />
+        MATLAB/Simulink: Robotics System Toolbox (ROS/ROS2), Navigation Toolbox,
+        Image Processing Toolbox (<code>bwdist</code>).<br />
+        Wolfram: built-in array operations and distance transforms for
+        prototyping likelihood functions.
+      </p>
+
+      <hr />
+
+      <h3><code>Chapter8_Lesson3.py</code></h3>
+      <pre><code class="language-python">
+#!/usr/bin/env python3
+"""
+Chapter8_Lesson3.py
+
+Autonomous Mobile Robots (Control Engineering) - Chapter 8, Lesson 3
+Sensor Likelihoods for LiDAR and Vision
+
+This file provides:
+1) A simple 2D occupancy grid and an approximate Euclidean distance transform
+   (multi-source Dijkstra / brushfire).
+2) A LiDAR likelihood-field sensor model (endpoint distance to nearest obstacle).
+3) A bearing-only vision landmark likelihood with an explicit outlier mixture.
+4) Numerically stable log-weight normalization (log-sum-exp).
+
+Dependencies:
+- Standard library only.
+Optional accelerations (not required):
+- numpy, scipy for faster distance transforms and vectorization.
+
+Typical robotics integration:
+- ROS/ROS2: subscribe to sensor_msgs/LaserScan, run the likelihood on each particle.
+- Map source: nav_msgs/OccupancyGrid (2D) or a costmap.
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+import heapq
+import math
+from typing import List, Tuple, Dict
+
+
+# -----------------------------
+# Geometry helpers
+# -----------------------------
+def wrap_to_pi(a: float) -> float:
+    """Wrap angle to (-pi, pi]."""
+    a = (a + math.pi) % (2.0 * math.pi)
+    return a - math.pi
+
+
+@dataclass
+class Pose2D:
+    x: float
+    y: float
+    theta: float  # radians
+
+
+# -----------------------------
+# Occupancy grid and distance field
+# -----------------------------
+@dataclass
+class OccupancyGrid2D:
+    """
+    Binary occupancy grid.
+    occ[y][x] = 1 for obstacle, 0 for free.
+
+    Coordinate convention:
+    - World: meters
+    - Grid: integer indices (gx, gy)
+    - origin: world coordinate of grid cell (0,0) corner
+    """
+    width: int
+    height: int
+    resolution: float
+    origin_x: float
+    origin_y: float
+    occ: List[List[int]]  # shape [height][width], 0/1
+
+    @staticmethod
+    def empty(width: int, height: int, resolution: float, origin_x: float, origin_y: float) -> "OccupancyGrid2D":
+        occ = [[0 for _ in range(width)] for _ in range(height)]
+        return OccupancyGrid2D(width, height, resolution, origin_x, origin_y, occ)
+
+    def in_bounds(self, gx: int, gy: int) -> bool:
+        return 0 &lt;= gx &lt; self.width and 0 &lt;= gy &lt; self.height
+
+    def set_obstacle(self, gx: int, gy: int) -&gt; None:
+        if self.in_bounds(gx, gy):
+            self.occ[gy][gx] = 1
+
+    def world_to_grid(self, x: float, y: float) -&gt; Tuple[int, int]:
+        gx = int(math.floor((x - self.origin_x) / self.resolution))
+        gy = int(math.floor((y - self.origin_y) / self.resolution))
+        return gx, gy
+
+
+def distance_transform_brushfire(grid: OccupancyGrid2D) -&gt; List[List[float]]:
+    """
+    Approximate Euclidean distance transform using multi-source Dijkstra on an 8-connected grid.
+
+    Returns:
+        dist[y][x] in meters, distance to nearest obstacle cell center (approx).
+    """
+    INF = 1e18
+    dist = [[INF for _ in range(grid.width)] for _ in range(grid.height)]
+    pq: List[Tuple[float, int, int]] = []
+
+    # Initialize with all obstacle cells as sources (distance 0)
+    for gy in range(grid.height):
+        for gx in range(grid.width):
+            if grid.occ[gy][gx] == 1:
+                dist[gy][gx] = 0.0
+                heapq.heappush(pq, (0.0, gx, gy))
+
+    # 8-neighborhood: (dx, dy, step_cost)
+    nbh = [
+        (-1,  0, 1.0), (1,  0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+        (-1, -1, math.sqrt(2.0)), (-1, 1, math.sqrt(2.0)), (1, -1, math.sqrt(2.0)), (1, 1, math.sqrt(2.0))
+    ]
+
+    while pq:
+        d, gx, gy = heapq.heappop(pq)
+        if d &gt; dist[gy][gx]:
+            continue
+        for dx, dy, c in nbh:
+            nx, ny = gx + dx, gy + dy
+            if not grid.in_bounds(nx, ny):
+                continue
+            nd = d + c
+            if nd &lt; dist[ny][nx]:
+                dist[ny][nx] = nd
+                heapq.heappush(pq, (nd, nx, ny))
+
+    # Convert from cell-steps to meters
+    for gy in range(grid.height):
+        for gx in range(grid.width):
+            dist[gy][gx] *= grid.resolution
+    return dist
+
+
+# -----------------------------
+# LiDAR likelihood-field model
+# -----------------------------
+@dataclass
+class LikelihoodFieldModel:
+    grid: OccupancyGrid2D
+    dist_field_m: List[List[float]]  # meters
+    z_max: float
+    sigma_hit: float
+    w_hit: float
+    w_rand: float
+    max_dist: float = 2.0  # clamp distance for numerical robustness
+
+    def endpoint_distance(self, wx: float, wy: float) -&gt; float:
+        gx, gy = self.grid.world_to_grid(wx, wy)
+        if not self.grid.in_bounds(gx, gy):
+            return self.max_dist
+        return min(self.max_dist, self.dist_field_m[gy][gx])
+
+    def log_likelihood(self, pose: Pose2D, ranges: List[float], rel_angles: List[float]) -&gt; float:
+        """
+        Likelihood-field:
+            p(z^i | x, m) ≈ w_hit * exp(-d^2/(2*sigma^2)) + w_rand*(1/z_max)
+        """
+        sig2 = self.sigma_hit * self.sigma_hit
+        inv_z = 1.0 / self.z_max
+        logp = 0.0
+
+        for z, a_rel in zip(ranges, rel_angles):
+            zc = min(max(z, 0.0), self.z_max)
+            a = pose.theta + a_rel
+            wx = pose.x + zc * math.cos(a)
+            wy = pose.y + zc * math.sin(a)
+
+            d = self.endpoint_distance(wx, wy)
+            p_hit = math.exp(-(d * d) / (2.0 * sig2))
+            p = self.w_hit * p_hit + self.w_rand * inv_z
+            logp += math.log(max(p, 1e-12))
+        return logp
+
+
+# -----------------------------
+# Vision bearing-only landmark likelihood
+# -----------------------------
+@dataclass
+class VisionBearingModel:
+    landmarks: Dict[int, Tuple[float, float]]  # id -&gt; (x, y)
+    sigma_bearing: float
+    eps_outlier: float
+
+    def log_likelihood(self, pose: Pose2D, obs: List[Tuple[int, float]]) -&gt; float:
+        """
+        Each observation: (landmark_id, measured_bearing_in_robot_frame)
+        Robust mixture:
+            p = (1-eps)*N_wrap(e;0,sigma^2) + eps*(1/2pi)
+        """
+        sig2 = self.sigma_bearing * self.sigma_bearing
+        norm = 1.0 / math.sqrt(2.0 * math.pi * sig2)
+        uni = 1.0 / (2.0 * math.pi)
+
+        logp = 0.0
+        for lid, beta in obs:
+            if lid not in self.landmarks:
+                logp += math.log(uni)
+                continue
+            lx, ly = self.landmarks[lid]
+            pred = wrap_to_pi(math.atan2(ly - pose.y, lx - pose.x) - pose.theta)
+            innov = wrap_to_pi(beta - pred)
+
+            p_in = norm * math.exp(-(innov * innov) / (2.0 * sig2))
+            p = (1.0 - self.eps_outlier) * p_in + self.eps_outlier * uni
+            logp += math.log(max(p, 1e-15))
+        return logp
+
+
+# -----------------------------
+# Numerically stable normalization
+# -----------------------------
+def logsumexp(logw: List[float]) -&gt; float:
+    m = max(logw)
+    s = sum(math.exp(w - m) for w in logw)
+    return m + math.log(s)
+
+
+def normalize_log_weights(logw: List[float]) -&gt; List[float]:
+    lse = logsumexp(logw)
+    w = [math.exp(v - lse) for v in logw]
+    s = sum(w)
+    return [wi / s for wi in w]
+
+
+# -----------------------------
+# Minimal demo
+# -----------------------------
+def main() -&gt; None:
+    # Synthetic map: a wall and a pillar
+    grid = OccupancyGrid2D.empty(width=120, height=120, resolution=0.05, origin_x=-3.0, origin_y=-3.0)
+
+    # Wall: y = 0 (approx)
+    for gx in range(10, 110):
+        grid.set_obstacle(gx, 60)
+
+    # Pillar block
+    for gy in range(20, 30):
+        for gx in range(85, 95):
+            grid.set_obstacle(gx, gy)
+
+    dist = distance_transform_brushfire(grid)
+
+    lidar = LikelihoodFieldModel(
+        grid=grid,
+        dist_field_m=dist,
+        z_max=8.0,
+        sigma_hit=0.15,
+        w_hit=0.95,
+        w_rand=0.05,
+        max_dist=2.0
+    )
+
+    vision = VisionBearingModel(
+        landmarks={
+            1: (-1.0,  0.0),
+            2: ( 1.0,  0.5),
+            3: ( 0.0, -1.0),
+        },
+        sigma_bearing=math.radians(3.0),
+        eps_outlier=0.10
+    )
+
+    # Three particles
+    particles = [
+        Pose2D(-0.5, -0.8, math.radians(90.0)),
+        Pose2D(-0.2, -0.6, math.radians(88.0)),
+        Pose2D( 0.8,  0.1, math.radians(30.0)),
+    ]
+
+    # Synthetic scan: 9 beams centered around forward direction
+    rel_angles = [math.radians(-40.0 + 80.0 * i / 8.0) for i in range(9)]
+    ranges = [2.8, 3.0, 3.2, 3.1, 3.0, 3.2, 2.9, 2.7, 2.6]
+
+    # Vision observations: (id, bearing)
+    obs = [(1, math.radians(70.0)), (2, math.radians(20.0)), (3, math.radians(-95.0))]
+
+    logw = []
+    for p in particles:
+        ll_lidar = lidar.log_likelihood(p, ranges, rel_angles)
+        ll_vis = vision.log_likelihood(p, obs)
+        logw.append(ll_lidar + ll_vis)
+
+    w = normalize_log_weights(logw)
+
+    print("log-weights:", [round(v, 3) for v in logw])
+    print("weights:", [round(v, 6) for v in w])
+
+
+if __name__ == "__main__":
+    main()
+      </code></pre>
+
+      <hr />
+
+      <h3><code>Chapter8_Lesson3.cpp</code></h3>
+      <pre><code class="language-cpp">
+/*
+Chapter8_Lesson3.cpp
+
+Autonomous Mobile Robots (Control Engineering) - Chapter 8, Lesson 3
+Sensor Likelihoods for LiDAR and Vision
+
+This file provides:
+1) A 2D occupancy grid and approximate Euclidean distance transform (multi-source Dijkstra).
+2) A LiDAR likelihood-field model.
+3) A bearing-only vision landmark likelihood with outlier mixture.
+4) Log-sum-exp normalization for particle weights.
+
+Robotics ecosystem notes:
+- ROS2 integration: subscribe to sensor_msgs::msg::LaserScan, build/update nav_msgs::msg::OccupancyGrid,
+  and evaluate likelihoods per particle.
+- Eigen can be used for vectorization; this example uses only the C++ standard library.
+
+Build:
+  g++ -O2 -std=c++17 Chapter8_Lesson3.cpp -o Chapter8_Lesson3
+Run:
+  ./Chapter8_Lesson3
+*/
+
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;cstdint&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;queue&gt;
+#include &lt;tuple&gt;
+#include &lt;unordered_map&gt;
+#include &lt;utility&gt;
+#include &lt;vector&gt;
+
+static inline double wrapToPi(double a) {
+    double twoPi = 2.0 * M_PI;
+    a = std::fmod(a + M_PI, twoPi);
+    if (a &lt; 0) a += twoPi;
+    return a - M_PI;
+}
+
+struct Pose2D {
+    double x{0}, y{0}, theta{0};
+};
+
+struct OccupancyGrid2D {
+    int w{0}, h{0};
+    double resolution{0.05};
+    double origin_x{-3.0}, origin_y{-3.0};
+    std::vector&lt;uint8_t&gt; occ; // 1 obstacle, 0 free; row-major [y*w + x]
+
+    OccupancyGrid2D(int w_, int h_, double res, double ox, double oy)
+        : w(w_), h(h_), resolution(res), origin_x(ox), origin_y(oy), occ(static_cast&lt;size_t&gt;(w_*h_), 0) {}
+
+    inline bool inBounds(int gx, int gy) const {
+        return (0 &lt;= gx && gx &lt; w && 0 &lt;= gy && gy &lt; h);
+    }
+
+    inline int idx(int gx, int gy) const { return gy * w + gx; }
+
+    void setObstacle(int gx, int gy) {
+        if (inBounds(gx, gy)) occ[static_cast&lt;size_t&gt;(idx(gx, gy))] = 1;
+    }
+
+    inline uint8_t get(int gx, int gy) const { return occ[static_cast&lt;size_t&gt;(idx(gx, gy))]; }
+
+    std::pair&lt;int,int&gt; worldToGrid(double x, double y) const {
+        int gx = static_cast&lt;int&gt;(std::floor((x - origin_x) / resolution));
+        int gy = static_cast&lt;int&gt;(std::floor((y - origin_y) / resolution));
+        return {gx, gy};
+    }
+};
+
+std::vector&lt;double&gt; distanceTransformBrushfire(const OccupancyGrid2D& grid) {
+    // Multi-source Dijkstra on 8-neighborhood, step costs 1 and sqrt(2), then scale by resolution.
+    const double INF = std::numeric_limits&lt;double&gt;::infinity();
+    std::vector&lt;double&gt; dist(static_cast&lt;size_t&gt;(grid.w * grid.h), INF);
+
+    using Node = std::tuple&lt;double,int,int&gt;; // (d, gx, gy)
+    struct Cmp {
+        bool operator()(const Node& a, const Node& b) const {
+            return std::get&lt;0&gt;(a) &gt; std::get&lt;0&gt;(b); // min-heap by distance
+        }
+    };
+    std::priority_queue&lt;Node, std::vector&lt;Node&gt;, Cmp&gt; pq;
+
+    for (int gy = 0; gy &lt; grid.h; ++gy) {
+        for (int gx = 0; gx &lt; grid.w; ++gx) {
+            if (grid.get(gx, gy) == 1) {
+                int id = grid.idx(gx, gy);
+                dist[static_cast&lt;size_t&gt;(id)] = 0.0;
+                pq.emplace(0.0, gx, gy);
+            }
+        }
+    }
+
+    const int nbh[8][2] = { {-1,0},{1,0},{0,-1},{0,1},{-1,-1},{-1,1},{1,-1},{1,1} };
+
+    while (!pq.empty()) {
+        auto [d, gx, gy] = pq.top();
+        pq.pop();
+        int id = grid.idx(gx, gy);
+        if (d &gt; dist[static_cast&lt;size_t&gt;(id)]) continue;
+
+        for (auto &off : nbh) {
+            int ngx = gx + off[0], ngy = gy + off[1];
+            if (!grid.inBounds(ngx, ngy)) continue;
+            double step = (off[0] == 0 || off[1] == 0) ? 1.0 : std::sqrt(2.0);
+            double nd = d + step;
+            int nid = grid.idx(ngx, ngy);
+            if (nd &lt; dist[static_cast&lt;size_t&gt;(nid)]) {
+                dist[static_cast&lt;size_t&gt;(nid)] = nd;
+                pq.emplace(nd, ngx, ngy);
+            }
+        }
+    }
+
+    for (auto &v : dist) v *= grid.resolution;
+    return dist;
+}
+
+struct LikelihoodFieldModel {
+    const OccupancyGrid2D& grid;
+    const std::vector&lt;double&gt;& dist_m;
+    double z_max{8.0};
+    double sigma_hit{0.15};
+    double w_hit{0.95};
+    double w_rand{0.05};
+    double max_dist{2.0};
+
+    double endpointDistance(double wx, double wy) const {
+        auto [gx, gy] = grid.worldToGrid(wx, wy);
+        if (!grid.inBounds(gx, gy)) return max_dist;
+        double d = dist_m[static_cast&lt;size_t&gt;(grid.idx(gx, gy))];
+        return std::min(max_dist, d);
+    }
+
+    double logLikelihood(const Pose2D& pose,
+                         const std::vector&lt;double&gt;& ranges,
+                         const std::vector&lt;double&gt;& rel_angles) const {
+        const double sig2 = sigma_hit * sigma_hit;
+        const double invz = 1.0 / z_max;
+        const size_t n = std::min(ranges.size(), rel_angles.size());
+        double logp = 0.0;
+
+        for (size_t i = 0; i &lt; n; ++i) {
+            double z = std::clamp(ranges[i], 0.0, z_max);
+            double a = pose.theta + rel_angles[i];
+            double wx = pose.x + z * std::cos(a);
+            double wy = pose.y + z * std::sin(a);
+
+            double d = endpointDistance(wx, wy);
+            double p_hit = std::exp(-(d*d) / (2.0*sig2));
+            double p = w_hit * p_hit + w_rand * invz;
+            logp += std::log(std::max(p, 1e-12));
+        }
+        return logp;
+    }
+};
+
+struct VisionBearingModel {
+    std::unordered_map&lt;int, std::pair&lt;double,double&gt;&gt; landmarks; // id -&gt; (x,y)
+    double sigma_bearing{(3.0 * M_PI / 180.0)};
+    double eps_outlier{0.10};
+
+    double logLikelihood(const Pose2D& pose,
+                         const std::vector&lt;int&gt;& ids,
+                         const std::vector&lt;double&gt;& bearings) const {
+        const double sig2 = sigma_bearing * sigma_bearing;
+        const double norm = 1.0 / std::sqrt(2.0 * M_PI * sig2);
+        const double uni  = 1.0 / (2.0 * M_PI);
+        const size_t n = std::min(ids.size(), bearings.size());
+
+        double logp = 0.0;
+        for (size_t i = 0; i &lt; n; ++i) {
+            auto it = landmarks.find(ids[i]);
+            if (it == landmarks.end()) {
+                logp += std::log(uni);
+                continue;
+            }
+            const auto [lx, ly] = it-&gt;second;
+            double pred = wrapToPi(std::atan2(ly - pose.y, lx - pose.x) - pose.theta);
+            double innov = wrapToPi(bearings[i] - pred);
+
+            double p_in = norm * std::exp(-(innov*innov)/(2.0*sig2));
+            double p = (1.0 - eps_outlier) * p_in + eps_outlier * uni;
+            logp += std::log(std::max(p, 1e-15));
+        }
+        return logp;
+    }
+};
+
+static inline double logSumExp(const std::vector&lt;double&gt;& logw) {
+    double m = *std::max_element(logw.begin(), logw.end());
+    double s = 0.0;
+    for (double v : logw) s += std::exp(v - m);
+    return m + std::log(s);
+}
+
+static inline std::vector&lt;double&gt; normalizeLogWeights(const std::vector&lt;double&gt;& logw) {
+    double lse = logSumExp(logw);
+    std::vector&lt;double&gt; w(logw.size());
+    double sum = 0.0;
+    for (size_t i = 0; i &lt; logw.size(); ++i) {
+        w[i] = std::exp(logw[i] - lse);
+        sum += w[i];
+    }
+    for (auto &v : w) v /= sum;
+    return w;
+}
+
+int main() {
+    // Create a synthetic map: wall + pillar
+    OccupancyGrid2D grid(120, 120, 0.05, -3.0, -3.0);
+    for (int gx = 10; gx &lt; 110; ++gx) grid.setObstacle(gx, 60);
+    for (int gy = 20; gy &lt; 30; ++gy)
+        for (int gx = 85; gx &lt; 95; ++gx)
+            grid.setObstacle(gx, gy);
+
+    auto dist = distanceTransformBrushfire(grid);
+
+    LikelihoodFieldModel lidar{grid, dist, 8.0, 0.15, 0.95, 0.05, 2.0};
+
+    VisionBearingModel vision;
+    vision.landmarks = {
+        {1, {-1.0,  0.0} },
+        {2, { 1.0,  0.5} },
+        {3, { 0.0, -1.0} }
+    };
+    vision.sigma_bearing = 3.0 * M_PI / 180.0;
+    vision.eps_outlier = 0.10;
+
+    std::vector&lt;Pose2D&gt; particles = {
+        {-0.5, -0.8, 90.0 * M_PI / 180.0},
+        {-0.2, -0.6, 88.0 * M_PI / 180.0},
+        { 0.8,  0.1, 30.0 * M_PI / 180.0}
+    };
+
+    // Synthetic scan: 9 beams
+    std::vector&lt;double&gt; rel_angles;
+    rel_angles.reserve(9);
+    for (int i = 0; i &lt; 9; ++i) rel_angles.push_back((-40.0 + 80.0 * i / 8.0) * M_PI / 180.0);
+    std::vector&lt;double&gt; ranges = {2.8, 3.0, 3.2, 3.1, 3.0, 3.2, 2.9, 2.7, 2.6};
+
+    // Vision observations
+    std::vector&lt;int&gt; ids = {1,2,3};
+    std::vector&lt;double&gt; bears = {70.0 * M_PI / 180.0, 20.0 * M_PI / 180.0, -95.0 * M_PI / 180.0};
+
+    std::vector&lt;double&gt; logw;
+    logw.reserve(particles.size());
+    for (const auto& p : particles) {
+        double ll_l = lidar.logLikelihood(p, ranges, rel_angles);
+        double ll_v = vision.logLikelihood(p, ids, bears);
+        logw.push_back(ll_l + ll_v);
+    }
+
+    auto w = normalizeLogWeights(logw);
+
+    std::cout &lt;&lt; "log-weights: ";
+    for (double v : logw) std::cout &lt;&lt; v &lt;&lt; " ";
+    std::cout &lt;&lt; "\nweights:     ";
+    for (double v : w) std::cout &lt;&lt; v &lt;&lt; " ";
+    std::cout &lt;&lt; "\n";
+    return 0;
+}
+      </code></pre>
+
+      <hr />
+
+      <h3><code>Chapter8_Lesson3.java</code></h3>
+      <pre><code class="language-java">
+/*
+Chapter8_Lesson3.java
+
+Autonomous Mobile Robots (Control Engineering) - Chapter 8, Lesson 3
+Sensor Likelihoods for LiDAR and Vision
+
+This file provides:
+1) A 2D occupancy grid and approximate Euclidean distance transform (multi-source Dijkstra, 8-neighbors).
+2) A LiDAR likelihood-field model.
+3) A bearing-only vision landmark likelihood with an outlier mixture.
+4) Stable log-weight normalization.
+
+Robotics ecosystem notes:
+- Java robotics stacks often use OpenCV Java bindings for vision, and (legacy) rosjava for ROS1.
+- For ROS2, Java client libraries exist but are less common; the likelihood logic here is framework-agnostic.
+
+Compile/Run:
+  javac Chapter8_Lesson3.java
+  java Chapter8_Lesson3
+*/
+import java.util.*;
+
+public class Chapter8_Lesson3 {
+
+    static class Pose2D {
+        double x, y, theta;
+        Pose2D(double x, double y, double theta) { this.x = x; this.y = y; this.theta = theta; }
+    }
+
+    static double wrapToPi(double a) {
+        double twoPi = 2.0 * Math.PI;
+        a = (a + Math.PI) % twoPi;
+        if (a &lt; 0) a += twoPi;
+        return a - Math.PI;
+    }
+
+    static class OccupancyGrid2D {
+        final int w, h;
+        final double resolution;
+        final double originX, originY;
+        final byte[] occ; // 1 obstacle, 0 free
+
+        OccupancyGrid2D(int w, int h, double resolution, double originX, double originY) {
+            this.w = w; this.h = h;
+            this.resolution = resolution;
+            this.originX = originX; this.originY = originY;
+            this.occ = new byte[w*h];
+        }
+
+        boolean inBounds(int gx, int gy) { return (0 &lt;= gx && gx &lt; w && 0 &lt;= gy && gy &lt; h); }
+        int idx(int gx, int gy) { return gy*w + gx; }
+
+        void setOcc(int gx, int gy, int v) { occ[idx(gx,gy)] = (byte)v; }
+        int  getOcc(int gx, int gy) { return occ[idx(gx,gy)]; }
+
+        int[] worldToGrid(double x, double y) {
+            int gx = (int)Math.floor((x - originX) / resolution);
+            int gy = (int)Math.floor((y - originY) / resolution);
+            return new int[]{gx, gy};
+        }
+    }
+
+    static float[] distanceTransformBrushfire(OccupancyGrid2D grid) {
+        final int W = grid.w, H = grid.h;
+        final float INF = Float.POSITIVE_INFINITY;
+        float[] dist = new float[W*H];
+        Arrays.fill(dist, INF);
+
+        class Node {
+            float d; int gx, gy;
+            Node(float d, int gx, int gy) { this.d = d; this.gx = gx; this.gy = gy; }
+        }
+
+        PriorityQueue&lt;Node&gt; pq = new PriorityQueue&lt;&gt;(Comparator.comparingDouble(n -&gt; n.d));
+
+        for (int gy = 0; gy &lt; H; gy++) {
+            for (int gx = 0; gx &lt; W; gx++) {
+                if (grid.getOcc(gx, gy) != 0) {
+                    int id = grid.idx(gx, gy);
+                    dist[id] = 0.0f;
+                    pq.add(new Node(0.0f, gx, gy));
+                }
+            }
+        }
+
+        int[][] nbh = new int[][]{
+                {-1,0},{1,0},{0,-1},{0,1},
+                {-1,-1},{-1,1},{1,-1},{1,1}
+        };
+
+        while (!pq.isEmpty()) {
+            Node cur = pq.poll();
+            int id = grid.idx(cur.gx, cur.gy);
+            if (cur.d &gt; dist[id]) continue;
+
+            for (int[] dxy : nbh) {
+                int ngx = cur.gx + dxy[0];
+                int ngy = cur.gy + dxy[1];
+                if (!grid.inBounds(ngx, ngy)) continue;
+                float step = (dxy[0] == 0 || dxy[1] == 0) ? 1.0f : (float)Math.sqrt(2.0);
+                float nd = cur.d + step;
+                int jd = grid.idx(ngx, ngy);
+                if (nd &lt; dist[jd]) {
+                    dist[jd] = nd;
+                    pq.add(new Node(nd, ngx, ngy));
+                }
+            }
+        }
+
+        for (int i = 0; i &lt; dist.length; i++) dist[i] *= (float)grid.resolution;
+        return dist;
+    }
+
+    static class LikelihoodFieldModel {
+        final OccupancyGrid2D grid;
+        final float[] distFieldM;
+        final double zMax, sigmaHit, wHit, wRand, maxDist;
+
+        LikelihoodFieldModel(OccupancyGrid2D grid, float[] distFieldM,
+                             double zMax, double sigmaHit,
+                             double wHit, double wRand, double maxDist) {
+            this.grid = grid; this.distFieldM = distFieldM;
+            this.zMax = zMax; this.sigmaHit = sigmaHit;
+            this.wHit = wHit; this.wRand = wRand; this.maxDist = maxDist;
+        }
+
+        double endpointDistance(double wx, double wy) {
+            int[] g = grid.worldToGrid(wx, wy);
+            int gx = g[0], gy = g[1];
+            if (!grid.inBounds(gx, gy)) return maxDist;
+            float d = distFieldM[grid.idx(gx, gy)];
+            return Math.min(maxDist, (double)d);
+        }
+
+        double logLikelihood(Pose2D pose, double[] ranges, double[] relAngles) {
+            int n = Math.min(ranges.length, relAngles.length);
+            double invZ = 1.0 / zMax;
+            double sig2 = sigmaHit * sigmaHit;
+            double logp = 0.0;
+
+            for (int i = 0; i &lt; n; i++) {
+                double z = Math.max(0.0, Math.min(ranges[i], zMax));
+                double a = pose.theta + relAngles[i];
+                double wx = pose.x + z * Math.cos(a);
+                double wy = pose.y + z * Math.sin(a);
+
+                double d = endpointDistance(wx, wy);
+                double pHit = Math.exp(-(d*d) / (2.0*sig2));
+                double p = wHit * pHit + wRand * invZ;
+                logp += Math.log(Math.max(p, 1e-12));
+            }
+            return logp;
+        }
+    }
+
+    static class VisionBearingModel {
+        final Map&lt;Integer, double[]&gt; landmarks; // id -&gt; [x,y]
+        final double sigmaBearing, epsOutlier;
+
+        VisionBearingModel(Map&lt;Integer, double[]&gt; landmarks, double sigmaBearing, double epsOutlier) {
+            this.landmarks = landmarks;
+            this.sigmaBearing = sigmaBearing;
+            this.epsOutlier = epsOutlier;
+        }
+
+        double logLikelihood(Pose2D pose, int[] ids, double[] bearings) {
+            int n = Math.min(ids.length, bearings.length);
+            double sig2 = sigmaBearing * sigmaBearing;
+            double norm = 1.0 / Math.sqrt(2.0 * Math.PI * sig2);
+            double uni  = 1.0 / (2.0 * Math.PI);
+
+            double logp = 0.0;
+            for (int i = 0; i &lt; n; i++) {
+                int id = ids[i];
+                double meas = bearings[i];
+                double[] lm = landmarks.get(id);
+                if (lm == null) {
+                    logp += Math.log(uni);
+                    continue;
+                }
+                double lx = lm[0], ly = lm[1];
+                double pred = wrapToPi(Math.atan2(ly - pose.y, lx - pose.x) - pose.theta);
+                double innov = wrapToPi(meas - pred);
+
+                double pIn = norm * Math.exp(-(innov*innov) / (2.0*sig2));
+                double p = (1.0 - epsOutlier) * pIn + epsOutlier * uni;
+                logp += Math.log(Math.max(p, 1e-15));
+            }
+            return logp;
+        }
+    }
+
+    static double[] normalizeLogWeights(double[] logw) {
+        double m = logw[0];
+        for (double v : logw) m = Math.max(m, v);
+        double s = 0.0;
+        for (double v : logw) s += Math.exp(v - m);
+        double lse = m + Math.log(s);
+
+        double[] w = new double[logw.length];
+        double sumw = 0.0;
+        for (int i = 0; i &lt; logw.length; i++) {
+            w[i] = Math.exp(logw[i] - lse);
+            sumw += w[i];
+        }
+        for (int i = 0; i &lt; w.length; i++) w[i] /= sumw;
+        return w;
+    }
+
+    public static void main(String[] args) {
+        // Create a synthetic map (wall + pillar)
+        int W = 120, H = 120;
+        OccupancyGrid2D grid = new OccupancyGrid2D(W, H, 0.05, -3.0, -3.0);
+        for (int gx = 10; gx &lt; 110; gx++) grid.setOcc(gx, 60, 1);
+        for (int gy = 20; gy &lt; 30; gy++)
+            for (int gx = 85; gx &lt; 95; gx++)
+                grid.setOcc(gx, gy, 1);
+
+        float[] dist = distanceTransformBrushfire(grid);
+        LikelihoodFieldModel lidar = new LikelihoodFieldModel(grid, dist, 8.0, 0.15, 0.95, 0.05, 2.0);
+
+        Map&lt;Integer, double[]&gt; landmarks = new HashMap&lt;&gt;();
+        landmarks.put(1, new double[]{-1.0, 0.0});
+        landmarks.put(2, new double[]{ 1.0, 0.5});
+        landmarks.put(3, new double[]{ 0.0,-1.0});
+        VisionBearingModel vision = new VisionBearingModel(landmarks, Math.toRadians(3.0), 0.10);
+
+        Pose2D[] particles = new Pose2D[]{
+                new Pose2D(-0.5, -0.8, Math.toRadians(90.0)),
+                new Pose2D(-0.2, -0.6, Math.toRadians(88.0)),
+                new Pose2D( 0.8,  0.1, Math.toRadians(30.0))
+        };
+
+        // Synthetic scan: 9 beams
+        double[] relAngles = new double[9];
+        for (int i = 0; i &lt; 9; i++) relAngles[i] = Math.toRadians(-40.0 + 80.0 * i / 8.0);
+        double[] ranges = new double[]{2.8, 3.0, 3.2, 3.1, 3.0, 3.2, 2.9, 2.7, 2.6};
+
+        // Vision observations: (id, bearing)
+        int[] ids = new int[]{1,2,3};
+        double[] bearings = new double[]{Math.toRadians(70.0), Math.toRadians(20.0), Math.toRadians(-95.0)};
+
+        double[] logw = new double[particles.length];
+        for (int i = 0; i &lt; particles.length; i++) {
+            double llL = lidar.logLikelihood(particles[i], ranges, relAngles);
+            double llV = vision.logLikelihood(particles[i], ids, bearings);
+            logw[i] = llL + llV;
+        }
+
+        double[] w = normalizeLogWeights(logw);
+        System.out.println("log-weights: " + Arrays.toString(logw));
+        System.out.println("weights:     " + Arrays.toString(w));
+    }
+}
+      </code></pre>
+
+      <hr />
+
+      <h3><code>Chapter8_Lesson3.m</code></h3>
+      <pre><code class="language-matlab">
+% Chapter8_Lesson3.m
+%
+% Autonomous Mobile Robots (Control Engineering) - Chapter 8, Lesson 3
+% Sensor Likelihoods for LiDAR and Vision
+%
+% This script demonstrates:
+% 1) LiDAR likelihood-field model using a precomputed distance transform.
+% 2) Bearing-only vision landmark likelihood with an outlier mixture.
+% 3) Numerically stable normalization of particle weights from log-likelihoods.
+%
+% Robotics toolbox notes:
+% - MATLAB Robotics System Toolbox: occupancyMap / binaryOccupancyMap, rayIntersection, ROS/ROS2 I/O.
+% - Navigation Toolbox provides localization/planning utilities.
+% - bwdist (Image Processing Toolbox) gives an exact Euclidean distance transform on grids.
+%
+% To run:
+%   Chapter8_Lesson3
+
+clear; clc;
+
+%% Map (binary occupancy)
+W = 120; H = 120; res = 0.05;  % cells, meters/cell
+origin = [-3.0, -3.0];         % world of cell(1,1) corner
+occ = zeros(H, W, 'uint8');
+occ(61, 11:110) = 1;           % horizontal wall (MATLAB indexing)
+occ(21:30, 86:95) = 1;         % pillar block
+
+dist_field = compute_distance_field(occ, res);  % meters
+
+%% LiDAR likelihood-field parameters
+z_max = 8.0;
+sigma_hit = 0.15;
+w_hit = 0.95;
+w_rand = 0.05;
+max_dist = 2.0;
+
+%% Vision landmark map (bearing-only)
+landmarks = [ ...
+    1, -1.0,  0.0; ...
+    2,  1.0,  0.5; ...
+    3,  0.0, -1.0  ...
+]; % [id, x, y]
+sigma_bearing = deg2rad(3.0);
+eps_outlier = 0.10;
+
+%% Particles
+particles = [ ...
+   -0.5, -0.8, deg2rad(90.0); ...
+   -0.2, -0.6, deg2rad(88.0); ...
+    0.8,  0.1, deg2rad(30.0)  ...
+];
+
+%% Synthetic measurements
+rel_angles = linspace(deg2rad(-40), deg2rad(40), 9);
+ranges = [2.8, 3.0, 3.2, 3.1, 3.0, 3.2, 2.9, 2.7, 2.6];
+
+obs_ids = [1, 2, 3];
+obs_bear = deg2rad([70.0, 20.0, -95.0]);
+
+%% Compute log-weights
+logw = zeros(size(particles,1), 1);
+for i = 1:size(particles,1)
+    pose = particles(i,:);
+    ll_lidar = lidar_loglikelihood_field(pose, ranges, rel_angles, dist_field, res, origin, ...
+        z_max, sigma_hit, w_hit, w_rand, max_dist);
+    ll_vis = vision_bearing_loglikelihood(pose, obs_ids, obs_bear, landmarks, sigma_bearing, eps_outlier);
+    logw(i) = ll_lidar + ll_vis;
+end
+
+w = normalize_log_weights(logw);
+disp('log-weights:'); disp(logw.');
+disp('weights:'); disp(w.');
+
+%% Optional: create a minimal Simulink model (programmatically)
+% The model demonstrates a MATLAB Function block computing a scan log-likelihood.
+% Uncomment to generate:
+% create_simulink_demo_model();
+
+%% -------------------- Local functions --------------------
+function dist_field = compute_distance_field(occ, res)
+% Compute distance to nearest obstacle cell (in meters).
+% If bwdist exists, use it; else approximate with a brushfire transform.
+    if exist('bwdist', 'file') == 2
+        dist_cells = bwdist(occ &gt; 0);      % distance to nearest nonzero (obstacle)
+        dist_field = dist_cells * res;
+    else
+        dist_field = brushfire_distance(occ, res);
+    end
+end
+
+function dist = brushfire_distance(occ, res)
+% Approximate Euclidean distance using multi-source Dijkstra on 8-neighbors.
+    [H,W] = size(occ);
+    INF = 1e9;
+    dist = INF * ones(H,W);
+    % priority queue emulation (inefficient but dependency-free)
+    Q = [];
+    [ys,xs] = find(occ &gt; 0);
+    for k = 1:numel(xs)
+        dist(ys(k), xs(k)) = 0;
+        Q(end+1,:) = [0, ys(k), xs(k)]; %#ok&lt;AGROW&gt;
+    end
+    nbh = [ -1 0 1.0; 1 0 1.0; 0 -1 1.0; 0 1 1.0; ...
+            -1 -1 sqrt(2); -1 1 sqrt(2); 1 -1 sqrt(2); 1 1 sqrt(2) ];
+
+    while ~isempty(Q)
+        % extract min
+        [~,ii] = min(Q(:,1));
+        cur = Q(ii,:); Q(ii,:) = [];
+        d = cur(1); y = cur(2); x = cur(3);
+        if d &gt; dist(y,x), continue; end
+        for j = 1:size(nbh,1)
+            yy = y + nbh(j,1); xx = x + nbh(j,2); c = nbh(j,3);
+            if yy &lt; 1 || yy &gt; H || xx &lt; 1 || xx &gt; W, continue; end
+            nd = d + c;
+            if nd &lt; dist(yy,xx)
+                dist(yy,xx) = nd;
+                Q(end+1,:) = [nd, yy, xx]; %#ok&lt;AGROW&gt;
+            end
+        end
+    end
+    dist = dist * res;
+end
+
+function ll = lidar_loglikelihood_field(pose, ranges, rel_angles, dist_field, res, origin, ...
+    z_max, sigma_hit, w_hit, w_rand, max_dist)
+% LiDAR likelihood field model (robust):
+%   p = w_hit*exp(-d^2/(2*sigma^2)) + w_rand*(1/z_max)
+%   ll = sum log(p)
+    x = pose(1); y = pose(2); th = pose(3);
+    sig2 = sigma_hit^2;
+    inv_z = 1.0 / z_max;
+    ll = 0.0;
+
+    for k = 1:numel(ranges)
+        z = min(max(ranges(k), 0.0), z_max);
+        a = th + rel_angles(k);
+        wx = x + z*cos(a); wy = y + z*sin(a);
+
+        [gx,gy,inside] = world_to_grid(wx, wy, res, origin, size(dist_field));
+        if inside
+            d = min(max_dist, dist_field(gy,gx));
+        else
+            d = max_dist;
+        end
+
+        p_hit = exp(-(d*d)/(2.0*sig2));
+        p = w_hit*p_hit + w_rand*inv_z;
+        ll = ll + log(max(p, 1e-12));
+    end
+end
+
+function ll = vision_bearing_loglikelihood(pose, ids, bearings, landmarks, sigma_bearing, eps_outlier)
+% Bearing-only landmark likelihood with outlier mixture.
+    x = pose(1); y = pose(2); th = pose(3);
+    sig2 = sigma_bearing^2;
+    normc = 1.0 / sqrt(2*pi*sig2);
+    uni = 1.0 / (2*pi);
+    ll = 0.0;
+
+    for i = 1:numel(ids)
+        id = ids(i);
+        idx = find(landmarks(:,1) == id, 1);
+        if isempty(idx)
+            ll = ll + log(uni);
+            continue;
+        end
+        lx = landmarks(idx,2); ly = landmarks(idx,3);
+        pred = wrap_to_pi(atan2(ly - y, lx - x) - th);
+        innov = wrap_to_pi(bearings(i) - pred);
+
+        p_in = normc * exp(-(innov*innov)/(2.0*sig2));
+        p = (1-eps_outlier)*p_in + eps_outlier*uni;
+        ll = ll + log(max(p, 1e-15));
+    end
+end
+
+function a = wrap_to_pi(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+
+function [gx,gy,inside] = world_to_grid(wx, wy, res, origin, sz)
+    gx = floor((wx - origin(1))/res) + 1;
+    gy = floor((wy - origin(2))/res) + 1;
+    inside = (gx &gt;= 1 && gx &lt;= sz(2) && gy &gt;= 1 && gy &lt;= sz(1));
+end
+
+function w = normalize_log_weights(logw)
+% Stable normalization via log-sum-exp.
+    m = max(logw);
+    s = sum(exp(logw - m));
+    lse = m + log(s);
+    w = exp(logw - lse);
+    w = w / sum(w);
+end
+
+function create_simulink_demo_model()
+% Programmatically create a minimal Simulink model with a MATLAB Function block.
+% Requires Simulink.
+    mdl = 'Chapter8_Lesson3_Simulink';
+    if bdIsLoaded(mdl), close_system(mdl, 0); end
+    new_system(mdl); open_system(mdl);
+
+    add_block('simulink/Sources/Constant', [mdl '/pose'], 'Value', '[0;0;0]');
+    add_block('simulink/Sources/Constant', [mdl '/ranges'], 'Value', '[1;1;1]');
+    add_block('simulink/Sources/Constant', [mdl '/angles'], 'Value', '[-0.5;0;0.5]');
+    add_block('simulink/User-Defined Functions/MATLAB Function', [mdl '/loglikelihood']);
+
+    set_param([mdl '/loglikelihood'], 'Script', ...
+        [ 'function ll = f(pose,ranges,angles)\n' ...
+          '% Replace with a call to lidar_loglikelihood_field using base-workspace dist_field\n' ...
+          'll = 0;\n' ...
+          'end\n' ]);
+
+    add_block('simulink/Sinks/Display', [mdl '/Display']);
+
+    add_line(mdl, 'pose/1', 'loglikelihood/1');
+    add_line(mdl, 'ranges/1', 'loglikelihood/2');
+    add_line(mdl, 'angles/1', 'loglikelihood/3');
+    add_line(mdl, 'loglikelihood/1', 'Display/1');
+
+    save_system(mdl);
+end
+      </code></pre>
+
+      <hr />
+
+      <h3><code>Chapter8_Lesson3.nb</code></h3>
+      <pre><code class="language-mathematica">
+Notebook[{
+ Cell["Chapter 8, Lesson 3 — Sensor Likelihoods for LiDAR and Vision", "Title"],
+ Cell["Chapter8_Lesson3.nb", "Subtitle"],
+ Cell["This notebook demonstrates a likelihood-field LiDAR model and a bearing-only vision landmark model, plus log-sum-exp normalization.", "Text"],
+
+ Cell[BoxData[
+  RowBox[{"(*", " ", "Map: binary occupancy grid (1=obstacle, 0=free)", " ", "*)"}]], "Input"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"W", "=", "120"}], ";",
+   RowBox[{"H", "=", "120"}], ";",
+   RowBox[{"res", "=", "0.05"}], ";",
+   RowBox[{"origin", "=", RowBox[{"{", RowBox[{"-3.0", ",", "-3.0"}], "}"}]}], ";",
+   "\n",
+   RowBox[{"occ", "=", RowBox[{"ConstantArray", "[", RowBox[{"0", ",", RowBox[{"{", RowBox[{"H", ",", "W"}], "}"}]}], "]"}]}], ";",
+   "\n",
+   RowBox[{"(* wall *)"}],
+   RowBox[{"Do", "[", RowBox[{RowBox[{RowBox[{"occ", "[", RowBox[{"[", RowBox[{"61", ",", "gx"}], "]"}], "]"}], "=", "1"}], ",",
+     RowBox[{"{", RowBox[{"gx", ",", "11", ",", "110"}], "}"}]}], "]"}], ";",
+   "\n",
+   RowBox[{"(* pillar *)"}],
+   RowBox[{"Do", "[",
+     RowBox[{RowBox[{RowBox[{"occ", "[", RowBox[{"[", RowBox[{"gy", ",", "gx"}], "]"}], "]"}], "=", "1"}], ",",
+      RowBox[{"{", RowBox[{"gy", ",", "21", ",", "30"}], "}"}], ",",
+      RowBox[{"{", RowBox[{"gx", ",", "86", ",", "95"}], "}"}]}], "]"}], ";"
+  }]], "Input"],
+
+ Cell["Distance transform (requires DistanceTransform in your Mathematica version).", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"img", "=", RowBox[{"Image", "[", RowBox[{"occ", ",", "\"Bit\""}], "]"}]}], ";",
+   "\n",
+   RowBox[{"distImg", "=", RowBox[{"DistanceTransform", "[", "img", "]"}]}], ";",
+   "\n",
+   RowBox[{"dist", "=", RowBox[{"ImageData", "[", "distImg", "]"}]}], ";",
+   "\n",
+   RowBox[{"distM", "=", RowBox[{"dist", "*", "res"}]}], ";"
+  }]], "Input"],
+
+ Cell["Utility functions.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"wrapToPi", "[", "a_", "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{RowBox[{"{", "b", "}"}], ",",
+     RowBox[{
+      RowBox[{"b", "=", RowBox[{"Mod", "[", RowBox[{RowBox[{"a", "+", "Pi"}], ",", RowBox[{"2", "Pi"}]}], "]"}]}], ";",
+      RowBox[{"b", "-", "Pi"}]}]}], "]"}]}]], "Input"],
+
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"logSumExp", "[", "v_List", "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{RowBox[{"{", RowBox[{"m", ",", "s"}], "}"}], ",",
+     RowBox[{
+      RowBox[{"m", "=", RowBox[{"Max", "[", "v", "]"}]}], ";",
+      RowBox[{"s", "=", RowBox[{"Total", "[", RowBox[{"Exp", "[", RowBox[{"v", "-", "m"}], "]"}], "]"}]}], ";",
+      RowBox[{"m", "+", RowBox[{"Log", "[", "s", "]"}]}]}]}], "]"}]}]], "Input"],
+
+ Cell["LiDAR likelihood field log-likelihood.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"lidarLogLikelihood", "[",
+    RowBox[{"pose_", ",", "ranges_", ",", "angles_", ",", "zMax_", ",", "sigmaHit_", ",", "wHit_", ",", "wRand_", ",", "maxDist_"}], "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{
+     RowBox[{"{", RowBox[{"x", ",", "y", ",", "th", ",", "sig2", ",", "invZ", ",", "ll", ",", "n"}], "}"}], ",",
+     RowBox[{
+      RowBox[{"x", "=", RowBox[{"pose", "[", RowBox[{"[", "1", "]"}], "]"}]}], ";",
+      RowBox[{"y", "=", RowBox[{"pose", "[", RowBox[{"[", "2", "]"}], "]"}]}], ";",
+      RowBox[{"th", "=", RowBox[{"pose", "[", RowBox[{"[", "3", "]"}], "]"}]}], ";",
+      RowBox[{"sig2", "=", RowBox[{"sigmaHit", "^", "2"}]}], ";",
+      RowBox[{"invZ", "=", RowBox[{"1.0", "/", "zMax"}]}], ";",
+      RowBox[{"ll", "=", "0.0"}], ";",
+      RowBox[{"n", "=", RowBox[{"Min", "[", RowBox[{RowBox[{"Length", "[", "ranges", "]"}], ",", RowBox[{"Length", "[", "angles", "]"}]}], "]"}]}], ";",
+      "\n",
+      RowBox[{"Do", "[",
+       RowBox[{
+        RowBox[{"Module", "[", RowBox[{
+          RowBox[{"{", RowBox[{"z", ",", "a", ",", "wx", ",", "wy", ",", "gx", ",", "gy", ",", "inside", ",", "d", ",", "pHit", ",", "p"}], "}"}], ",",
+          RowBox[{
+           RowBox[{"z", "=", RowBox[{"Clip", "[", RowBox[{RowBox[{"ranges", "[", RowBox[{"[", "k", "]"}], "]"}], ",", RowBox[{"{", RowBox[{"0.0", ",", "zMax"}], "}"}]}], "]"}]}], ";",
+           RowBox[{"a", "=", RowBox[{"th", "+", RowBox[{"angles", "[", RowBox[{"[", "k", "]"}], "]"}]}]}], ";",
+           RowBox[{"wx", "=", RowBox[{"x", "+", RowBox[{"z", "*", RowBox[{"Cos", "[", "a", "]"}]}]}]}], ";",
+           RowBox[{"wy", "=", RowBox[{"y", "+", RowBox[{"z", "*", RowBox[{"Sin", "[", "a", "]"}]}]}]}], ";",
+           RowBox[{"gx", "=", RowBox[{"Floor", "[", RowBox[{RowBox[{"(", RowBox[{"wx", "-", RowBox[{"origin", "[", RowBox[{"[", "1", "]"}], "]"}]}], ")"}], "/", "res"}], "]"}], "+", "1"}]}], ";",
+           RowBox[{"gy", "=", RowBox[{"Floor", "[", RowBox[{RowBox[{"(", RowBox[{"wy", "-", RowBox[{"origin", "[", RowBox[{"[", "2", "]"}], "]"}]}], ")"}], "/", "res"}], "]"}], "+", "1"}]}], ";",
+           RowBox[{"inside", "=", RowBox[{"And", "[", RowBox[{RowBox[{"1", "&lt;=", "gx", "&lt;=", "W"}], ",", RowBox[{"1", "&lt;=", "gy", "&lt;=", "H"}]}], "]"}]}], ";",
+           RowBox[{"d", "=", RowBox[{"If", "[", RowBox[{"inside", ",", RowBox[{"Min", "[", RowBox[{"maxDist", ",", RowBox[{"distM", "[", RowBox[{"[", RowBox[{"gy", ",", "gx"}], "]"}], "]"}]}], "]"}], ",", "maxDist"}], "]"}]}], ";",
+           RowBox[{"pHit", "=", RowBox[{"Exp", "[", RowBox[{RowBox[{"-", RowBox[{"d", "^", "2"}]}], "/", RowBox[{"(", RowBox[{"2.0", "*", "sig2"}], ")"}]}], "]"}]}], ";",
+           RowBox[{"p", "=", RowBox[{"wHit", "*", "pHit", "+", RowBox[{"wRand", "*", "invZ"}]}]}], ";",
+           RowBox[{"ll", "=", RowBox[{"ll", "+", RowBox[{"Log", "[", RowBox[{"Max", "[", RowBox[{"p", ",", "1*^-12"}], "]"}], "]"}]}]}], ";"
+          }]}], "]"}], ",",
+        RowBox[{"{", RowBox[{"k", ",", "1", ",", "n"}], "}"}]}], "]"}], ";",
+      "ll"
+     }]}], "]"}]}]], "Input"],
+
+ Cell["Vision bearing-only landmark likelihood.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"visionLogLikelihood", "[", RowBox[{"pose_", ",", "obs_", ",", "landmarks_Association", ",", "sigma_", ",", "eps_"}], "]"}], ":=",
+   RowBox[{"Module", "[", RowBox[{
+     RowBox[{"{", RowBox[{"x", ",", "y", ",", "th", ",", "sig2", ",", "norm", ",", "uni", ",", "ll"}], "}"}], ",",
+     RowBox[{
+      RowBox[{"x", "=", RowBox[{"pose", "[", RowBox[{"[", "1", "]"}], "]"}]}], ";",
+      RowBox[{"y", "=", RowBox[{"pose", "[", RowBox[{"[", "2", "]"}], "]"}]}], ";",
+      RowBox[{"th", "=", RowBox[{"pose", "[", RowBox[{"[", "3", "]"}], "]"}]}], ";",
+      RowBox[{"sig2", "=", RowBox[{"sigma", "^", "2"}]}], ";",
+      RowBox[{"norm", "=", RowBox[{"1.0", "/", RowBox[{"Sqrt", "[", RowBox[{"2.0", "*", "Pi", "*", "sig2"}], "]"}]}]}], ";",
+      RowBox[{"uni", "=", RowBox[{"1.0", "/", RowBox[{"(", RowBox[{"2.0", "*", "Pi"}], ")"}]}]}], ";",
+      RowBox[{"ll", "=", "0.0"}], ";",
+      "\n",
+      RowBox[{"Do", "[",
+       RowBox[{
+        RowBox[{"Module", "[", RowBox[{
+          RowBox[{"{", RowBox[{"id", ",", "bearingMeas", ",", "lm", ",", "lx", ",", "ly", ",", "pred", ",", "innov", ",", "pIn", ",", "p"}], "}"}], ",",
+          RowBox[{
+           RowBox[{"id", "=", RowBox[{"obs", "[", RowBox[{"[", RowBox[{"k", ",", "1"}], "]"}], "]"}]}], ";",
+           RowBox[{"bearingMeas", "=", RowBox[{"obs", "[", RowBox[{"[", RowBox[{"k", ",", "2"}], "]"}], "]"}]}], ";",
+           RowBox[{"If", "[", RowBox[{RowBox[{"KeyExistsQ", "[", RowBox[{"landmarks", ",", "id"}], "]"}], ",",
+             RowBox[{
+              RowBox[{"lm", "=", RowBox[{"landmarks", "[", "id", "]"}]}], ";",
+              RowBox[{"lx", "=", RowBox[{"lm", "[", RowBox[{"[", "1", "]"}], "]"}]}], ";",
+              RowBox[{"ly", "=", RowBox[{"lm", "[", RowBox[{"[", "2", "]"}], "]"}]}], ";",
+              RowBox[{"pred", "=", RowBox[{"wrapToPi", "[", RowBox[{RowBox[{"ArcTan", "[", RowBox[{RowBox[{"lx", "-", "x"}], ",", RowBox[{"ly", "-", "y"}]}], "]"}], "-", "th"}], "]"}]}], ";",
+              RowBox[{"innov", "=", RowBox[{"wrapToPi", "[", RowBox[{"bearingMeas", "-", "pred"}], "]"}]}], ";",
+              RowBox[{"pIn", "=", RowBox[{"norm", "*", RowBox[{"Exp", "[", RowBox[{RowBox[{"-", RowBox[{"innov", "^", "2"}]}], "/", RowBox[{"(", RowBox[{"2.0", "*", "sig2"}], ")"}]}], "]"}]}]}], ";",
+              RowBox[{"p", "=", RowBox[{RowBox[{"(", RowBox[{"1.0", "-", "eps"}], ")"}], "*", "pIn", "+", RowBox[{"eps", "*", "uni"}]}]}], ";"
+             }],
+             RowBox[{"p", "=", "uni"}]
+            ]"}], "]"}], ";",
+           RowBox[{"ll", "=", RowBox[{"ll", "+", RowBox[{"Log", "[", RowBox[{"Max", "[", RowBox[{"p", ",", "1*^-15"}], "]"}], "]"}]}]}], ";"
+          }]}], "]"}], ",",
+        RowBox[{"{", RowBox[{"k", ",", "1", ",", RowBox[{"Length", "[", "obs", "]"}]}], "}"}]}], "]"}], ";",
+      "ll"
+     }]}], "]"}]}]], "Input"],
+
+ Cell["Demo: compute weights for three particles.", "Text"],
+ Cell[BoxData[
+  RowBox[{
+   RowBox[{"particles", "=", RowBox[{"{",
+    RowBox[{
+     RowBox[{"{", RowBox[{"-0.5", ",", "-0.8", ",", RowBox[{"90", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"-0.2", ",", "-0.6", ",", RowBox[{"88", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"0.8", ",", "0.1", ",", RowBox[{"30", "Degree"}]}], "}"}]
+    }], "}"}]}], ";",
+   "\n",
+   RowBox[{"ranges", "=", RowBox[{"{", RowBox[{"2.8", ",", "3.0", ",", "3.2", ",", "3.1", ",", "3.0", ",", "3.2", ",", "2.9", ",", "2.7", ",", "2.6"}], "}"}]}], ";",
+   "\n",
+   RowBox[{"angles", "=", RowBox[{"Table", "[", RowBox[{RowBox[{"(-40", "+", RowBox[{"80", "*", RowBox[{"(", RowBox[{"i", "/", "8"}], ")"}]}]}], ")"}], "Degree"}], ",", RowBox[{"{", RowBox[{"i", ",", "0", ",", "8"}], "}"}]}], "]"}]}], ";",
+   "\n",
+   RowBox[{"landmarks", "=", RowBox[{"&lt;|", RowBox[{"1", "-&gt;", RowBox[{"{", RowBox[{"-1.0", ",", "0.0"}], "}"}], ",", "2", "-&gt;", RowBox[{"{", RowBox[{"1.0", ",", "0.5"}], "}"}], ",", "3", "-&gt;", RowBox[{"{", RowBox[{"0.0", ",", RowBox[{"-1.0"}]}], "}"}]}], "|&gt;"}]}], ";",
+   "\n",
+   RowBox[{"obs", "=", RowBox[{"{", RowBox[{
+     RowBox[{"{", RowBox[{"1", ",", RowBox[{"70", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"2", ",", RowBox[{"20", "Degree"}]}], "}"}], ",",
+     RowBox[{"{", RowBox[{"3", ",", RowBox[{"-95", "Degree"}]}], "}"}]
+   }], "}"}]}], ";",
+   "\n",
+   RowBox[{"zMax", "=", "8.0"}], ";",
+   RowBox[{"sigmaHit", "=", "0.15"}], ";",
+   RowBox[{"wHit", "=", "0.95"}], ";",
+   RowBox[{"wRand", "=", "0.05"}], ";",
+   RowBox[{"maxDist", "=", "2.0"}], ";",
+   RowBox[{"sigmaBear", "=", RowBox[{"3", "Degree"}]}], ";",
+   RowBox[{"eps", "=", "0.10"}], ";",
+   "\n",
+   RowBox[{"logw", "=", RowBox[{"Table", "[",
+     RowBox[{
+      RowBox[{
+       RowBox[{"lidarLogLikelihood", "[", RowBox[{RowBox[{"particles", "[", RowBox[{"[", "i", "]"}], "]"}], ",", "ranges", ",", "angles", ",", "zMax", ",", "sigmaHit", ",", "wHit", ",", "wRand", ",", "maxDist"}], "]"}], "+",
+       RowBox[{"visionLogLikelihood", "[", RowBox[{RowBox[{"particles", "[", RowBox[{"[", "i", "]"}], "]"}], ",", "obs", ",", "landmarks", ",", "sigmaBear", ",", "eps"}], "]"}]
+      }],
+      ",", RowBox[{"{", RowBox[{"i", ",", "1", ",", RowBox[{"Length", "[", "particles", "]"}]}], "}"}]}], "]"}]}], ";",
+   "\n",
+   RowBox[{"lse", "=", RowBox[{"logSumExp", "[", "logw", "]"}]}], ";",
+   RowBox[{"w", "=", RowBox[{"Exp", "[", RowBox[{"logw", "-", "lse"}], "]"}]}], ";",
+   RowBox[{"w", "=", RowBox[{"w", "/", RowBox[{"Total", "[", "w", "]"}]}]}], ";",
+   "\n",
+   RowBox[{"logw", "\n", "w"}]
+  }]], "Input"]
+},
+WindowSize -&gt; {1000, 700},
+StyleDefinitions -&gt; "Default.nb"
+]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong
+          >Problem 1 (Truncated-Gaussian normalization for the hit
+          model):</strong
+        >
+        Let
+        <strong
+          >\(p_{\text{hit} }(z\mid z^\ast) =
+          \eta\exp(-(z-z^\ast)^2/(2\sigma^2))\mathbf{1}_{0 \le z \le z_{\max}
+          }\)</strong
+        >. Derive an explicit expression for <strong>\(\eta\)</strong> in terms
+        of the standard normal CDF <strong>\(\Phi\)</strong>.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Substitute
+        <strong>\(u=(z-z^\ast)/\sigma\)</strong>, so
+        <strong>\(dz = \sigma\,du\)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \eta^{-1} = \int_0^{z_{\max} }
+        \exp\!\left(-\frac{(z-z^\ast)^2}{2\sigma^2}\right)dz = \sigma
+        \int_{(0-z^\ast)/\sigma}^{(z_{\max}-z^\ast)/\sigma}
+        \exp\!\left(-\frac{u^2}{2}\right)du = \\ \sigma\sqrt{2\pi} \left[
+        \Phi\!\left(\frac{z_{\max}-z^\ast}{\sigma}\right) -
+        \Phi\!\left(\frac{-z^\ast}{\sigma}\right) \right]. \]
+      </h4>
+      <p>
+        Therefore
+        <strong
+          >\( \eta =
+          \big(\sigma\sqrt{2\pi}(\Phi((z_{\max}-z^\ast)/\sigma)-\Phi(-z^\ast/\sigma))\big)^{-1}
+          \)</strong
+        >.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Beam-mixture decision structure):</strong>
+        For a single range measurement <strong>\(z\)</strong>, define a
+        practical rule-based evaluation order for the mixture: detect
+        <strong>\(z=z_{\max}\)</strong> (max-return) and otherwise evaluate the
+        continuous components. Provide a flow consistent with the mixture model.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> One consistent evaluation flow is shown below
+        (the final probability is always the full mixture; the flow only
+        optimizes computation).
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  Z["Beam measurement z"] --> R["Is z == z_max?"]
+  R -->|yes| MAX["Use p_max \n(plus p_rand if modeled)"]
+  R -->|no| S["Is z less than z_star?"]
+  S -->|yes| SHORT["Evaluate p_short, p_hit, p_rand"]
+  S -->|no| HIT["Evaluate p_hit, p_rand"]
+  SHORT --> MIX["Compute mixture p = sum_k w_k p_k"]
+  HIT --> MIX
+  MAX --> MIX
+        </pre>
+      </div>
+
+      <p>
+        <strong>Problem 3 (Deriving the likelihood-field exponential):</strong>
+        Assume the nearest obstacle point to the measured endpoint
+        <strong>\(\mathbf{p}\)</strong> is <strong>\(\mathbf{p}^\ast\)</strong>.
+        If
+        <strong>\(\mathbf{p}=\mathbf{p}^\ast+\boldsymbol{\epsilon}\)</strong>
+        with
+        <strong
+          >\(\boldsymbol{\epsilon}\sim\mathcal{N}(\mathbf{0},\sigma^2\mathbf{I})\)</strong
+        >, show that
+        <strong
+          >\(p(\mathbf{p}\mid\mathbf{x},\mathbf{m}) \propto
+          \exp(-d(\mathbf{p})^2/(2\sigma^2))\)</strong
+        >.
+      </p>
+
+      <p><strong>Solution:</strong> The Gaussian density is:</p>
+      <h4 class="mathJax">
+        \[ p(\mathbf{p}\mid\mathbf{p}^\ast) = \frac{1}{2\pi\sigma^2}
+        \exp\!\left(-\frac{\|\mathbf{p}-\mathbf{p}^\ast\|^2}{2\sigma^2}\right).
+        \]
+      </h4>
+      <p>
+        If the obstacle boundary point is unknown, a Laplace (max) approximation
+        uses the closest feasible boundary point:
+        <strong
+          >\(\mathbf{p}^\ast = \arg\min_{\mathbf{q}\in\partial\mathbf{m}
+          }\|\mathbf{p}-\mathbf{q}\|\)</strong
+        >. Then
+        <strong>\(\|\mathbf{p}-\mathbf{p}^\ast\| = d(\mathbf{p})\)</strong>,
+        yielding:
+      </p>
+      <h4 class="mathJax">
+        \[ p(\mathbf{p}\mid\mathbf{x},\mathbf{m}) \approx C\,
+        \exp\!\left(-\frac{d(\mathbf{p})^2}{2\sigma^2}\right), \]
+      </h4>
+      <p>
+        where <strong>\(C\)</strong> absorbs constants (including local
+        curvature effects) that are approximately pose-independent for small
+        noise.
+      </p>
+
+      <p>
+        <strong
+          >Problem 4 (Log-sum-exp invariance and numerical stability):</strong
+        >
+        Let unnormalized log-weights be <strong>\(\ell_n\)</strong>. Prove that
+        subtracting <strong>\(m=\max_n \ell_n\)</strong> before exponentiation
+        does not change normalized weights and reduces overflow/underflow risk.
+      </p>
+
+      <p><strong>Solution:</strong> Define:</p>
+      <h4 class="mathJax">
+        \[ \tilde{w}_n = e^{\ell_n},\quad \tilde{w}_n' = e^{\ell_n-m}. \]
+      </h4>
+      <p>Then <strong>\(\tilde{w}_n' = e^{-m}\tilde{w}_n\)</strong>, so:</p>
+      <h4 class="mathJax">
+        \[ \frac{\tilde{w}_n'}{\sum_j \tilde{w}_j'} =
+        \frac{e^{-m}\tilde{w}_n}{\sum_j e^{-m}\tilde{w}_j} =
+        \frac{\tilde{w}_n}{\sum_j \tilde{w}_j}. \]
+      </h4>
+      <p>
+        Numerically, each exponent now satisfies
+        <strong>\(\ell_n-m \le 0\)</strong>, preventing overflow and improving
+        precision when weights differ by many orders of magnitude.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Outlier mixture in vision):</strong>
+        For
+        <strong
+          >\(p(\beta)=(1-\epsilon)p_{\text{in}
+          }(\beta)+\epsilon/(2\pi)\)</strong
+        >, show that <strong>\(p(\beta) \ge \epsilon/(2\pi)\)</strong> for all
+        <strong>\(\beta\)</strong> and interpret the effect on MCL robustness.
+      </p>
+
+      <p>
+        <strong>Solution:</strong> Since
+        <strong>\(p_{\text{in} }(\beta)\ge 0\)</strong> and
+        <strong>\(1-\epsilon\ge 0\)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ p(\beta) = (1-\epsilon)p_{\text{in} }(\beta)+\frac{\epsilon}{2\pi}
+        \ge \frac{\epsilon}{2\pi}. \]
+      </h4>
+      <p>
+        Hence the log-likelihood is lower-bounded:
+        <strong>\(\log p(\beta) \ge \log(\epsilon/(2\pi))\)</strong>, so a
+        single mismatched feature cannot drive the entire particle weight to
+        numerical zero, preventing catastrophic weight collapse in the presence
+        of outliers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Summary</h2>
+    <div class="down-content">
+      <p>
+        We constructed observation likelihoods for particle-filter localization
+        under explicit noise/outlier processes. For LiDAR, we derived the robust
+        beam mixture model and the computationally efficient likelihood-field
+        model based on distance transforms. For vision, we developed a
+        bearing-only landmark likelihood with an outlier mixture. Finally, we
+        established log-domain weight computation and log-sum-exp normalization,
+        and introduced temperature scaling as a principled way to control
+        likelihood peakiness and mitigate particle degeneracy.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. References</h2>
+    <ol>
+      <li>
+        Fox, D., Burgard, W., Dellaert, F., &amp; Thrun, S. (1999). Monte Carlo
+        Localization: Efficient Position Estimation for Mobile Robots.
+        <em
+          >Proceedings of the AAAI National Conference on Artificial
+          Intelligence (AAAI)</em
+        >.
+      </li>
+      <li>
+        Thrun, S. (2000). Probabilistic Algorithms in Robotics.
+        <em>Technical Report CMU-CS-00-126</em>, Carnegie Mellon University.
+      </li>
+      <li>
+        Thrun, S., Burgard, W., &amp; Fox, D. (2005).
+        <em>Probabilistic Robotics</em>. MIT Press.
+      </li>
+      <li>
+        Pfaff, P., Plagemann, C., &amp; Burgard, W. (2007). Improved Likelihood
+        Models for Probabilistic Localization Based on Range Scans.
+        <em
+          >Proceedings of the IEEE/RSJ International Conference on Intelligent
+          Robots and Systems (IROS)</em
+        >.
+      </li>
+      <li>
+        Grisetti, G., Stachniss, C., &amp; Burgard, W. (2007). Improved
+        Techniques for Grid Mapping with Rao–Blackwellized Particle Filters.
+        <em>IEEE Transactions on Robotics</em>, 23(1), 34–46.
+      </li>
+      <li>
+        Se, S., Lowe, D.G., &amp; Little, J.J. (2002). Mobile Robot Localization
+        and Mapping with Uncertainty using Scale-Invariant Visual Landmarks.
+        <em>The International Journal of Robotics Research</em>, 21(8), 735–758.
+      </li>
+      <li>
+        Dellaert, F., Fox, D., Burgard, W., &amp; Thrun, S. (1999). Using the
+        Condensation Algorithm for Robust, Vision-Based Mobile Robot
+        Localization.
+        <em
+          >Proceedings of the IEEE Conference on Computer Vision and Pattern
+          Recognition (CVPR)</em
+        >.
+      </li>
+      <li>
+        Olson, E. (2009). Real-Time Correlative Scan Matching.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter8/Lesson2.html">
+          Lesson 2: Importance Sampling and Resampling
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter8/Lesson4.html">
+          Lesson 4: Degeneracy, Kidnapped Robot Problem
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="active-lesson" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

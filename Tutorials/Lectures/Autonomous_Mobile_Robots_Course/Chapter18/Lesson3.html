@@ -1,0 +1,2580 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 18: Outdoor and Field AMR - Lesson 3: Long-Range Localization Drift Handling | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 18: Outdoor and Field AMR</h1>
+    <h3><strong>Lesson 3: Long-Range Localization Drift Handling</strong></h3>
+    <p>
+      This lesson develops a rigorous treatment of localization drift in
+      long-range outdoor missions, focusing on how bias, slip, and intermittent
+      absolute sensing produce position/heading error growth, and how to control
+      that growth with consistency-aware filtering, innovation gating,
+      re-anchoring, and graph-based corrections. The emphasis is on mathematical
+      error models and practical implementation patterns suitable for field
+      AMRs.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Why Long-Range Drift Becomes a First-Class Problem</h2>
+    <div class="down-content">
+      <p>
+        In short indoor runs, odometry and IMU errors may remain tolerable. In
+        field AMR missions (agriculture, inspection, delivery, mining, campus
+        logistics), the robot can travel hundreds of meters or kilometers, and
+        small heading or bias errors integrate into large lateral displacement.
+        The key issue is not only instantaneous accuracy, but
+        <em>drift growth rate</em> when GNSS, RTK, or map matches are degraded.
+      </p>
+      <p>
+        We model the localization stack as a multi-rate estimator combining
+        relative motion increments (wheel/IMU/visual odometry) with occasional
+        absolute constraints (GNSS/RTK, map anchors, loop closures). The
+        estimator must (i) predict drift during outages, (ii) detect
+        inconsistent measurements, and (iii) re-anchor safely when a reliable
+        absolute observation returns.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Wheel + IMU + VIO increments"] --> B["Prediction step (state + covariance)"]
+  B --> C["Integrity checks (innovation, quality flags)"]
+  C --> D["Absolute updates (GNSS/RTK when valid)"]
+  C --> E["Anchor updates (map match / loop closure)"]
+  D --> F["Bias correction and covariance contraction"]
+  E --> F
+  F --> G["Pose for navigation + drift health metrics"]
+  G --> B
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Drift Sources in Outdoor AMR</h2>
+    <div class="down-content">
+      <p>
+        The dominant long-range drift mechanisms in outdoor ground robots are:
+      </p>
+      <ul>
+        <li>
+          <strong>Gyro bias:</strong> heading bias causes cross-track position
+          drift that grows with traveled distance.
+        </li>
+        <li>
+          <strong>Wheel slip / terrain interaction:</strong> unmodeled slip
+          changes effective motion increments.
+        </li>
+        <li>
+          <strong>GNSS intermittency:</strong> under canopy, buildings, or
+          multipath, absolute updates become infrequent or unreliable.
+        </li>
+        <li>
+          <strong>Map registration failures:</strong> visual/LiDAR
+          relocalization can produce outliers if the scene changed.
+        </li>
+        <li>
+          <strong>Time synchronization and calibration residuals:</strong> small
+          delays become state estimation bias during fast turns.
+        </li>
+      </ul>
+      <p>
+        A useful decomposition is
+        <strong>
+          \( \mathbf{e}_p = \mathbf{e}_{\parallel} + \mathbf{e}_{\perp}
+          \)</strong
+        >, where the along-track error is often dominated by speed/scale error,
+        while the cross-track error is dominated by heading drift.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. State and Process Model for Drift Handling</h2>
+    <div class="down-content">
+      <p>
+        We use a compact 2D error-aware state (sufficient for the lesson topic):
+        <strong> \( \mathbf{x} = [x,\; y,\; \psi,\; b_g]^T \)</strong>, where
+        <strong> \( b_g \)</strong> is gyro bias. Let
+        <strong> \( v_m \)</strong> and <strong> \( \omega_m \)</strong>
+        be measured forward speed and yaw rate.
+      </p>
+      <h4 class="mathJax">
+        \[ \dot x = v_m \cos\psi, \qquad \dot y = v_m \sin\psi, \qquad \dot \psi
+        = \omega_m - b_g, \qquad \dot b_g = n_b \]
+      </h4>
+      <p>
+        Here <strong> \( n_b \)</strong> is a bias random-walk term. In discrete
+        time with sample period <strong> \( \Delta t \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{x}_{k+1} = f(\mathbf{x}_k, u_k) + \mathbf{w}_k, \qquad u_k =
+        [v_m,\; \omega_m]^T \]
+      </h4>
+      <p>
+        The first-order linearization around the current estimate gives the
+        state-transition Jacobian
+        <strong> \( \mathbf{F}_k = \partial f / \partial \mathbf{x} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{F}_k = \begin{bmatrix} 1 & 0 & -v_m \Delta t \sin\hat\psi_k &
+        0 \\ 0 & 1 & v_m \Delta t \cos\hat\psi_k & 0 \\ 0 & 0 & 1 & -\Delta t \\
+        0 & 0 & 0 & 1 \end{bmatrix} \]
+      </h4>
+      <p>The covariance propagation step is the standard EKF prediction:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k+1|k} = \mathbf{F}_k\mathbf{P}_{k|k}\mathbf{F}_k^T +
+        \mathbf{Q}_k \]
+      </h4>
+      <p>
+        In outdoor missions, <strong> \( \mathbf{Q}_k \)</strong> should be made
+        terrain-dependent (rough/soft/sloped terrain &rarr; larger process
+        uncertainty).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Mathematical Drift Growth Analysis</h2>
+    <div class="down-content">
+      <p>
+        <strong>Proposition 1 (Heading-error to cross-track drift):</strong>
+        Suppose the robot traverses a path segment of arc length
+        <strong> \( L \)</strong> while the estimated heading has constant error
+        <strong> \( \delta\psi \)</strong>. Then the cross-track displacement
+        satisfies
+      </p>
+      <h4 class="mathJax">
+        \[ e_{\perp} = L\sin(\delta\psi), \qquad |e_{\perp}| \le L|\delta\psi|
+        \]
+      </h4>
+      <p>
+        <strong>Proof:</strong> Resolve the true displacement vector and the
+        estimated displacement vector in a frame aligned with the estimated
+        heading. The normal component difference is exactly
+        <strong> \( L\sin(\delta\psi) \)</strong>. Since
+        <strong> \( |\sin z| \le |z| \)</strong> for all real
+        <strong> \( z \)</strong>, the bound follows.
+      </p>
+      <p>
+        This is the main reason small heading bias becomes dangerous in
+        long-range missions: the drift scales approximately linearly with
+        distance traveled.
+      </p>
+
+      <p>
+        <strong>Proposition 2 (Outage drift with uncertain gyro bias):</strong>
+        Consider a straight-motion outage interval of duration
+        <strong> \( T \)</strong> and constant speed <strong> \( v \)</strong>.
+        Let heading error evolve as
+        <strong> \( \delta\psi(t) = \delta\psi_0 - \delta b_g t \)</strong>.
+        Under the small-angle approximation, the cross-track error at the end of
+        the outage is
+      </p>
+      <h4 class="mathJax">
+        \[ e_{\perp}(T) \approx v \int_0^T \delta\psi(t)\,dt =
+        v\left(T\delta\psi_0 - \frac{T^2}{2}\delta b_g\right) \]
+      </h4>
+      <p>
+        If <strong> \( \delta\psi_0 \)</strong> and
+        <strong> \( \delta b_g \)</strong>
+        are zero-mean independent random variables with variances
+        <strong> \( \sigma_\psi^2 \)</strong> and
+        <strong> \( \sigma_b^2 \)</strong>, then
+      </p>
+      <h4 class="mathJax">
+        \[ \operatorname{Var}[e_{\perp}(T)] \approx v^2\left(T^2\sigma_\psi^2 +
+        \frac{1}{4}T^4\sigma_b^2\right) \]
+      </h4>
+      <p>
+        The <strong> \( T^4 \)</strong> term (in variance) shows why bias
+        uncertainty is a severe long-horizon failure mode during GNSS outages.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Absolute Measurements, Innovation Gating, and Re-anchoring</h2>
+    <div class="down-content">
+      <p>
+        Absolute updates enter the estimator as measurements
+        <strong> \( \mathbf{z}_k = h(\mathbf{x}_k)+\mathbf{v}_k \)</strong>. For
+        GNSS/RTK position:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{z}_k^{\mathrm{gnss} } = \begin{bmatrix} x_k \\ y_k
+        \end{bmatrix} + \mathbf{v}_k, \qquad \mathbf{R}_k^{\mathrm{gnss} } =
+        \begin{bmatrix} \sigma_x^2 & 0 \\ 0 & \sigma_y^2 \end{bmatrix} \]
+      </h4>
+      <p>The EKF innovation and its covariance are</p>
+      <h4 class="mathJax">
+        \[ \boldsymbol{\nu}_k = \mathbf{z}_k - h(\hat{\mathbf{x} }_{k|k-1}),
+        \qquad \mathbf{S}_k = \mathbf{H}_k\mathbf{P}_{k|k-1}\mathbf{H}_k^T +
+        \mathbf{R}_k \]
+      </h4>
+      <p>
+        We reject suspicious absolute measurements using the Mahalanobis
+        distance:
+      </p>
+      <h4 class="mathJax">
+        \[ d_k^2 = \boldsymbol{\nu}_k^T \mathbf{S}_k^{-1} \boldsymbol{\nu}_k \]
+      </h4>
+      <p>
+        Gate acceptance uses a chi-square threshold
+        <strong> \( d_k^2 &lt; \gamma_\alpha \)</strong> (with degrees of
+        freedom equal to the measurement dimension). This protects the filter
+        from GNSS multipath spikes or false map matches.
+      </p>
+      <p>
+        When a reliable map-based relocalization or loop closure is available,
+        we apply an
+        <strong>anchor update</strong> (position and often heading), which
+        sharply contracts the covariance and corrects accumulated drift.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Factor-Graph View of Long-Range Drift Correction</h2>
+    <div class="down-content">
+      <p>
+        Chapter 12 introduced pose graphs. For long-range outdoor missions,
+        drift handling is often best implemented in a factor-graph backend while
+        a filter runs online. Let
+        <strong> \( \mathbf{x}_0,\dots,\mathbf{x}_N \)</strong> be robot poses.
+        A standard objective is
+      </p>
+      <h4 class="mathJax">
+        \[ J(\mathbf{X}) = \sum_{k=0}^{N-1} \|\mathbf{r}_k^{\mathrm{odom}
+        }\|_{\mathbf{\Omega}_k}^2 + \sum_{j \in \mathcal{G} }
+        \|\mathbf{r}_j^{\mathrm{gnss} }\|_{\mathbf{\Lambda}_j}^2 + \sum_{\ell
+        \in \mathcal{A} } \rho\!\left(\|\mathbf{r}_\ell^{\mathrm{anchor}
+        }\|_{\mathbf{\Sigma}_\ell}^2\right) \]
+      </h4>
+      <p>
+        where <strong> \( \rho(\cdot) \)</strong> is a robust loss (e.g., Huber)
+        for anchor/loop-closure outlier suppression.
+      </p>
+      <h4 class="mathJax">
+        \[ \rho_{\mathrm{Huber} }(s)= \begin{cases} s, & s \le \delta^2 \\
+        2\delta\sqrt{s} - \delta^2, & s &gt; \delta^2 \end{cases} \]
+      </h4>
+      <p>
+        <strong>Why this helps drift:</strong> odometry factors alone create an
+        estimator with weak long-range observability to global position and
+        heading. Anchor and GNSS factors inject absolute information that remove
+        (or reduce) the low-frequency drift modes.
+      </p>
+      <p>
+        In practice, many systems use a hybrid design: EKF/ESKF for real-time
+        navigation plus a smoothing backend to feed periodic bias and pose
+        corrections.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Consistency Monitoring and Adaptive Noise Inflation</h2>
+    <div class="down-content">
+      <p>
+        Drift handling is not only about adding corrections; it also requires
+        preventing
+        <em>overconfidence</em>. A common consistency metric is the normalized
+        innovation squared (NIS):
+      </p>
+      <h4 class="mathJax">
+        \[ \mathrm{NIS}_k = \boldsymbol{\nu}_k^T \mathbf{S}_k^{-1}
+        \boldsymbol{\nu}_k \]
+      </h4>
+      <p>
+        If the filter model is consistent, the expected NIS is near the
+        measurement dimension. Sustained NIS above expectation suggests
+        underestimated process noise
+        <strong> \( \mathbf{Q} \)</strong>, underestimated measurement noise
+        <strong> \( \mathbf{R} \)</strong>, or unmodeled slip/bias changes.
+      </p>
+      <p>A simple adaptive mechanism is covariance inflation:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}_{k|k} \leftarrow \alpha\,\mathbf{P}_{k|k}, \qquad \alpha
+        &gt; 1 \]
+      </h4>
+      <p>or terrain-aware process inflation:</p>
+      <h4 class="mathJax">
+        \[ \mathbf{Q}_k = \mathbf{Q}_{\mathrm{nom} } +
+        \beta_k\,\mathbf{Q}_{\mathrm{rough} }, \qquad \beta_k \in [0,1] \]
+      </h4>
+      <p>
+        where <strong> \( \beta_k \)</strong> can come from
+        traversability/terrain estimates (Chapter 18 Lesson 2), IMU vibration
+        metrics, wheel slip detectors, or vision confidence.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Drift-Handling State Machine for Field Operation</h2>
+    <div class="down-content">
+      <p>
+        A practical field system uses a mode-based logic around the estimator,
+        especially for GNSS dropouts and relocalization opportunities.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  N["Normal fused localization"] --> Q["Quality degraded?"]
+  Q -->|no| N
+  Q -->|yes| D["Degraded mode: inflate Q/R, tighten gates"]
+  D --> O["GNSS outage persists?"]
+  O -->|no| N
+  O -->|yes| P["Predictive mode: drift budget + speed limits"]
+  P --> A["Reliable anchor found?"]
+  A -->|no| P
+  A -->|yes| R["Re-anchor update and bias correction"]
+  R --> N
+        </pre>
+      </div>
+      <p>
+        The drift budget in predictive mode should be explicit (e.g., maximum
+        allowed position covariance trace, maximum heading variance, or
+        predicted cross-track uncertainty ahead of the vehicle).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Stability and Boundedness Insight with Periodic Anchors</h2>
+    <div class="down-content">
+      <p>
+        <strong
+          >Proposition 3 (Covariance boundedness with periodic informative
+          anchors):</strong
+        >
+        Consider the linearized estimator with bounded process noise
+        <strong> \( \mathbf{Q}_k \preceq \bar{\mathbf{Q} } \)</strong>. Suppose
+        that within every window of length <strong> \( M \)</strong> steps, the
+        robot receives at least one accepted anchor update with measurement
+        Jacobian <strong> \( \mathbf{H} \)</strong> that observes position and
+        heading, and with positive definite covariance
+        <strong> \( \mathbf{R} \)</strong>. Then the estimator covariance
+        remains bounded.
+      </p>
+      <p>
+        <strong>Proof sketch:</strong> Prediction adds bounded uncertainty each
+        step. An anchor update applies the Riccati contraction
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{P}^+ = \mathbf{P}^- - \mathbf{P}^-\mathbf{H}^T
+        (\mathbf{H}\mathbf{P}^-\mathbf{H}^T + \mathbf{R})^{-1}
+        \mathbf{H}\mathbf{P}^- \]
+      </h4>
+      <p>
+        which is positive semidefinite subtractive, so
+        <strong> \( \mathbf{P}^+ \preceq \mathbf{P}^- \)</strong>. Over each
+        window, prediction can only increase covariance by a finite amount,
+        while the anchor step removes uncertainty in the drift-observable
+        subspace (position, heading). Therefore covariance cannot diverge in
+        those states if anchors persist.
+      </p>
+      <p>
+        This proposition formalizes the engineering intuition: long-range drift
+        is manageable if absolute corrections are
+        <em>intermittent but reliable</em> and the filter is not overconfident
+        between them.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Python Implementation — EKF + Gating + Re-Anchoring</h2>
+    <div class="down-content">
+      <p>
+        The Python implementation below simulates a long mission with
+        rough-terrain segments, GNSS outages, and occasional anchor updates
+        (map/loop-closure analogs). It demonstrates sequential scalar gating for
+        robustness and adaptive covariance inflation from NIS.
+      </p>
+      <h3>Chapter18_Lesson3.py</h3>
+      <pre><code class="language-python">
+# Chapter18_Lesson3.py
+# Long-Range Localization Drift Handling (2D EKF with drift mitigation)
+# State: [x, y, psi, b_g]^T
+# - Propagation from wheel speed + gyro
+# - GNSS/RTK updates with innovation gating
+# - Terrain-aware process noise inflation
+# - Anchor (map/loop-closure) re-localization updates
+# - Simple integrity monitor and covariance inflation
+#
+# Requires: numpy
+
+import numpy as np
+
+np.random.seed(18)
+
+
+def wrap_angle(a: float) -&gt; float:
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def scalar_kf_update(x, P, idx, z, R, angle=False):
+    """Kalman update with scalar measurement z = x[idx] + noise."""
+    y = z - x[idx]
+    if angle:
+        y = wrap_angle(y)
+
+    S = P[idx, idx] + R
+    K = P[:, idx] / S
+    x = x + K * y
+
+    # Joseph-like simplified rank-1 covariance update
+    P = P - np.outer(K, P[idx, :])
+    P = 0.5 * (P + P.T)  # symmetry repair
+    if angle:
+        x[2] = wrap_angle(x[2])
+    return x, P, float((y * y) / S)  # scalar NIS
+
+
+def propagate(x, P, v_m, w_m, dt, rough=False):
+    # Nominal propagation
+    psi = x[2]
+    bg = x[3]
+    x_next = x.copy()
+    x_next[0] += v_m * dt * np.cos(psi)
+    x_next[1] += v_m * dt * np.sin(psi)
+    x_next[2] = wrap_angle(x_next[2] + (w_m - bg) * dt)
+    x_next[3] = x_next[3]
+
+    # Linearized state transition
+    F = np.eye(4)
+    F[0, 2] = -v_m * dt * np.sin(psi)
+    F[1, 2] =  v_m * dt * np.cos(psi)
+    F[2, 3] = -dt
+
+    # Process noise (terrain-dependent)
+    sigma_v = 0.03 if not rough else 0.12
+    sigma_w = 0.01 if not rough else 0.06
+    sigma_bg_rw = 0.0008 if not rough else 0.0030
+
+    qx = (sigma_v * dt) ** 2
+    qy = (sigma_v * dt) ** 2
+    qpsi = (sigma_w * dt) ** 2
+    qbg = (sigma_bg_rw ** 2) * dt
+    Q = np.diag([qx, qy, qpsi, qbg])
+
+    P_next = F @ P @ F.T + Q
+    P_next = 0.5 * (P_next + P_next.T)
+    return x_next, P_next
+
+
+# Mission setup
+dt = 0.1
+N = 1800
+t = np.arange(N) * dt
+
+# Truth state and sensor biases
+x_true = np.zeros((N, 4))  # [x, y, psi, bg_true]
+bg_true = 0.015  # rad/s gyro bias (unmodeled by pure dead reckoning)
+
+# EKF estimate
+x_est = np.array([0.0, 0.0, 0.05, 0.0])
+P_est = np.diag([1.0, 1.0, (5*np.pi/180.0)**2, (0.03)**2])
+
+# Storage
+est_hist = np.zeros((N, 4))
+P_trace = np.zeros(N)
+nis_gnss = []
+nis_anchor = []
+
+# Outages and anchor events
+gnss_outage_1 = (420, 980)
+gnss_outage_2 = (1250, 1500)
+anchor_times = {1000, 1510, 1710}  # pseudo loop-closure / map-anchor moments
+
+# Simulate + filter
+for k in range(1, N):
+    # Truth command profile (long-range path with turns)
+    tk = t[k]
+    v_cmd = 1.5 + 0.3 * np.sin(0.015 * tk)
+    w_cmd = 0.08 * np.sin(0.010 * tk) + 0.04 * np.sin(0.040 * tk)
+
+    # "Rough terrain" intervals (slip/vibration increase)
+    rough = (300 &lt;= k &lt; 520) or (840 &lt;= k &lt; 1100) or (1400 &lt;= k &lt; 1620)
+
+    # True propagation
+    sigma_w_true = 0.008 if not rough else 0.03
+    sigma_v_true = 0.02 if not rough else 0.10
+    v_true = v_cmd + np.random.randn() * sigma_v_true
+    w_true = w_cmd + np.random.randn() * sigma_w_true
+
+    x_true[k, 0] = x_true[k-1, 0] + v_true * dt * np.cos(x_true[k-1, 2])
+    x_true[k, 1] = x_true[k-1, 1] + v_true * dt * np.sin(x_true[k-1, 2])
+    x_true[k, 2] = wrap_angle(x_true[k-1, 2] + (w_true - bg_true) * dt)
+    x_true[k, 3] = bg_true
+
+    # Sensor measurements (wheel speed + gyro)
+    v_m = v_true + np.random.randn() * (0.03 if not rough else 0.12)
+    w_m = (w_true - bg_true) + bg_true + np.random.randn() * (0.01 if not rough else 0.05)
+    # (equivalently w_m = w_true + noise, but model estimates bg)
+
+    # EKF propagation
+    x_est, P_est = propagate(x_est, P_est, v_m, w_m, dt, rough=rough)
+
+    # GNSS/RTK update (degrades or disappears)
+    in_outage = (gnss_outage_1[0] &lt;= k &lt; gnss_outage_1[1]) or (gnss_outage_2[0] &lt;= k &lt; gnss_outage_2[1])
+    if (k % 10 == 0) and (not in_outage):
+        # RTK fixed/float mode emulation
+        rtk_fixed = not rough and (k % 90 != 0)
+        sigma_gps = 0.15 if rtk_fixed else 0.75
+        zgx = x_true[k, 0] + np.random.randn() * sigma_gps
+        zgy = x_true[k, 1] + np.random.randn() * sigma_gps
+
+        # Sequential scalar gating (x then y); 99% chi-square for 1 dof ~ 6.63
+        x_pred = x_est.copy()
+        P_pred = P_est.copy()
+
+        # x measurement
+        innov_x = zgx - x_pred[0]
+        Sx = P_pred[0, 0] + sigma_gps**2
+        d2x = innov_x**2 / Sx
+        if d2x &lt; 6.63:
+            x_est, P_est, nisx = scalar_kf_update(x_est, P_est, 0, zgx, sigma_gps**2, angle=False)
+            nis_gnss.append(nisx)
+
+        # y measurement
+        innov_y = zgy - x_est[1]
+        Sy = P_est[1, 1] + sigma_gps**2
+        d2y = innov_y**2 / Sy
+        if d2y &lt; 6.63:
+            x_est, P_est, nisy = scalar_kf_update(x_est, P_est, 1, zgy, sigma_gps**2, angle=False)
+            nis_gnss.append(nisy)
+
+    # Anchor re-localization update (e.g., scan-map/VIO-map loop closure)
+    if k in anchor_times:
+        z_anchor = np.array([
+            x_true[k, 0] + np.random.randn() * 0.10,
+            x_true[k, 1] + np.random.randn() * 0.10,
+            wrap_angle(x_true[k, 2] + np.random.randn() * (2.0*np.pi/180.0))
+        ])
+
+        # Sequential x, y, psi anchor update with tight covariance
+        x_est, P_est, n1 = scalar_kf_update(x_est, P_est, 0, z_anchor[0], 0.10**2, angle=False)
+        x_est, P_est, n2 = scalar_kf_update(x_est, P_est, 1, z_anchor[1], 0.10**2, angle=False)
+        x_est, P_est, n3 = scalar_kf_update(x_est, P_est, 2, z_anchor[2], (2.0*np.pi/180.0)**2, angle=True)
+        nis_anchor.extend([n1, n2, n3])
+
+    # Integrity monitor: inflate if innovation statistics remain high
+    if len(nis_gnss) &gt;= 20:
+        window_mean = float(np.mean(nis_gnss[-20:]))
+        if window_mean &gt; 1.8:  # expected mean ~= 1 for scalar NIS
+            P_est *= 1.02
+
+    est_hist[k] = x_est
+    P_trace[k] = np.trace(P_est)
+
+# Metrics
+pos_err = est_hist[:, :2] - x_true[:, :2]
+rmse = np.sqrt(np.mean(np.sum(pos_err**2, axis=1)))
+final_err = np.linalg.norm(pos_err[-1])
+heading_err_deg = np.rad2deg(wrap_angle(est_hist[-1, 2] - x_true[-1, 2]))
+
+print("=== Chapter18_Lesson3.py : Long-Range Localization Drift Handling ===")
+print(f"Mission duration: {N*dt:.1f} s")
+print(f"Position RMSE: {rmse:.3f} m")
+print(f"Final position error: {final_err:.3f} m")
+print(f"Final heading error: {heading_err_deg:.3f} deg")
+print(f"Mean scalar NIS (GNSS accepted): {np.mean(nis_gnss) if nis_gnss else np.nan:.3f}")
+print(f"Mean scalar NIS (Anchor): {np.mean(nis_anchor) if nis_anchor else np.nan:.3f}")
+print(f"Final covariance trace: {P_trace[-1]:.5f}")
+
+# A tiny textual drift summary across outage segments
+for label, (a, b) in {"Outage1": gnss_outage_1, "Outage2": gnss_outage_2}.items():
+    e_start = np.linalg.norm(est_hist[a, :2] - x_true[a, :2])
+    e_end = np.linalg.norm(est_hist[b-1, :2] - x_true[b-1, :2])
+    print(f"{label}: error at start={e_start:.3f} m, end={e_end:.3f} m, growth={e_end-e_start:.3f} m")
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. C++ Implementation — From-Scratch EKF (No External Libraries)</h2>
+    <div class="down-content">
+      <p>
+        This C++ version uses fixed-size arrays and explicit 4x4 matrix
+        operations, which is useful for embedded deployment or educational
+        clarity. In production, Eigen or a similar linear algebra library is
+        recommended for maintainability.
+      </p>
+      <h3>Chapter18_Lesson3.cpp</h3>
+      <pre><code class="language-cpp">
+// Chapter18_Lesson3.cpp
+// Long-Range Localization Drift Handling (2D EKF, no external dependencies)
+// State: [x, y, psi, b_g]^T
+// Compile: g++ -O2 -std=c++17 Chapter18_Lesson3.cpp -o Chapter18_Lesson3
+
+#include &lt;iostream&gt;
+#include &lt;array&gt;
+#include &lt;vector&gt;
+#include &lt;cmath&gt;
+#include &lt;random&gt;
+#include &lt;iomanip&gt;
+#include &lt;numeric&gt;
+
+using Vec4 = std::array&lt;double, 4&gt;;
+using Mat4 = std::array&lt;std::array&lt;double, 4&gt;, 4&gt;;
+
+static constexpr double PI = 3.14159265358979323846;
+
+double wrapAngle(double a) { {
+    while (a &gt; PI) a -= 2.0 * PI;
+    while (a &lt; -PI) a += 2.0 * PI;
+    return a;
+} }
+
+Mat4 eye4() { {
+    Mat4 I{ {} };
+    for (int i = 0; i &lt; 4; ++i) I[i][i] = 1.0;
+    return I;
+} }
+
+Mat4 matAdd(const Mat4&amp; A, const Mat4&amp; B) { {
+    Mat4 C{ {} };
+    for (int i = 0; i &lt; 4; ++i)
+        for (int j = 0; j &lt; 4; ++j)
+            C[i][j] = A[i][j] + B[i][j];
+    return C;
+} }
+
+Mat4 matSub(const Mat4&amp; A, const Mat4&amp; B) { {
+    Mat4 C{ {} };
+    for (int i = 0; i &lt; 4; ++i)
+        for (int j = 0; j &lt; 4; ++j)
+            C[i][j] = A[i][j] - B[i][j];
+    return C;
+} }
+
+Mat4 matMul(const Mat4&amp; A, const Mat4&amp; B) { {
+    Mat4 C{ {} };
+    for (int i = 0; i &lt; 4; ++i)
+        for (int k = 0; k &lt; 4; ++k)
+            for (int j = 0; j &lt; 4; ++j)
+                C[i][j] += A[i][k] * B[k][j];
+    return C;
+} }
+
+Mat4 matT(const Mat4&amp; A) { {
+    Mat4 T{ {} };
+    for (int i = 0; i &lt; 4; ++i)
+        for (int j = 0; j &lt; 4; ++j)
+            T[i][j] = A[j][i];
+    return T;
+} }
+
+void symmetrize(Mat4&amp; P) { {
+    for (int i = 0; i &lt; 4; ++i) { {
+        for (int j = i + 1; j &lt; 4; ++j) { {
+            double s = 0.5 * (P[i][j] + P[j][i]);
+            P[i][j] = s;
+            P[j][i] = s;
+        } }
+    } }
+} }
+
+double trace4(const Mat4&amp; A) { {
+    return A[0][0] + A[1][1] + A[2][2] + A[3][3];
+} }
+
+struct FilterState { {
+    Vec4 x;
+    Mat4 P;
+} };
+
+void propagate(FilterState&amp; s, double vm, double wm, double dt, bool rough) { {
+    double psi = s.x[2];
+    double bg  = s.x[3];
+
+    // Nominal propagation
+    s.x[0] += vm * dt * std::cos(psi);
+    s.x[1] += vm * dt * std::sin(psi);
+    s.x[2] = wrapAngle(s.x[2] + (wm - bg) * dt);
+
+    // Jacobian
+    Mat4 F = eye4();
+    F[0][2] = -vm * dt * std::sin(psi);
+    F[1][2] =  vm * dt * std::cos(psi);
+    F[2][3] = -dt;
+
+    // Process noise
+    double sigmaV = rough ? 0.12 : 0.03;
+    double sigmaW = rough ? 0.06 : 0.01;
+    double sigmaBg = rough ? 0.0030 : 0.0008;
+
+    Mat4 Q{ {} };
+    Q[0][0] = std::pow(sigmaV * dt, 2);
+    Q[1][1] = std::pow(sigmaV * dt, 2);
+    Q[2][2] = std::pow(sigmaW * dt, 2);
+    Q[3][3] = std::pow(sigmaBg, 2) * dt;
+
+    s.P = matAdd(matMul(matMul(F, s.P), matT(F)), Q);
+    symmetrize(s.P);
+} }
+
+double scalarUpdate(FilterState&amp; s, int idx, double z, double R, bool angleResidual) { {
+    double innov = z - s.x[idx];
+    if (angleResidual) innov = wrapAngle(innov);
+
+    double S = s.P[idx][idx] + R;
+
+    // K = P[:,idx] / S
+    double K[4];
+    for (int i = 0; i &lt; 4; ++i) K[i] = s.P[i][idx] / S;
+
+    // x = x + K * innov
+    for (int i = 0; i &lt; 4; ++i) s.x[i] += K[i] * innov;
+    s.x[2] = wrapAngle(s.x[2]);
+
+    // P = P - K * P[idx,:]
+    Mat4 Pnew = s.P;
+    for (int i = 0; i &lt; 4; ++i) { {
+        for (int j = 0; j &lt; 4; ++j) { {
+            Pnew[i][j] -= K[i] * s.P[idx][j];
+        } }
+    } }
+    s.P = Pnew;
+    symmetrize(s.P);
+
+    return (innov * innov) / S; // scalar NIS
+} }
+
+int main() { {
+    const double dt = 0.1;
+    const int N = 1800;
+    const double bgTrue = 0.015;
+
+    std::mt19937 rng(18);
+    std::normal_distribution&lt;double&gt; n01(0.0, 1.0);
+
+    std::vector&lt;Vec4&gt; xTrue(N, Vec4{ {0.0, 0.0, 0.0, bgTrue} });
+    std::vector&lt;Vec4&gt; xEstHist(N, Vec4{ {0.0, 0.0, 0.0, 0.0} });
+    std::vector&lt;double&gt; Ptrace(N, 0.0);
+    std::vector&lt;double&gt; nisGnss, nisAnchor;
+
+    FilterState f;
+    f.x = { {0.0, 0.0, 0.05, 0.0} };
+    f.P = { {} };
+    f.P[0][0] = 1.0;
+    f.P[1][1] = 1.0;
+    f.P[2][2] = std::pow(5.0 * PI / 180.0, 2);
+    f.P[3][3] = std::pow(0.03, 2);
+
+    auto isRough = [](int k) { {
+        return (300 &lt;= k &amp;&amp; k &lt; 520) || (840 &lt;= k &amp;&amp; k &lt; 1100) || (1400 &lt;= k &amp;&amp; k &lt; 1620);
+    } };
+
+    auto inOutage = [](int k) { {
+        bool o1 = (420 &lt;= k &amp;&amp; k &lt; 980);
+        bool o2 = (1250 &lt;= k &amp;&amp; k &lt; 1500);
+        return o1 || o2;
+    } };
+
+    for (int k = 1; k &lt; N; ++k) { {
+        double tk = k * dt;
+        double vCmd = 1.5 + 0.3 * std::sin(0.015 * tk);
+        double wCmd = 0.08 * std::sin(0.010 * tk) + 0.04 * std::sin(0.040 * tk);
+
+        bool rough = isRough(k);
+
+        double sigmaWTrue = rough ? 0.03 : 0.008;
+        double sigmaVTrue = rough ? 0.10 : 0.02;
+
+        double vTrue = vCmd + sigmaVTrue * n01(rng);
+        double wTrue = wCmd + sigmaWTrue * n01(rng);
+
+        xTrue[k][0] = xTrue[k-1][0] + vTrue * dt * std::cos(xTrue[k-1][2]);
+        xTrue[k][1] = xTrue[k-1][1] + vTrue * dt * std::sin(xTrue[k-1][2]);
+        xTrue[k][2] = wrapAngle(xTrue[k-1][2] + (wTrue - bgTrue) * dt);
+        xTrue[k][3] = bgTrue;
+
+        double vm = vTrue + (rough ? 0.12 : 0.03) * n01(rng);
+        double wm = wTrue + (rough ? 0.05 : 0.01) * n01(rng);
+
+        propagate(f, vm, wm, dt, rough);
+
+        // GNSS/RTK sequential scalar updates (x, y)
+        if ((k % 10 == 0) &amp;&amp; !inOutage(k)) { {
+            bool rtkFixed = (!rough) &amp;&amp; (k % 90 != 0);
+            double sigmaGps = rtkFixed ? 0.15 : 0.75;
+            double zgx = xTrue[k][0] + sigmaGps * n01(rng);
+            double zgy = xTrue[k][1] + sigmaGps * n01(rng);
+
+            double innovX = zgx - f.x[0];
+            double Sx = f.P[0][0] + sigmaGps * sigmaGps;
+            double d2x = (innovX * innovX) / Sx;
+            if (d2x &lt; 6.63) { {
+                nisGnss.push_back(scalarUpdate(f, 0, zgx, sigmaGps * sigmaGps, false));
+            } }
+
+            double innovY = zgy - f.x[1];
+            double Sy = f.P[1][1] + sigmaGps * sigmaGps;
+            double d2y = (innovY * innovY) / Sy;
+            if (d2y &lt; 6.63) { {
+                nisGnss.push_back(scalarUpdate(f, 1, zgy, sigmaGps * sigmaGps, false));
+            } }
+        } }
+
+        // Anchor re-localization at selected times (x, y, psi)
+        if (k == 1000 || k == 1510 || k == 1710) { {
+            double zax = xTrue[k][0] + 0.10 * n01(rng);
+            double zay = xTrue[k][1] + 0.10 * n01(rng);
+            double zap = wrapAngle(xTrue[k][2] + (2.0 * PI / 180.0) * n01(rng));
+
+            nisAnchor.push_back(scalarUpdate(f, 0, zax, 0.10 * 0.10, false));
+            nisAnchor.push_back(scalarUpdate(f, 1, zay, 0.10 * 0.10, false));
+            nisAnchor.push_back(scalarUpdate(f, 2, zap, std::pow(2.0 * PI / 180.0, 2), true));
+        } }
+
+        // Integrity-based covariance inflation
+        if (nisGnss.size() &gt;= 20) { {
+            double sum = 0.0;
+            for (size_t i = nisGnss.size() - 20; i &lt; nisGnss.size(); ++i) sum += nisGnss[i];
+            double meanNIS = sum / 20.0;
+            if (meanNIS &gt; 1.8) { {
+                for (int i = 0; i &lt; 4; ++i)
+                    for (int j = 0; j &lt; 4; ++j)
+                        f.P[i][j] *= 1.02;
+            } }
+        } }
+
+        xEstHist[k] = f.x;
+        Ptrace[k] = trace4(f.P);
+    } }
+
+    // Metrics
+    double sumSq = 0.0;
+    for (int k = 0; k &lt; N; ++k) { {
+        double ex = xEstHist[k][0] - xTrue[k][0];
+        double ey = xEstHist[k][1] - xTrue[k][1];
+        sumSq += ex * ex + ey * ey;
+    } }
+    double rmse = std::sqrt(sumSq / N);
+
+    double exf = xEstHist[N-1][0] - xTrue[N-1][0];
+    double eyf = xEstHist[N-1][1] - xTrue[N-1][1];
+    double finalErr = std::sqrt(exf * exf + eyf * eyf);
+    double finalHeadingDeg = wrapAngle(xEstHist[N-1][2] - xTrue[N-1][2]) * 180.0 / PI;
+
+    auto meanVec = [](const std::vector&lt;double&gt;&amp; v) { {
+        if (v.empty()) return std::nan("");
+        double s = std::accumulate(v.begin(), v.end(), 0.0);
+        return s / static_cast&lt;double&gt;(v.size());
+    } };
+
+    std::cout &lt;&lt; "=== Chapter18_Lesson3.cpp : Long-Range Localization Drift Handling ===\n";
+    std::cout &lt;&lt; std::fixed &lt;&lt; std::setprecision(3);
+    std::cout &lt;&lt; "Mission duration: " &lt;&lt; N * dt &lt;&lt; " s\n";
+    std::cout &lt;&lt; "Position RMSE: " &lt;&lt; rmse &lt;&lt; " m\n";
+    std::cout &lt;&lt; "Final position error: " &lt;&lt; finalErr &lt;&lt; " m\n";
+    std::cout &lt;&lt; "Final heading error: " &lt;&lt; finalHeadingDeg &lt;&lt; " deg\n";
+    std::cout &lt;&lt; "Mean scalar NIS (GNSS accepted): " &lt;&lt; meanVec(nisGnss) &lt;&lt; "\n";
+    std::cout &lt;&lt; "Mean scalar NIS (Anchor): " &lt;&lt; meanVec(nisAnchor) &lt;&lt; "\n";
+    std::cout &lt;&lt; "Final covariance trace: " &lt;&lt; Ptrace[N-1] &lt;&lt; "\n";
+
+    auto outageReport = [&amp;](const char* name, int a, int b) { {
+        double esx = xEstHist[a][0] - xTrue[a][0];
+        double esy = xEstHist[a][1] - xTrue[a][1];
+        double eex = xEstHist[b-1][0] - xTrue[b-1][0];
+        double eey = xEstHist[b-1][1] - xTrue[b-1][1];
+        double estart = std::sqrt(esx * esx + esy * esy);
+        double eend = std::sqrt(eex * eex + eey * eey);
+        std::cout &lt;&lt; name &lt;&lt; ": error at start=" &lt;&lt; estart
+                  &lt;&lt; " m, end=" &lt;&lt; eend
+                  &lt;&lt; " m, growth=" &lt;&lt; (eend - estart) &lt;&lt; " m\n";
+    } };
+    outageReport("Outage1", 420, 980);
+    outageReport("Outage2", 1250, 1500);
+
+    return 0;
+} }
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Java Implementation — EKF Drift Handling Pipeline</h2>
+    <div class="down-content">
+      <p>
+        The Java implementation mirrors the C++ logic and is suitable for
+        simulation tools, Android-based robot software, or backend telemetry
+        validation. The scalar update form avoids heavy matrix dependencies
+        while preserving the estimator structure.
+      </p>
+      <h3>Chapter18_Lesson3.java</h3>
+      <pre><code class="language-java">
+// Chapter18_Lesson3.java
+// Long-Range Localization Drift Handling (2D EKF, pure Java implementation)
+// State: [x, y, psi, b_g]^T
+// Compile: javac Chapter18_Lesson3.java
+// Run:     java Chapter18_Lesson3
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+public class Chapter18_Lesson3 { {
+    static final double PI = Math.PI;
+
+    static double wrapAngle(double a) { {
+        while (a &gt; PI) a -= 2.0 * PI;
+        while (a &lt; -PI) a += 2.0 * PI;
+        return a;
+    } }
+
+    static class FilterState { {
+        double[] x = new double[4];
+        double[][] P = new double[4][4];
+    } }
+
+    static double[][] eye4() { {
+        double[][] I = new double[4][4];
+        for (int i = 0; i &lt; 4; i++) I[i][i] = 1.0;
+        return I;
+    } }
+
+    static double[][] matMul(double[][] A, double[][] B) { {
+        double[][] C = new double[4][4];
+        for (int i = 0; i &lt; 4; i++)
+            for (int k = 0; k &lt; 4; k++)
+                for (int j = 0; j &lt; 4; j++)
+                    C[i][j] += A[i][k] * B[k][j];
+        return C;
+    } }
+
+    static double[][] matT(double[][] A) { {
+        double[][] T = new double[4][4];
+        for (int i = 0; i &lt; 4; i++)
+            for (int j = 0; j &lt; 4; j++)
+                T[i][j] = A[j][i];
+        return T;
+    } }
+
+    static void symmetrize(double[][] P) { {
+        for (int i = 0; i &lt; 4; i++) { {
+            for (int j = i + 1; j &lt; 4; j++) { {
+                double s = 0.5 * (P[i][j] + P[j][i]);
+                P[i][j] = s;
+                P[j][i] = s;
+            } }
+        } }
+    } }
+
+    static void propagate(FilterState s, double vm, double wm, double dt, boolean rough) { {
+        double psi = s.x[2];
+        double bg = s.x[3];
+
+        s.x[0] += vm * dt * Math.cos(psi);
+        s.x[1] += vm * dt * Math.sin(psi);
+        s.x[2] = wrapAngle(s.x[2] + (wm - bg) * dt);
+
+        double[][] F = eye4();
+        F[0][2] = -vm * dt * Math.sin(psi);
+        F[1][2] =  vm * dt * Math.cos(psi);
+        F[2][3] = -dt;
+
+        double sigmaV = rough ? 0.12 : 0.03;
+        double sigmaW = rough ? 0.06 : 0.01;
+        double sigmaBg = rough ? 0.0030 : 0.0008;
+
+        double[][] Q = new double[4][4];
+        Q[0][0] = Math.pow(sigmaV * dt, 2);
+        Q[1][1] = Math.pow(sigmaV * dt, 2);
+        Q[2][2] = Math.pow(sigmaW * dt, 2);
+        Q[3][3] = sigmaBg * sigmaBg * dt;
+
+        double[][] tmp = matMul(matMul(F, s.P), matT(F));
+        for (int i = 0; i &lt; 4; i++)
+            for (int j = 0; j &lt; 4; j++)
+                s.P[i][j] = tmp[i][j] + Q[i][j];
+        symmetrize(s.P);
+    } }
+
+    static double scalarUpdate(FilterState s, int idx, double z, double R, boolean angleResidual) { {
+        double innov = z - s.x[idx];
+        if (angleResidual) innov = wrapAngle(innov);
+
+        double S = s.P[idx][idx] + R;
+        double[] K = new double[4];
+        for (int i = 0; i &lt; 4; i++) K[i] = s.P[i][idx] / S;
+
+        for (int i = 0; i &lt; 4; i++) s.x[i] += K[i] * innov;
+        s.x[2] = wrapAngle(s.x[2]);
+
+        double[][] Pnew = new double[4][4];
+        for (int i = 0; i &lt; 4; i++) { {
+            for (int j = 0; j &lt; 4; j++) { {
+                Pnew[i][j] = s.P[i][j] - K[i] * s.P[idx][j];
+            } }
+        } }
+        s.P = Pnew;
+        symmetrize(s.P);
+
+        return (innov * innov) / S;
+    } }
+
+    static boolean isRough(int k) { {
+        return (300 &lt;= k &amp;&amp; k &lt; 520) || (840 &lt;= k &amp;&amp; k &lt; 1100) || (1400 &lt;= k &amp;&amp; k &lt; 1620);
+    } }
+
+    static boolean inOutage(int k) { {
+        boolean o1 = (420 &lt;= k &amp;&amp; k &lt; 980);
+        boolean o2 = (1250 &lt;= k &amp;&amp; k &lt; 1500);
+        return o1 || o2;
+    } }
+
+    static double mean(List&lt;Double&gt; v) { {
+        if (v.isEmpty()) return Double.NaN;
+        double s = 0.0;
+        for (double x : v) s += x;
+        return s / v.size();
+    } }
+
+    static double trace4(double[][] A) { {
+        return A[0][0] + A[1][1] + A[2][2] + A[3][3];
+    } }
+
+    public static void main(String[] args) { {
+        final double dt = 0.1;
+        final int N = 1800;
+        final double bgTrue = 0.015;
+
+        Random rng = new Random(18);
+
+        double[][] xTrue = new double[N][4];
+        double[][] xEstHist = new double[N][4];
+        double[] pTrace = new double[N];
+        List&lt;Double&gt; nisGnss = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; nisAnchor = new ArrayList&lt;&gt;();
+
+        FilterState f = new FilterState();
+        f.x[0] = 0.0; f.x[1] = 0.0; f.x[2] = 0.05; f.x[3] = 0.0;
+        f.P[0][0] = 1.0;
+        f.P[1][1] = 1.0;
+        f.P[2][2] = Math.pow(5.0 * PI / 180.0, 2);
+        f.P[3][3] = Math.pow(0.03, 2);
+
+        for (int k = 1; k &lt; N; k++) { {
+            double tk = k * dt;
+            double vCmd = 1.5 + 0.3 * Math.sin(0.015 * tk);
+            double wCmd = 0.08 * Math.sin(0.010 * tk) + 0.04 * Math.sin(0.040 * tk);
+
+            boolean rough = isRough(k);
+            double sigmaWTrue = rough ? 0.03 : 0.008;
+            double sigmaVTrue = rough ? 0.10 : 0.02;
+
+            double vTrue = vCmd + sigmaVTrue * rng.nextGaussian();
+            double wTrue = wCmd + sigmaWTrue * rng.nextGaussian();
+
+            xTrue[k][0] = xTrue[k-1][0] + vTrue * dt * Math.cos(xTrue[k-1][2]);
+            xTrue[k][1] = xTrue[k-1][1] + vTrue * dt * Math.sin(xTrue[k-1][2]);
+            xTrue[k][2] = wrapAngle(xTrue[k-1][2] + (wTrue - bgTrue) * dt);
+            xTrue[k][3] = bgTrue;
+
+            double vm = vTrue + (rough ? 0.12 : 0.03) * rng.nextGaussian();
+            double wm = wTrue + (rough ? 0.05 : 0.01) * rng.nextGaussian();
+
+            propagate(f, vm, wm, dt, rough);
+
+            if ((k % 10 == 0) &amp;&amp; !inOutage(k)) { {
+                boolean rtkFixed = (!rough) &amp;&amp; (k % 90 != 0);
+                double sigmaGps = rtkFixed ? 0.15 : 0.75;
+
+                double zgx = xTrue[k][0] + sigmaGps * rng.nextGaussian();
+                double zgy = xTrue[k][1] + sigmaGps * rng.nextGaussian();
+
+                double innovX = zgx - f.x[0];
+                double Sx = f.P[0][0] + sigmaGps * sigmaGps;
+                double d2x = innovX * innovX / Sx;
+                if (d2x &lt; 6.63) { {
+                    nisGnss.add(scalarUpdate(f, 0, zgx, sigmaGps * sigmaGps, false));
+                } }
+
+                double innovY = zgy - f.x[1];
+                double Sy = f.P[1][1] + sigmaGps * sigmaGps;
+                double d2y = innovY * innovY / Sy;
+                if (d2y &lt; 6.63) { {
+                    nisGnss.add(scalarUpdate(f, 1, zgy, sigmaGps * sigmaGps, false));
+                } }
+            } }
+
+            if (k == 1000 || k == 1510 || k == 1710) { {
+                double zax = xTrue[k][0] + 0.10 * rng.nextGaussian();
+                double zay = xTrue[k][1] + 0.10 * rng.nextGaussian();
+                double zap = wrapAngle(xTrue[k][2] + (2.0 * PI / 180.0) * rng.nextGaussian());
+
+                nisAnchor.add(scalarUpdate(f, 0, zax, 0.10 * 0.10, false));
+                nisAnchor.add(scalarUpdate(f, 1, zay, 0.10 * 0.10, false));
+                nisAnchor.add(scalarUpdate(f, 2, zap, Math.pow(2.0 * PI / 180.0, 2), true));
+            } }
+
+            if (nisGnss.size() &gt;= 20) { {
+                double m = 0.0;
+                for (int i = nisGnss.size() - 20; i &lt; nisGnss.size(); i++) m += nisGnss.get(i);
+                m /= 20.0;
+                if (m &gt; 1.8) { {
+                    for (int i = 0; i &lt; 4; i++)
+                        for (int j = 0; j &lt; 4; j++)
+                            f.P[i][j] *= 1.02;
+                } }
+            } }
+
+            for (int i = 0; i &lt; 4; i++) xEstHist[k][i] = f.x[i];
+            pTrace[k] = trace4(f.P);
+        } }
+
+        double sumSq = 0.0;
+        for (int k = 0; k &lt; N; k++) { {
+            double ex = xEstHist[k][0] - xTrue[k][0];
+            double ey = xEstHist[k][1] - xTrue[k][1];
+            sumSq += ex * ex + ey * ey;
+        } }
+        double rmse = Math.sqrt(sumSq / N);
+
+        double exf = xEstHist[N-1][0] - xTrue[N-1][0];
+        double eyf = xEstHist[N-1][1] - xTrue[N-1][1];
+        double finalErr = Math.sqrt(exf * exf + eyf * eyf);
+        double finalHeadingDeg = wrapAngle(xEstHist[N-1][2] - xTrue[N-1][2]) * 180.0 / PI;
+
+        System.out.println("=== Chapter18_Lesson3.java : Long-Range Localization Drift Handling ===");
+        System.out.printf("Mission duration: %.1f s%n", N * dt);
+        System.out.printf("Position RMSE: %.3f m%n", rmse);
+        System.out.printf("Final position error: %.3f m%n", finalErr);
+        System.out.printf("Final heading error: %.3f deg%n", finalHeadingDeg);
+        System.out.printf("Mean scalar NIS (GNSS accepted): %.3f%n", mean(nisGnss));
+        System.out.printf("Mean scalar NIS (Anchor): %.3f%n", mean(nisAnchor));
+        System.out.printf("Final covariance trace: %.5f%n", pTrace[N-1]);
+
+        int[][] outages = { { { {420, 980} }, { {1250, 1500} } } };
+        String[] names = { {"Outage1", "Outage2"} };
+        for (int i = 0; i &lt; outages.length; i++) { {
+            int a = outages[i][0];
+            int b = outages[i][1];
+            double esx = xEstHist[a][0] - xTrue[a][0];
+            double esy = xEstHist[a][1] - xTrue[a][1];
+            double eex = xEstHist[b-1][0] - xTrue[b-1][0];
+            double eey = xEstHist[b-1][1] - xTrue[b-1][1];
+            double estart = Math.sqrt(esx * esx + esy * esy);
+            double eend = Math.sqrt(eex * eex + eey * eey);
+            System.out.printf("%s: error at start=%.3f m, end=%.3f m, growth=%.3f m%n",
+                    names[i], estart, eend, eend - estart);
+        } }
+    } }
+} }
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. MATLAB / Simulink Implementation — Multi-Rate EKF Structure</h2>
+    <div class="down-content">
+      <p>
+        The MATLAB code below implements the same estimator. For Simulink, map
+        the logic into: (1) a propagation subsystem at IMU/wheel rate, (2) a
+        GNSS update subsystem at lower rate, and (3) an event-triggered anchor
+        subsystem for map relocalization.
+      </p>
+      <h3>Chapter18_Lesson3.m</h3>
+      <pre><code class="language-matlab">
+% Chapter18_Lesson3.m
+% Long-Range Localization Drift Handling (2D EKF)
+% State: [x; y; psi; b_g]
+% Features:
+%   - Propagation with wheel speed + gyro
+%   - GNSS/RTK updates (sequential scalar updates + gating)
+%   - Terrain-aware process noise inflation
+%   - Anchor re-localization updates
+%   - Integrity monitor (covariance inflation)
+%
+% Simulink note:
+%   The same logic maps naturally to a multi-rate model:
+%   (1) Propagation subsystem at dt=0.1 s
+%   (2) GNSS update subsystem at 1 Hz
+%   (3) Anchor update trigger subsystem (event-based)
+
+rng(18);
+
+dt = 0.1;
+N  = 1800;
+bg_true = 0.015;
+
+x_true = zeros(4, N);   % [x; y; psi; bg]
+x_est  = [0; 0; 0.05; 0];
+P_est  = diag([1, 1, deg2rad(5)^2, 0.03^2]);
+
+x_hist = zeros(4, N);
+P_trace = zeros(1, N);
+nis_gnss = [];
+nis_anchor = [];
+
+for k = 2:N
+    tk = (k-1) * dt;
+    v_cmd = 1.5 + 0.3 * sin(0.015 * tk);
+    w_cmd = 0.08 * sin(0.010 * tk) + 0.04 * sin(0.040 * tk);
+
+    rough = ((k-1) &gt;= 300 &amp;&amp; (k-1) &lt; 520) || ...
+            ((k-1) &gt;= 840 &amp;&amp; (k-1) &lt; 1100) || ...
+            ((k-1) &gt;= 1400 &amp;&amp; (k-1) &lt; 1620);
+
+    sigma_w_true = ternary(rough, 0.03, 0.008);
+    sigma_v_true = ternary(rough, 0.10, 0.02);
+
+    v_true = v_cmd + sigma_v_true * randn;
+    w_true = w_cmd + sigma_w_true * randn;
+
+    x_true(1,k) = x_true(1,k-1) + v_true * dt * cos(x_true(3,k-1));
+    x_true(2,k) = x_true(2,k-1) + v_true * dt * sin(x_true(3,k-1));
+    x_true(3,k) = wrap_angle(x_true(3,k-1) + (w_true - bg_true) * dt);
+    x_true(4,k) = bg_true;
+
+    vm = v_true + ternary(rough, 0.12, 0.03) * randn;
+    wm = w_true + ternary(rough, 0.05, 0.01) * randn;
+
+    [x_est, P_est] = propagate_ekf(x_est, P_est, vm, wm, dt, rough);
+
+    outage = (((k-1) &gt;= 420 &amp;&amp; (k-1) &lt; 980) || ((k-1) &gt;= 1250 &amp;&amp; (k-1) &lt; 1500));
+
+    if mod(k-1, 10) == 0 &amp;&amp; ~outage
+        rtk_fixed = (~rough) &amp;&amp; (mod(k-1, 90) ~= 0);
+        sigma_gps = ternary(rtk_fixed, 0.15, 0.75);
+
+        zgx = x_true(1,k) + sigma_gps * randn;
+        zgy = x_true(2,k) + sigma_gps * randn;
+
+        innov_x = zgx - x_est(1);
+        Sx = P_est(1,1) + sigma_gps^2;
+        d2x = innov_x^2 / Sx;
+        if d2x &lt; 6.63
+            [x_est, P_est, nisx] = scalar_update(x_est, P_est, 1, zgx, sigma_gps^2, false);
+            nis_gnss(end+1) = nisx; %#ok&lt;AGROW&gt;
+        end
+
+        innov_y = zgy - x_est(2);
+        Sy = P_est(2,2) + sigma_gps^2;
+        d2y = innov_y^2 / Sy;
+        if d2y &lt; 6.63
+            [x_est, P_est, nisy] = scalar_update(x_est, P_est, 2, zgy, sigma_gps^2, false);
+            nis_gnss(end+1) = nisy; %#ok&lt;AGROW&gt;
+        end
+    end
+
+    if any((k-1) == [1000, 1510, 1710])
+        zax = x_true(1,k) + 0.10 * randn;
+        zay = x_true(2,k) + 0.10 * randn;
+        zap = wrap_angle(x_true(3,k) + deg2rad(2) * randn);
+
+        [x_est, P_est, n1] = scalar_update(x_est, P_est, 1, zax, 0.10^2, false);
+        [x_est, P_est, n2] = scalar_update(x_est, P_est, 2, zay, 0.10^2, false);
+        [x_est, P_est, n3] = scalar_update(x_est, P_est, 3, zap, deg2rad(2)^2, true);
+        nis_anchor = [nis_anchor, n1, n2, n3]; %#ok&lt;AGROW&gt;
+    end
+
+    if numel(nis_gnss) &gt;= 20
+        if mean(nis_gnss(end-19:end)) &gt; 1.8
+            P_est = 1.02 * P_est;
+        end
+    end
+
+    x_hist(:,k) = x_est;
+    P_trace(k) = trace(P_est);
+end
+
+pos_err = x_hist(1:2,:) - x_true(1:2,:);
+rmse = sqrt(mean(sum(pos_err.^2, 1)));
+final_err = norm(pos_err(:,end));
+final_heading_deg = rad2deg(wrap_angle(x_hist(3,end) - x_true(3,end)));
+
+fprintf('=== Chapter18_Lesson3.m : Long-Range Localization Drift Handling ===\n');
+fprintf('Mission duration: %.1f s\n', N*dt);
+fprintf('Position RMSE: %.3f m\n', rmse);
+fprintf('Final position error: %.3f m\n', final_err);
+fprintf('Final heading error: %.3f deg\n', final_heading_deg);
+fprintf('Mean scalar NIS (GNSS accepted): %.3f\n', mean_or_nan(nis_gnss));
+fprintf('Mean scalar NIS (Anchor): %.3f\n', mean_or_nan(nis_anchor));
+fprintf('Final covariance trace: %.5f\n', P_trace(end));
+
+report_outage('Outage1', 421, 980, x_hist, x_true);
+report_outage('Outage2', 1251, 1500, x_hist, x_true);
+
+%% --- Local functions ---
+
+function [x, P] = propagate_ekf(x, P, vm, wm, dt, rough)
+    psi = x(3);
+    bg  = x(4);
+
+    x(1) = x(1) + vm * dt * cos(psi);
+    x(2) = x(2) + vm * dt * sin(psi);
+    x(3) = wrap_angle(x(3) + (wm - bg) * dt);
+
+    F = eye(4);
+    F(1,3) = -vm * dt * sin(psi);
+    F(2,3) =  vm * dt * cos(psi);
+    F(3,4) = -dt;
+
+    sigma_v = ternary(rough, 0.12, 0.03);
+    sigma_w = ternary(rough, 0.06, 0.01);
+    sigma_bg = ternary(rough, 0.0030, 0.0008);
+
+    Q = diag([(sigma_v*dt)^2, (sigma_v*dt)^2, (sigma_w*dt)^2, sigma_bg^2*dt]);
+
+    P = F * P * F' + Q;
+    P = 0.5 * (P + P');
+end
+
+function [x, P, nis] = scalar_update(x, P, idx, z, R, angleResidual)
+    innov = z - x(idx);
+    if angleResidual
+        innov = wrap_angle(innov);
+    end
+
+    S = P(idx,idx) + R;
+    K = P(:,idx) / S;
+
+    x = x + K * innov;
+    x(3) = wrap_angle(x(3));
+
+    P = P - K * P(idx,:);
+    P = 0.5 * (P + P');
+
+    nis = innov^2 / S;
+end
+
+function a = wrap_angle(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+
+function y = ternary(cond, a, b)
+    if cond
+        y = a;
+    else
+        y = b;
+    end
+end
+
+function m = mean_or_nan(v)
+    if isempty(v)
+        m = NaN;
+    else
+        m = mean(v);
+    end
+end
+
+function report_outage(name, a, b, x_hist, x_true)
+    e_start = norm(x_hist(1:2, a) - x_true(1:2, a));
+    e_end = norm(x_hist(1:2, b) - x_true(1:2, b));
+    fprintf('%s: error at start=%.3f m, end=%.3f m, growth=%.3f m\n', ...
+        name, e_start, e_end, e_end - e_start);
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>
+      14. Wolfram Mathematica Implementation — Symbolic/Numeric Prototyping
+    </h2>
+    <div class="down-content">
+      <p>
+        Mathematica is helpful for rapid numerical experimentation and symbolic
+        checks of the drift equations. The following notebook-style script
+        reproduces the EKF simulation and drift mitigation logic.
+      </p>
+      <h3>Chapter18_Lesson3.nb</h3>
+      <pre><code class="language-mathematica">
+(* Chapter18_Lesson3.nb *)
+(* Long-Range Localization Drift Handling (2D EKF, Wolfram Language) *)
+(* State: {x, y, psi, bg} *)
+
+SeedRandom[18];
+
+wrapAngle[a_] := Module[{b = a}, Mod[b + Pi, 2 Pi] - Pi]
+
+isRough[k_] := (300 &lt;= k &lt; 520) || (840 &lt;= k &lt; 1100) || (1400 &lt;= k &lt; 1620);
+inOutage[k_] := (420 &lt;= k &lt; 980) || (1250 &lt;= k &lt; 1500);
+
+propagate[x_, P_, vm_, wm_, dt_, rough_] := Module[
+  {psi, bg, xn, F, sigmaV, sigmaW, sigmaBg, Q, Pn},
+  psi = x[[3]];
+  bg  = x[[4]];
+  xn = x;
+  xn[[1]] = xn[[1]] + vm dt Cos[psi];
+  xn[[2]] = xn[[2]] + vm dt Sin[psi];
+  xn[[3]] = wrapAngle[xn[[3]] + (wm - bg) dt];
+
+  F = IdentityMatrix[4];
+  F[[1, 3]] = -vm dt Sin[psi];
+  F[[2, 3]] =  vm dt Cos[psi];
+  F[[3, 4]] = -dt;
+
+  sigmaV = If[rough, 0.12, 0.03];
+  sigmaW = If[rough, 0.06, 0.01];
+  sigmaBg = If[rough, 0.0030, 0.0008];
+
+  Q = DiagonalMatrix[{(sigmaV dt)^2, (sigmaV dt)^2, (sigmaW dt)^2, sigmaBg^2 dt}];
+  Pn = F.P.Transpose[F] + Q;
+  Pn = 0.5 (Pn + Transpose[Pn]);
+  {xn, Pn}
+];
+
+scalarUpdate[x_, P_, idx_, z_, R_, angleResidual_] := Module[
+  {innov, S, K, xn, Pn, nis},
+  innov = z - x[[idx]];
+  If[angleResidual, innov = wrapAngle[innov]];
+  S = P[[idx, idx]] + R;
+  K = P[[All, idx]]/S;
+  xn = x + K innov;
+  xn[[3]] = wrapAngle[xn[[3]]];
+  Pn = P - Outer[Times, K, P[[idx, All]]];
+  Pn = 0.5 (Pn + Transpose[Pn]);
+  nis = innov^2/S;
+  {xn, Pn, nis}
+];
+
+dt = 0.1;
+N = 1800;
+bgTrue = 0.015;
+
+xTrue = ConstantArray[0., {N, 4}];
+xHist = ConstantArray[0., {N, 4}];
+pTrace = ConstantArray[0., N];
+nisGnss = {};
+nisAnchor = {};
+
+xEst = {0., 0., 0.05, 0.};
+PEst = DiagonalMatrix[{1., 1., (5 Degree)^2, 0.03^2}];
+
+Do[
+  tk = (k - 1) dt;
+  vCmd = 1.5 + 0.3 Sin[0.015 tk];
+  wCmd = 0.08 Sin[0.010 tk] + 0.04 Sin[0.040 tk];
+
+  rough = isRough[k - 1];
+  sigmaWTrue = If[rough, 0.03, 0.008];
+  sigmaVTrue = If[rough, 0.10, 0.02];
+
+  vTrue = vCmd + sigmaVTrue RandomVariate[NormalDistribution[0, 1]];
+  wTrue = wCmd + sigmaWTrue RandomVariate[NormalDistribution[0, 1]];
+
+  xTrue[[k, 1]] = xTrue[[k - 1, 1]] + vTrue dt Cos[xTrue[[k - 1, 3]]];
+  xTrue[[k, 2]] = xTrue[[k - 1, 2]] + vTrue dt Sin[xTrue[[k - 1, 3]]];
+  xTrue[[k, 3]] = wrapAngle[xTrue[[k - 1, 3]] + (wTrue - bgTrue) dt];
+  xTrue[[k, 4]] = bgTrue;
+
+  vm = vTrue + If[rough, 0.12, 0.03] RandomVariate[NormalDistribution[0, 1]];
+  wm = wTrue + If[rough, 0.05, 0.01] RandomVariate[NormalDistribution[0, 1]];
+
+  {xEst, PEst} = propagate[xEst, PEst, vm, wm, dt, rough];
+
+  If[Mod[k - 1, 10] == 0 &amp;&amp; ! inOutage[k - 1],
+    rtkFixed = (! rough) &amp;&amp; (Mod[k - 1, 90] != 0);
+    sigmaGps = If[rtkFixed, 0.15, 0.75];
+
+    zgx = xTrue[[k, 1]] + sigmaGps RandomVariate[NormalDistribution[0, 1]];
+    zgy = xTrue[[k, 2]] + sigmaGps RandomVariate[NormalDistribution[0, 1]];
+
+    innovX = zgx - xEst[[1]];
+    sx = PEst[[1, 1]] + sigmaGps^2;
+    d2x = innovX^2/sx;
+    If[d2x &lt; 6.63,
+      {xEst, PEst, nisx} = scalarUpdate[xEst, PEst, 1, zgx, sigmaGps^2, False];
+      nisGnss = Append[nisGnss, nisx];
+    ];
+
+    innovY = zgy - xEst[[2]];
+    sy = PEst[[2, 2]] + sigmaGps^2;
+    d2y = innovY^2/sy;
+    If[d2y &lt; 6.63,
+      {xEst, PEst, nisy} = scalarUpdate[xEst, PEst, 2, zgy, sigmaGps^2, False];
+      nisGnss = Append[nisGnss, nisy];
+    ];
+  ];
+
+  If[MemberQ[{1000, 1510, 1710}, k - 1],
+    zax = xTrue[[k, 1]] + 0.10 RandomVariate[NormalDistribution[0, 1]];
+    zay = xTrue[[k, 2]] + 0.10 RandomVariate[NormalDistribution[0, 1]];
+    zap = wrapAngle[xTrue[[k, 3]] + (2 Degree) RandomVariate[NormalDistribution[0, 1]]];
+
+    {xEst, PEst, n1} = scalarUpdate[xEst, PEst, 1, zax, 0.10^2, False];
+    {xEst, PEst, n2} = scalarUpdate[xEst, PEst, 2, zay, 0.10^2, False];
+    {xEst, PEst, n3} = scalarUpdate[xEst, PEst, 3, zap, (2 Degree)^2, True];
+    nisAnchor = Join[nisAnchor, {n1, n2, n3}];
+  ];
+
+  If[Length[nisGnss] &gt;= 20 &amp;&amp; Mean[Take[nisGnss, -20]] &gt; 1.8,
+    PEst = 1.02 PEst;
+  ];
+
+  xHist[[k]] = xEst;
+  pTrace[[k]] = Tr[PEst];
+, {k, 2, N}];
+
+posErr = xHist[[All, 1 ;; 2]] - xTrue[[All, 1 ;; 2]];
+rmse = Sqrt[Mean[Total /@ (posErr^2)]];
+finalErr = Norm[posErr[[-1]]];
+finalHeadingDeg = (180/Pi) wrapAngle[xHist[[-1, 3]] - xTrue[[-1, 3]]];
+
+meanOrNaN[v_] := If[Length[v] == 0, Indeterminate, Mean[v]];
+
+Print["=== Chapter18_Lesson3.nb : Long-Range Localization Drift Handling ==="];
+Print["Mission duration: ", NumberForm[N dt, {8, 1}], " s"];
+Print["Position RMSE: ", NumberForm[rmse, {8, 3}], " m"];
+Print["Final position error: ", NumberForm[finalErr, {8, 3}], " m"];
+Print["Final heading error: ", NumberForm[finalHeadingDeg, {8, 3}], " deg"];
+Print["Mean scalar NIS (GNSS accepted): ", NumberForm[meanOrNaN[nisGnss], {8, 3}]];
+Print["Mean scalar NIS (Anchor): ", NumberForm[meanOrNaN[nisAnchor], {8, 3}]];
+Print["Final covariance trace: ", NumberForm[pTrace[[-1]], {8, 5}]];
+
+outageReport[name_, a_, b_] := Module[{es, ee},
+  es = Norm[xHist[[a + 1, 1 ;; 2]] - xTrue[[a + 1, 1 ;; 2]]];
+  ee = Norm[xHist[[b, 1 ;; 2]] - xTrue[[b, 1 ;; 2]]];
+  Print[name, ": error at start=", NumberForm[es, {8, 3}],
+        " m, end=", NumberForm[ee, {8, 3}],
+        " m, growth=", NumberForm[ee - es, {8, 3}], " m"];
+];
+
+outageReport["Outage1", 420, 979];
+outageReport["Outage2", 1250, 1499];
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 15 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>15. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Heading drift bound by travel distance):</strong>
+        A robot travels <strong> \( L=250\,\mathrm{m} \)</strong> during a GNSS
+        outage. If the heading estimation error is bounded by
+        <strong> \( |\delta\psi| \le 1.2^\circ \)</strong>, derive a worst-case
+        cross-track drift bound using Proposition 1.
+      </p>
+      <p>
+        <strong>Solution:</strong> Convert angle to radians:
+        <strong> \( 1.2^\circ \approx 0.02094 \)</strong>. From
+        <strong> \( |e_{\perp}| \le L|\delta\psi| \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ |e_{\perp}| \le 250 \times 0.02094 \approx 5.235\,\mathrm{m} \]
+      </h4>
+      <p>
+        So even a small heading error can produce several meters of lateral
+        drift over a long outage. This motivates aggressive bias tracking and
+        periodic heading anchors.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Bias uncertainty growth):</strong>
+        Assume straight motion at
+        <strong> \( v=1.8\,\mathrm{m/s} \)</strong> for
+        <strong> \( T=120\,\mathrm{s} \)</strong>. Let
+        <strong> \( \sigma_\psi = 0.5^\circ \)</strong> and
+        <strong> \( \sigma_b = 0.004^\circ/\mathrm{s} \)</strong>. Approximate
+        the standard deviation of cross-track error using Proposition 2.
+      </p>
+      <p>
+        <strong>Solution:</strong> Convert to radians:
+        <strong> \( \sigma_\psi \approx 8.727\times 10^{-3} \)</strong>,
+        <strong> \( \sigma_b \approx 6.981\times 10^{-5} \)</strong>. Then
+      </p>
+      <h4 class="mathJax">
+        \[ \sigma_{e_{\perp} } \approx v\sqrt{T^2\sigma_\psi^2 +
+        \frac{1}{4}T^4\sigma_b^2} \]
+      </h4>
+      <p>Numerically:</p>
+      <h4 class="mathJax">
+        \[ \sigma_{e_{\perp} } \approx 1.8\sqrt{120^2(8.727\times10^{-3})^2 +
+        \frac{1}{4}120^4(6.981\times10^{-5})^2} \approx 4.24\,\mathrm{m} \]
+      </h4>
+      <p>
+        The bias term is substantial for long outages because of the
+        <strong> \( T^4 \)</strong>
+        variance scaling.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Innovation gating threshold):</strong>
+        A 2D GNSS measurement has innovation covariance
+        <strong> \( \mathbf{S} = \operatorname{diag}(0.49, 0.49) \)</strong>.
+        The innovation is
+        <strong> \( \boldsymbol{\nu}=[0.9,\;0.4]^T \)</strong> meters. Compute
+        <strong> \( d^2 \)</strong> and test it against a 99% gate for 2 DOF
+        (use <strong> \( \gamma=9.21 \)</strong>).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+      </p>
+      <h4 class="mathJax">
+        \[ d^2 = \boldsymbol{\nu}^T\mathbf{S}^{-1}\boldsymbol{\nu} =
+        \frac{0.9^2}{0.49} + \frac{0.4^2}{0.49} = \frac{0.81 + 0.16}{0.49} =
+        \frac{0.97}{0.49} \approx 1.98 \]
+      </h4>
+      <p>
+        Since <strong> \( 1.98 &lt; 9.21 \)</strong>, the update passes the gate
+        and is accepted.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Effect of covariance inflation):</strong>
+        Let a scalar state variance before inflation be
+        <strong> \( P=0.25 \)</strong>. An innovation consistency monitor
+        triggers inflation with <strong> \( \alpha=1.08 \)</strong>. What is the
+        new variance, and how does it affect the Kalman gain qualitatively?
+      </p>
+      <p><strong>Solution:</strong> The new variance is</p>
+      <h4 class="mathJax">
+        \[ P^{\mathrm{new} } = \alpha P = 1.08 \times 0.25 = 0.27 \]
+      </h4>
+      <p>
+        A larger prior variance generally increases the Kalman gain for the same
+        measurement noise, so the estimator becomes more willing to correct from
+        absolute measurements. This is useful when the filter has become
+        overconfident.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Anchor scheduling policy):</strong>
+        Suppose the navigation stack requires the predicted 2D position standard
+        deviation to remain below <strong> \( 1.5\,\mathrm{m} \)</strong>.
+        Propose a rule for triggering re-localization attempts using covariance.
+      </p>
+      <p>
+        <strong>Solution:</strong> Let
+        <strong> \( \mathbf{P}_{xy} = \mathbf{P}[1:2,1:2] \)</strong> be the
+        position covariance block. A conservative scalar metric is
+        <strong> \( \sqrt{\lambda_{\max}(\mathbf{P}_{xy})} \)</strong>. Trigger
+        re-localization when
+      </p>
+      <h4 class="mathJax">
+        \[ \sqrt{\lambda_{\max}(\mathbf{P}_{xy})} &gt; 1.5 \]
+      </h4>
+      <p>
+        or equivalently when
+        <strong> \( \lambda_{\max}(\mathbf{P}_{xy}) &gt; 2.25 \)</strong>. This
+        aligns the estimator with a task-level uncertainty budget.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 16 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>16. Summary</h2>
+    <div class="down-content">
+      <p>
+        Long-range localization drift in outdoor AMR is fundamentally a
+        bias-and-observability problem: small heading errors grow with path
+        length, and bias uncertainty grows rapidly during absolute-sensing
+        outages. Robust drift handling therefore combines (i) a physically
+        meaningful error-state model, (ii) innovation gating and consistency
+        checks, (iii) terrain-aware noise inflation, and (iv) periodic
+        re-anchoring from GNSS/RTK or map-based loop closures. The provided
+        implementations show a minimal but complete pipeline in Python, C++,
+        Java, MATLAB/Simulink style, and Wolfram Mathematica.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 17 -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>17. References</h2>
+    <ol>
+      <li>
+        Durrant-Whyte, H., &amp; Bailey, T. (2006). Simultaneous localization
+        and mapping (SLAM): Part I.
+        <em>IEEE Robotics &amp; Automation Magazine</em>, 13(2), 99–110.
+      </li>
+      <li>
+        Bailey, T., &amp; Durrant-Whyte, H. (2006). Simultaneous localization
+        and mapping (SLAM): Part II.
+        <em>IEEE Robotics &amp; Automation Magazine</em>, 13(3), 108–117.
+      </li>
+      <li>
+        Grisetti, G., Kümmerle, R., Stachniss, C., &amp; Burgard, W. (2010). A
+        tutorial on graph-based SLAM.
+        <em>IEEE Intelligent Transportation Systems Magazine</em>, 2(4), 31–43.
+      </li>
+      <li>
+        Kaess, M., Johannsson, H., Roberts, R., Ila, V., Leonard, J.J., &amp;
+        Dellaert, F. (2012). iSAM2: Incremental smoothing and mapping using the
+        Bayes tree.
+        <em>The International Journal of Robotics Research</em>, 31(2), 216–235.
+      </li>
+      <li>
+        Cadena, C., Carlone, L., Carrillo, H., et al. (2016). Past, present, and
+        future of simultaneous localization and mapping: Toward the
+        robust-perception age.
+        <em>IEEE Transactions on Robotics</em>, 32(6), 1309–1332.
+      </li>
+      <li>
+        Kümmerle, R., Grisetti, G., Strasdat, H., Konolige, K., &amp; Burgard,
+        W. (2011). g2o: A general framework for graph optimization.
+        <em
+          >Proceedings of the IEEE International Conference on Robotics and
+          Automation (ICRA)</em
+        >, 3607–3613.
+      </li>
+      <li>
+        Sünderhauf, N., &amp; Protzel, P. (2012). Switchable constraints for
+        robust pose graph SLAM.
+        <em
+          >Proceedings of the IEEE/RSJ International Conference on Intelligent
+          Robots and Systems (IROS)</em
+        >, 1879–1884.
+      </li>
+      <li>
+        Leutenegger, S., Lynen, S., Bosse, M., Siegwart, R., &amp; Furgale, P.
+        (2015). Keyframe-based visual–inertial odometry using nonlinear
+        optimization.
+        <em>The International Journal of Robotics Research</em>, 34(3), 314–334.
+      </li>
+      <li>
+        Qin, T., Li, P., &amp; Shen, S. (2018). VINS-Mono: A robust and
+        versatile monocular visual-inertial state estimator.
+        <em>IEEE Transactions on Robotics</em>, 34(4), 1004–1020.
+      </li>
+      <li>
+        Huber, P.J. (1964). Robust estimation of a location parameter.
+        <em>Annals of Mathematical Statistics</em>, 35(1), 73–101.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter18/Lesson2.html">
+          Lesson 2: Traversability and Terrain Classification
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter18/Lesson4.html">
+          Lesson 4: Weather/Lighting Effects on Perception
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="active-lesson" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

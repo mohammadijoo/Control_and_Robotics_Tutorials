@@ -1,0 +1,2513 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 14: Navigation Architecture for AMR - Lesson 1: Global–Local–Reactive Navigation Layers | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 14: Navigation Architecture for AMR</h1>
+    <h3><strong>Lesson 1: Global–Local–Reactive Navigation Layers</strong></h3>
+    <p>
+      This lesson formalizes the <em>layered navigation architecture</em> used in most production mobile robots:
+      a slow global layer that reasons over a map and task goals, a fast local layer that turns a global plan into
+      executable commands under kinematic/dynamic limits, and a reactive safety layer that enforces collision-avoidance
+      invariants when sensing or modeling assumptions fail. The focus is on <em>interfaces, time-scales, and guarantees</em>
+      rather than re-teaching global planners (A*, sampling, trajopt) covered elsewhere.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview: Why Layers Exist</h2>
+    <div class="down-content">
+      <p>
+        Navigation in an AMR is a closed-loop decision process driven by partial sensing and uncertain localization.
+        A single monolithic optimizer is rarely robust enough in practice because:
+      </p>
+      <ul>
+        <li><strong>Different time-scales:</strong> map-level planning evolves slowly; obstacle avoidance must react within milliseconds.</li>
+        <li><strong>Different models:</strong> global planning often assumes quasi-static obstacles; local control must respect the robot’s kinematics and actuator limits.</li>
+        <li><strong>Different failure modes:</strong> when localization drifts or perception drops out, a safety layer must still keep the robot collision-free.</li>
+      </ul>
+
+      <p>
+        We describe a standard three-layer decomposition:
+        <strong>global</strong> (task-to-path),
+        <strong>local</strong> (path-to-command),
+        <strong>reactive</strong> (command-to-safe-command).
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  M["Map + semantic constraints"] --> G["Global layer: plan path P"]
+  S["State estimate (x_hat)"] --> L["Local layer: compute u_nom"]
+  Z["Sensors (scan/depth)"] --> R["Reactive layer: safety filter"]
+  G --> L
+  L --> R
+  R --> U["Actuation: cmd_vel (v,w)"]
+  U --> ROB["Robot motion"]
+  ROB --> Z
+  ROB --> S
+        </pre>
+      </div>
+
+      <p>
+        Throughout, we use a planar pose state <strong>\( \mathbf{x} = [x, y, \theta]^\top \)</strong>
+        (from Chapters 1–3) and assume you already know rigid-body kinematics/dynamics from the prerequisite robotics course.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Mathematical Interfaces Between Layers -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Mathematical Interfaces Between Layers</h2>
+    <div class="down-content">
+      <p>
+        A layered stack becomes rigorous when each layer exposes a contract.
+        Let the robot pose be <strong>\( \mathbf{x}(t) \)</strong>, the goal be <strong>\( \mathbf{g} \in \mathbb{R}^2 \)</strong>,
+        and the environment map be <strong>\( \mathcal{M} \)</strong>. Define the free space
+        <strong>\( \mathcal{F} = \mathbb{R}^2 \setminus \mathcal{O} \)</strong> where <strong>\( \mathcal{O} \)</strong> is the obstacle set.
+      </p>
+
+      <p>
+        The three layers can be formalized as mappings:
+      </p>
+      <ul>
+        <li>
+          <strong>Global planner:</strong> <strong>\( \Pi_g: (\mathcal{M}, \mathbf{x}(t_0), \mathbf{g}) \mapsto \mathcal{P} \)</strong>,
+          where <strong>\( \mathcal{P} \)</strong> is a reference path (polyline, spline, or graph path).
+        </li>
+        <li>
+          <strong>Local command generator:</strong> <strong>\( \Pi_\ell: (\mathcal{P}, \hat{\mathbf{x} }(t), \mathcal{Z}_t) \mapsto \mathbf{u}_\text{nom}(t) \)</strong>,
+          mapping path, estimated state, and local sensor data to nominal control.
+        </li>
+        <li>
+          <strong>Reactive safety filter:</strong> <strong>\( \Pi_r: (\mathbf{u}_\text{nom}(t), \mathcal{Z}_t) \mapsto \mathbf{u}(t) \)</strong>,
+          projecting commands onto a safety-feasible set.
+        </li>
+      </ul>
+
+      <p>
+        For a common unicycle base, the control is <strong>\( \mathbf{u} = [v, \omega]^\top \)</strong> and the kinematics are:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \dot{x} = v\cos\theta,\quad
+          \dot{y} = v\sin\theta,\quad
+          \dot{\theta} = \omega.
+        \]
+      </h4>
+
+      <p>
+        The key systems idea is that the global layer returns a <em>geometric object</em> (a path),
+        the local layer returns a <em>command</em>, and the reactive layer returns a <em>safe command</em>
+        with hard constraints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Global Layer as Path Planning Over a Map (Contract View) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Global Layer: Path Planning Over a Map (Contract View)</h2>
+    <div class="down-content">
+      <p>
+        We treat global planning as an optimization that outputs a path <strong>\( \pi \)</strong> in the free space,
+        without committing to a specific planner. A continuous formulation is:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \pi^\star \in \arg\min_\pi \; J_g(\pi)
+          \quad \text{s.t.}\quad
+          \pi(0)=\mathbf{p}_0,\;
+          \pi(1)=\mathbf{g},\;
+          \pi(s)\in\mathcal{F}\;\forall s\in[0,1].
+        \]
+      </h4>
+      <p>
+        A common cost is a line integral through a spatial cost field <strong>\( c(\mathbf{p}) \ge 0 \)</strong> (derived from a map):
+      </p>
+      <h4 class="mathJax">
+        \[
+          J_g(\pi) = \int_0^1 c(\pi(s))\,\|\pi'(s)\|\,ds.
+        \]
+      </h4>
+
+      <p>
+        In grid-based robotics, the map induces a weighted graph <strong>\( G=(V,E,w) \)</strong>. A path
+        <strong>\( P = (v_0, v_1, \dots, v_N) \)</strong> has cost
+      </p>
+      <h4 class="mathJax">
+        \[
+          J_g(P) = \sum_{k=0}^{N-1} w(v_k, v_{k+1}),
+          \quad v_0 = v(\mathbf{p}_0),\; v_N = v(\mathbf{g}).
+        \]
+      </h4>
+
+      <p>
+        <strong>Global-layer contract:</strong> the planner should output a path <strong>\( \mathcal{P} \)</strong>
+        that is (i) collision-free w.r.t. the <em>static</em> map model, and (ii) topologically consistent with constraints
+        (keep-out zones, one-way aisles, speed limits). The global layer may run at low rate, e.g.
+        <strong>\( f_g \in [0.1,1] \)</strong> Hz, and replan upon significant map updates or goal changes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Local Layer as Tracking / Receding-Horizon Command Generation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Local Layer: Tracking and Receding-Horizon Structure</h2>
+    <div class="down-content">
+      <p>
+        The local layer converts the global path into a command sequence under robot motion constraints and local sensing.
+        A generic receding-horizon formulation (local MPC viewpoint) is:
+      </p>
+      <h4 class="mathJax">
+        \[
+        \begin{aligned}
+          \min_{\mathbf{u}(\cdot)}\;&
+          \int_0^T \ell(\mathbf{x}(t),\mathbf{u}(t),\mathcal{P})\,dt + V_f(\mathbf{x}(T)) \\
+          \text{s.t.}\;& \dot{\mathbf{x} }(t) = f(\mathbf{x}(t),\mathbf{u}(t)),\quad
+          \mathbf{x}(0)=\hat{\mathbf{x} }(t_0) \\
+          & \mathbf{u}(t) \in \mathcal{U},\;
+          \mathbf{x}(t) \in \mathcal{X}_\text{free}(\mathcal{Z}_{t_0}),\;
+          \mathbf{x}(T) \in \mathcal{X}_f.
+        \end{aligned}
+        \]
+      </h4>
+
+      <p>
+        Here <strong>\( \ell \)</strong> penalizes path deviation and control effort, <strong>\( \mathcal{U} \)</strong> encodes actuator limits,
+        and <strong>\( \mathcal{X}_\text{free}(\mathcal{Z}) \)</strong> is a locally sensed free set (dynamic obstacles).
+        The local layer runs faster (e.g., <strong>\( f_\ell \in [10,30] \)</strong> Hz) to react to near-field geometry.
+      </p>
+
+      <p>
+        <strong>Stability proof sketch (standard MPC Lyapunov argument).</strong>
+        Define the optimal value function
+        <strong>\( V_T(\hat{\mathbf{x} }(t_0)) \)</strong> as the minimum objective over horizon <strong>\( T \)</strong>.
+        Suppose there exists a terminal controller <strong>\( k_f(\mathbf{x}) \)</strong> on <strong>\( \mathcal{X}_f \)</strong> such that:
+      </p>
+      <h4 class="mathJax">
+        \[
+          V_f(f(\mathbf{x},k_f(\mathbf{x}))) - V_f(\mathbf{x})
+          \le -\ell(\mathbf{x},k_f(\mathbf{x}),\mathcal{P})
+          \quad \forall \mathbf{x}\in\mathcal{X}_f.
+        \]
+      </h4>
+      <p>
+        Then the receding-horizon closed loop satisfies a decrease condition:
+        <strong>\( V_T(\hat{\mathbf{x} }(t_0+\Delta)) \le V_T(\hat{\mathbf{x} }(t_0)) - \int_0^\Delta \ell(\cdot)\,dt \)</strong>,
+        implying <strong>\( V_T \)</strong> is a Lyapunov function candidate and the tracking error remains bounded (and converges under stronger assumptions).
+        This is why local planners often include terminal penalties or “goal tolerances” instead of being purely reactive.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Reactive Layer as a Safety Filter (Hard-Constraint Projection) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Reactive Layer: Safety Filtering With Invariance Guarantees</h2>
+    <div class="down-content">
+      <p>
+        The reactive layer exists because the local layer can still command unsafe motion under modeling mismatch:
+        occlusions, delayed localization, dynamic obstacles, or poor map alignment. A principled reactive strategy is a
+        <em>safety filter</em> that minimally modifies the nominal control to satisfy a safety constraint.
+      </p>
+
+      <p>
+        Let <strong>\( d(\mathbf{x}) \)</strong> be the (estimated) distance from the robot footprint to the nearest obstacle
+        inferred from sensors. Define the safe set:
+        <strong>\( \mathcal{S} = \{\mathbf{x} : d(\mathbf{x}) - d_\text{safe} \ge 0\} \)</strong>.
+        Using a (control) barrier function <strong>\( h(\mathbf{x})=d(\mathbf{x})-d_\text{safe} \)</strong>,
+        a sufficient condition for forward invariance is:
+      </p>
+
+      <h4 class="mathJax">
+        \[
+          \dot{h}(\mathbf{x},\mathbf{u}) + \alpha\,h(\mathbf{x}) \ge 0,
+          \quad \alpha &gt; 0.
+        \]
+      </h4>
+
+      <p>
+        A common safety filter solves the quadratic program (QP):
+      </p>
+      <h4 class="mathJax">
+        \[
+        \begin{aligned}
+          \mathbf{u}^\star
+          &= \arg\min_\mathbf{u} \; \|\mathbf{u}-\mathbf{u}_\text{nom}\|_2^2 \\
+          \text{s.t.}\;& \dot{h}(\mathbf{x},\mathbf{u}) + \alpha\,h(\mathbf{x}) \ge 0,\;
+          \mathbf{u}\in\mathcal{U}.
+        \end{aligned}
+        \]
+      </h4>
+
+      <p>
+        <strong>Guarantee (proof).</strong>
+        If the constraint holds for all times and <strong>\( h(\mathbf{x}(0)) \ge 0 \)</strong>, then:
+      </p>
+      <h4 class="mathJax">
+        \[
+          \dot{h}(t) \ge -\alpha h(t)
+          \;\Rightarrow\;
+          h(t) \ge e^{-\alpha t} h(0) \ge 0
+          \quad \forall t \ge 0,
+        \]
+      </h4>
+      <p>
+        so the trajectory cannot leave <strong>\( \mathcal{S} \)</strong>. This “last line of defense” is typically the fastest loop
+        (e.g., <strong>\( f_r \in [50,200] \)</strong> Hz), sometimes implemented in a separate real-time process.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  U0["u_nom from local layer"] --> QP["Safety filter: min ||u - u_nom||^2 s.t. safe constraints"]
+  Z0["sensor near-field ranges"] --> QP
+  QP --> U1["u_safe to base"]
+  U1 --> SAT["actuator saturation / limits"]
+        </pre>
+      </div>
+
+      <p>
+        In many practical stacks (e.g., ROS navigation systems), the “QP” may be approximated by simpler logic
+        (speed scaling, emergency stop, reflex turning). The key architectural idea is unchanged: the reactive layer
+        has authority to override local commands when safety is at risk.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Time-Scale Separation and Supervisory Coordination -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Time-Scale Separation and Supervisory Coordination</h2>
+    <div class="down-content">
+      <p>
+        Let the global, local, and reactive update periods be <strong>\( T_g, T_\ell, T_r \)</strong>. A standard regime is:
+      </p>
+      <h4 class="mathJax">
+        \[
+          T_g \gg T_\ell \gg T_r,
+          \quad \text{equivalently}\quad
+          f_r \gg f_\ell \gg f_g.
+        \]
+      </h4>
+
+      <p>
+        The supervisor (covered more deeply in Lesson 3) orchestrates these layers using a policy over discrete modes
+        (navigate, wait, rotate-in-place, recovery, docking). In this lesson we only require the supervisor to enforce:
+      </p>
+      <ul>
+        <li><strong>Interface consistency:</strong> the local layer consumes the latest global path; reactive layer consumes the latest local command.</li>
+        <li><strong>Authority order:</strong> safety overrides tracking, tracking overrides global preferences.</li>
+        <li><strong>Replanning triggers:</strong> if progress stalls, request a new global plan (do not keep forcing local control).</li>
+      </ul>
+
+      <p>
+        A useful progress metric is distance-to-goal along the global path, <strong>\( s(t) \)</strong>.
+        A simple “stuck” detector is:
+        <strong>\( \Delta s = s(t) - s(t-\tau) \)</strong>
+        and if <strong>\( \Delta s &lt; \varepsilon \)</strong> for a window <strong>\( \tau \)</strong>, request replanning or a recovery mode.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Implementation Patterns (ROS 2 / Simulation) + Multi-language Labs -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Implementation Patterns + Labs (Python, C++, Java, MATLAB/Simulink, Wolfram)</h2>
+    <div class="down-content">
+      <p>
+        This lesson’s code focuses on <em>architecture wiring</em> rather than planner/controller sophistication:
+        subscribe to a global path, generate a nominal local command, and apply a reactive safety filter.
+        (More advanced local planners appear in Chapter 15.)
+      </p>
+
+      <hr/>
+      <p><strong>Chapter14_Lesson1.py</strong></p>
+      <pre><code class="language-python">
+"""
+Chapter14_Lesson1.py
+Layered navigation architecture demo (Global -&gt; Local -&gt; Reactive safety)
+Target: ROS 2 (rclpy), but includes a small non-ROS simulator fallback.
+
+Author: Abolfazl Mohammadijoo (course material)
+License: MIT (see repository)
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+# -----------------------------
+# 1) Minimal geometry utilities
+# -----------------------------
+
+def wrap_pi(a: float) -&gt; float:
+    """Wrap angle to (-pi, pi]."""
+    while a &lt;= -math.pi:
+        a += 2.0 * math.pi
+    while a &gt; math.pi:
+        a -= 2.0 * math.pi
+    return a
+
+def clamp(x: float, lo: float, hi: float) -&gt; float:
+    return max(lo, min(hi, x))
+
+@dataclass
+class Pose2D:
+    x: float
+    y: float
+    th: float  # yaw
+
+@dataclass
+class Twist2D:
+    v: float
+    w: float
+
+# ----------------------------------------
+# 2) Layer interfaces: Global/Local/Reactive
+# ----------------------------------------
+
+class GlobalLayer:
+    """Abstract global layer. In production this is a planner; here we only define an interface."""
+
+    def plan(self, start_xy: Tuple[float, float], goal_xy: Tuple[float, float]) -&gt; List[Tuple[float, float]]:
+        """Return a list of (x,y) waypoints in map frame."""
+        raise NotImplementedError
+
+class StraightLineGlobal(GlobalLayer):
+    """Minimal global layer for a demo: returns a straight line discretized into waypoints."""
+
+    def __init__(self, n_points: int = 30):
+        self.n_points = max(2, n_points)
+
+    def plan(self, start_xy: Tuple[float, float], goal_xy: Tuple[float, float]) -&gt; List[Tuple[float, float]]:
+        x0, y0 = start_xy
+        xg, yg = goal_xy
+        pts: List[Tuple[float, float]] = []
+        for i in range(self.n_points):
+            a = i / (self.n_points - 1)
+            pts.append((x0 * (1 - a) + xg * a, y0 * (1 - a) + yg * a))
+        return pts
+
+class LocalLayer:
+    """Local layer maps (path, pose) -&gt; nominal command u_nom."""
+
+    def __init__(
+        self,
+        v_max: float = 0.8,
+        w_max: float = 1.2,
+        lookahead: float = 0.8,
+        k_heading: float = 1.5,
+    ):
+        self.v_max = v_max
+        self.w_max = w_max
+        self.lookahead = lookahead
+        self.k_heading = k_heading
+
+    def _closest_index(self, path: List[Tuple[float, float]], pose: Pose2D) -&gt; int:
+        best_i = 0
+        best_d2 = float("inf")
+        for i, (px, py) in enumerate(path):
+            d2 = (px - pose.x) ** 2 + (py - pose.y) ** 2
+            if d2 &lt; best_d2:
+                best_d2 = d2
+                best_i = i
+        return best_i
+
+    def _lookahead_point(self, path: List[Tuple[float, float]], pose: Pose2D) -&gt; Tuple[float, float]:
+        """Pick a point ahead along the path at approximately self.lookahead distance."""
+        if not path:
+            return (pose.x, pose.y)
+
+        i0 = self._closest_index(path, pose)
+        # March forward until accumulated distance exceeds lookahead.
+        acc = 0.0
+        last = path[i0]
+        for j in range(i0 + 1, len(path)):
+            cur = path[j]
+            seg = math.hypot(cur[0] - last[0], cur[1] - last[1])
+            acc += seg
+            if acc &gt;= self.lookahead:
+                return cur
+            last = cur
+        return path[-1]
+
+    def compute_nominal(self, path: List[Tuple[float, float]], pose: Pose2D, goal_xy: Tuple[float, float]) -&gt; Twist2D:
+        """Simple tracking: steer to lookahead point; slow down near goal."""
+        if not path:
+            return Twist2D(0.0, 0.0)
+
+        tx, ty = self._lookahead_point(path, pose)
+        # Desired heading to target
+        des = math.atan2(ty - pose.y, tx - pose.x)
+        e_th = wrap_pi(des - pose.th)
+
+        # Speed profile: proportional to distance to goal, bounded.
+        gx, gy = goal_xy
+        d_goal = math.hypot(gx - pose.x, gy - pose.y)
+        v = clamp(0.6 * d_goal, 0.0, self.v_max)
+
+        # Heading control
+        w = clamp(self.k_heading * e_th, -self.w_max, self.w_max)
+
+        # If near goal, stop
+        if d_goal &lt; 0.15:
+            v = 0.0
+            w = 0.0
+
+        return Twist2D(v, w)
+
+class ReactiveSafetyLayer:
+    """
+    Reactive safety filter.
+    Here we implement a very simple "speed scaling" based on nearest obstacle range r_min.
+    This approximates the idea of projecting u_nom onto a safe set.
+    """
+
+    def __init__(
+        self,
+        v_max: float = 0.8,
+        w_max: float = 1.2,
+        d_safe: float = 0.35,
+        d_stop: float = 0.20,
+    ):
+        self.v_max = v_max
+        self.w_max = w_max
+        self.d_safe = d_safe
+        self.d_stop = d_stop
+
+    def filter(self, u_nom: Twist2D, r_min: Optional[float]) -&gt; Twist2D:
+        """
+        If r_min is None, pass through.
+        If r_min &lt; d_stop: emergency stop.
+        If d_stop &lt;= r_min &lt; d_safe: linearly scale v down.
+        """
+        v = clamp(u_nom.v, -self.v_max, self.v_max)
+        w = clamp(u_nom.w, -self.w_max, self.w_max)
+
+        if r_min is None:
+            return Twist2D(v, w)
+
+        if r_min &lt;= self.d_stop:
+            return Twist2D(0.0, 0.0)
+
+        if r_min &lt; self.d_safe:
+            # scale v from 0 at d_stop to 1 at d_safe
+            s = (r_min - self.d_stop) / max(1e-6, (self.d_safe - self.d_stop))
+            v = v * clamp(s, 0.0, 1.0)
+
+        return Twist2D(v, w)
+
+# -----------------------------
+# 3) Non-ROS toy simulator
+# -----------------------------
+
+@dataclass
+class CircleObstacle:
+    x: float
+    y: float
+    r: float
+
+class ToyWorld:
+    def __init__(self, obstacles: List[CircleObstacle]):
+        self.obstacles = obstacles
+
+    def nearest_range(self, pose: Pose2D, footprint_r: float = 0.20) -&gt; Optional[float]:
+        """Return distance from robot center to nearest obstacle boundary, minus footprint."""
+        if not self.obstacles:
+            return None
+        best = float("inf")
+        for ob in self.obstacles:
+            d = math.hypot(pose.x - ob.x, pose.y - ob.y) - (ob.r + footprint_r)
+            if d &lt; best:
+                best = d
+        return best
+
+def step_unicycle(pose: Pose2D, u: Twist2D, dt: float) -&gt; Pose2D:
+    x = pose.x + dt * u.v * math.cos(pose.th)
+    y = pose.y + dt * u.v * math.sin(pose.th)
+    th = wrap_pi(pose.th + dt * u.w)
+    return Pose2D(x, y, th)
+
+def run_toy_demo() -&gt; None:
+    """
+    Minimal end-to-end layered demo without ROS:
+      - global: straight line
+      - local: lookahead tracking
+      - reactive: speed scaling from nearest obstacle range
+    """
+    start = (0.0, 0.0)
+    goal = (6.0, 0.0)
+
+    global_layer = StraightLineGlobal(n_points=60)
+    local_layer = LocalLayer(v_max=0.8, w_max=1.2, lookahead=0.8, k_heading=2.0)
+    reactive_layer = ReactiveSafetyLayer(v_max=0.8, w_max=1.2, d_safe=0.40, d_stop=0.20)
+
+    path = global_layer.plan(start, goal)
+
+    world = ToyWorld(obstacles=[
+        CircleObstacle(3.0, 0.0, 0.35),  # obstacle on the path
+        CircleObstacle(4.5, 0.6, 0.25),
+    ])
+
+    pose = Pose2D(start[0], start[1], 0.0)
+    dt = 0.02
+    T = 20.0
+    t = 0.0
+
+    print("t,x,y,th,v_nom,w_nom,r_min,v_safe,w_safe")
+    while t &lt;= T:
+        r_min = world.nearest_range(pose, footprint_r=0.20)
+        u_nom = local_layer.compute_nominal(path, pose, goal_xy=goal)
+        u = reactive_layer.filter(u_nom, r_min)
+
+        print(f"{t:.2f},{pose.x:.3f},{pose.y:.3f},{pose.th:.3f},{u_nom.v:.3f},{u_nom.w:.3f},{r_min if r_min is not None else float('nan'):.3f},{u.v:.3f},{u.w:.3f}")
+
+        pose = step_unicycle(pose, u, dt)
+        t += dt
+
+        if math.hypot(goal[0] - pose.x, goal[1] - pose.y) &lt; 0.12:
+            break
+
+    print("Done. Final pose:", pose)
+
+# -----------------------------
+# 4) ROS 2 (rclpy) node skeleton
+# -----------------------------
+# The ROS 2 code is provided in a safe, minimal form that does not assume specific message topics.
+# You can wire it to nav_msgs/Path and sensor_msgs/LaserScan in your ROS 2 system.
+
+def try_import_ros2():
+    try:
+        import rclpy  # type: ignore
+        from rclpy.node import Node  # type: ignore
+        return rclpy, Node
+    except Exception:
+        return None, None
+
+def ros2_entrypoint() -&gt; None:
+    rclpy, Node = try_import_ros2()
+    if rclpy is None:
+        print("[INFO] ROS 2 not available in this environment. Running toy demo instead.")
+        run_toy_demo()
+        return
+
+    # Lazy imports only if ROS 2 exists
+    from geometry_msgs.msg import Twist  # type: ignore
+    from nav_msgs.msg import Path  # type: ignore
+    from sensor_msgs.msg import LaserScan  # type: ignore
+    from geometry_msgs.msg import PoseStamped  # type: ignore
+
+    class LayeredNavNode(Node):
+        def __init__(self):
+            super().__init__("chapter14_lesson1_layered_nav")
+
+            # Layers (tune as needed)
+            self.local = LocalLayer(v_max=0.8, w_max=1.2, lookahead=0.8, k_heading=2.0)
+            self.reactive = ReactiveSafetyLayer(v_max=0.8, w_max=1.2, d_safe=0.40, d_stop=0.20)
+
+            # State
+            self.path: List[Tuple[float, float]] = []
+            self.goal_xy: Optional[Tuple[float, float]] = None
+            self.pose = Pose2D(0.0, 0.0, 0.0)  # In practice, fill from localization / TF
+            self.r_min: Optional[float] = None
+
+            # Subscribers (wire to your topics)
+            self.sub_path = self.create_subscription(Path, "global_path", self.on_path, 10)
+            self.sub_scan = self.create_subscription(LaserScan, "scan", self.on_scan, 10)
+
+            # Publisher
+            self.pub_cmd = self.create_publisher(Twist, "cmd_vel", 10)
+
+            # Control loop (local + reactive) at 20 Hz
+            self.timer = self.create_timer(0.05, self.on_timer)
+
+            self.get_logger().info("Layered navigation node started (local+reactive).")
+
+        def on_path(self, msg: Path):
+            # Convert nav_msgs/Path to list of (x,y)
+            pts = []
+            for ps in msg.poses:
+                pts.append((ps.pose.position.x, ps.pose.position.y))
+            self.path = pts
+            if pts:
+                self.goal_xy = pts[-1]
+            self.get_logger().info(f"Received global path with {len(pts)} points.")
+
+        def on_scan(self, msg: LaserScan):
+            # Compute nearest forward range (simple)
+            # Real stacks consider footprint, angles, filtering, etc.
+            if not msg.ranges:
+                self.r_min = None
+                return
+            # Use min of finite ranges
+            vals = [r for r in msg.ranges if math.isfinite(r)]
+            self.r_min = min(vals) if vals else None
+
+        def on_timer(self):
+            if not self.path or self.goal_xy is None:
+                # No plan yet; stop
+                out = Twist()
+                out.linear.x = 0.0
+                out.angular.z = 0.0
+                self.pub_cmd.publish(out)
+                return
+
+            u_nom = self.local.compute_nominal(self.path, self.pose, self.goal_xy)
+            u = self.reactive.filter(u_nom, self.r_min)
+
+            out = Twist()
+            out.linear.x = float(u.v)
+            out.angular.z = float(u.w)
+            self.pub_cmd.publish(out)
+
+    rclpy.init()
+    node = LayeredNavNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == "__main__":
+    # By default, run the toy demo (safe everywhere). If ROS 2 is installed, it will run the ROS 2 node.
+    ros2_entrypoint()
+      </code></pre>
+
+      <hr/>
+      <p><strong>Chapter14_Lesson1.cpp</strong></p>
+      <pre><code class="language-cpp">
+// Chapter14_Lesson1.cpp
+// ROS 2 layered navigation safety filter (local-&gt;reactive) skeleton.
+// Build conceptually with a ROS 2 workspace (ament_cmake).
+//
+// Author: Abolfazl Mohammadijoo (course material)
+// License: MIT (see repository)
+
+#include &lt;cmath&gt;
+#include &lt;limits&gt;
+#include &lt;optional&gt;
+#include &lt;tuple&gt;
+#include &lt;vector&gt;
+
+// ROS 2 headers (require ROS 2 installation)
+#include &lt;rclcpp/rclcpp.hpp&gt;
+#include &lt;geometry_msgs/msg/twist.hpp&gt;
+#include &lt;nav_msgs/msg/path.hpp&gt;
+#include &lt;sensor_msgs/msg/laser_scan.hpp&gt;
+
+struct Pose2D {
+  double x{0.0};
+  double y{0.0};
+  double th{0.0};
+};
+
+struct Twist2D {
+  double v{0.0};
+  double w{0.0};
+};
+
+static inline double wrap_pi(double a) {
+  while (a &lt;= -M_PI) a += 2.0 * M_PI;
+  while (a &gt; M_PI) a -= 2.0 * M_PI;
+  return a;
+}
+
+static inline double clamp(double x, double lo, double hi) {
+  return std::max(lo, std::min(hi, x));
+}
+
+class LocalLayer {
+public:
+  LocalLayer(double v_max, double w_max, double lookahead, double k_heading)
+      : v_max_(v_max), w_max_(w_max), lookahead_(lookahead), k_heading_(k_heading) {}
+
+  Twist2D compute_nominal(const std::vector&lt;std::pair&lt;double, double&gt;&gt;&amp; path,
+                          const Pose2D&amp; pose,
+                          const std::pair&lt;double, double&gt;&amp; goal_xy) const {
+    if (path.empty()) return Twist2D{0.0, 0.0};
+
+    auto [tx, ty] = lookahead_point(path, pose);
+    const double des = std::atan2(ty - pose.y, tx - pose.x);
+    const double e_th = wrap_pi(des - pose.th);
+
+    const double d_goal = std::hypot(goal_xy.first - pose.x, goal_xy.second - pose.y);
+    double v = clamp(0.6 * d_goal, 0.0, v_max_);
+    double w = clamp(k_heading_ * e_th, -w_max_, w_max_);
+
+    if (d_goal &lt; 0.15) {
+      v = 0.0;
+      w = 0.0;
+    }
+    return Twist2D{v, w};
+  }
+
+private:
+  int closest_index(const std::vector&lt;std::pair&lt;double, double&gt;&gt;&amp; path,
+                    const Pose2D&amp; pose) const {
+    int best_i = 0;
+    double best_d2 = std::numeric_limits&lt;double&gt;::infinity();
+    for (int i = 0; i &lt; static_cast&lt;int&gt;(path.size()); ++i) {
+      const double dx = path[i].first - pose.x;
+      const double dy = path[i].second - pose.y;
+      const double d2 = dx * dx + dy * dy;
+      if (d2 &lt; best_d2) {
+        best_d2 = d2;
+        best_i = i;
+      }
+    }
+    return best_i;
+  }
+
+  std::pair&lt;double, double&gt; lookahead_point(const std::vector&lt;std::pair&lt;double, double&gt;&gt;&amp; path,
+                                           const Pose2D&amp; pose) const {
+    const int i0 = closest_index(path, pose);
+    double acc = 0.0;
+    auto last = path[i0];
+    for (int j = i0 + 1; j &lt; static_cast&lt;int&gt;(path.size()); ++j) {
+      auto cur = path[j];
+      acc += std::hypot(cur.first - last.first, cur.second - last.second);
+      if (acc &gt;= lookahead_) return cur;
+      last = cur;
+    }
+    return path.back();
+  }
+
+  double v_max_{0.8};
+  double w_max_{1.2};
+  double lookahead_{0.8};
+  double k_heading_{2.0};
+};
+
+class ReactiveSafetyLayer {
+public:
+  ReactiveSafetyLayer(double v_max, double w_max, double d_safe, double d_stop)
+      : v_max_(v_max), w_max_(w_max), d_safe_(d_safe), d_stop_(d_stop) {}
+
+  Twist2D filter(const Twist2D&amp; u_nom, const std::optional&lt;double&gt;&amp; r_min) const {
+    double v = clamp(u_nom.v, -v_max_, v_max_);
+    double w = clamp(u_nom.w, -w_max_, w_max_);
+
+    if (!r_min.has_value()) return Twist2D{v, w};
+
+    if (r_min.value() &lt;= d_stop_) {
+      return Twist2D{0.0, 0.0};
+    }
+
+    if (r_min.value() &lt; d_safe_) {
+      const double s = (r_min.value() - d_stop_) / std::max(1e-6, (d_safe_ - d_stop_));
+      v *= clamp(s, 0.0, 1.0);
+    }
+    return Twist2D{v, w};
+  }
+
+private:
+  double v_max_{0.8};
+  double w_max_{1.2};
+  double d_safe_{0.40};
+  double d_stop_{0.20};
+};
+
+class LayeredNavNode : public rclcpp::Node {
+public:
+  LayeredNavNode()
+      : Node("chapter14_lesson1_layered_nav_cpp"),
+        local_(0.8, 1.2, 0.8, 2.0),
+        reactive_(0.8, 1.2, 0.40, 0.20) {
+    using std::placeholders::_1;
+
+    sub_path_ = create_subscription&lt;nav_msgs::msg::Path&gt;("global_path", 10,
+      std::bind(&amp;LayeredNavNode::on_path, this, _1));
+    sub_scan_ = create_subscription&lt;sensor_msgs::msg::LaserScan&gt;("scan", 10,
+      std::bind(&amp;LayeredNavNode::on_scan, this, _1));
+
+    pub_cmd_ = create_publisher&lt;geometry_msgs::msg::Twist&gt;("cmd_vel", 10);
+
+    timer_ = create_wall_timer(std::chrono::milliseconds(50),
+      std::bind(&amp;LayeredNavNode::on_timer, this));
+
+    RCLCPP_INFO(get_logger(), "Layered navigation node started (local+reactive, C++).");
+  }
+
+private:
+  void on_path(const nav_msgs::msg::Path::SharedPtr msg) {
+    path_.clear();
+    for (const auto&amp; ps : msg-&gt;poses) {
+      path_.push_back({ps.pose.position.x, ps.pose.position.y});
+    }
+    if (!path_.empty()) goal_xy_ = path_.back();
+    RCLCPP_INFO(get_logger(), "Received global path with %zu points.", path_.size());
+  }
+
+  void on_scan(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+    std::optional&lt;double&gt; best;
+    for (const auto r : msg-&gt;ranges) {
+      if (std::isfinite(r)) {
+        if (!best.has_value() || r &lt; best.value()) best = r;
+      }
+    }
+    r_min_ = best;
+  }
+
+  void on_timer() {
+    if (path_.empty() || !goal_xy_.has_value()) {
+      geometry_msgs::msg::Twist out;
+      out.linear.x = 0.0;
+      out.angular.z = 0.0;
+      pub_cmd_-&gt;publish(out);
+      return;
+    }
+
+    // NOTE: pose_ should be updated from localization/TF in a real system.
+    const Twist2D u_nom = local_.compute_nominal(path_, pose_, goal_xy_.value());
+    const Twist2D u = reactive_.filter(u_nom, r_min_);
+
+    geometry_msgs::msg::Twist out;
+    out.linear.x = u.v;
+    out.angular.z = u.w;
+    pub_cmd_-&gt;publish(out);
+  }
+
+  Pose2D pose_{0.0, 0.0, 0.0};
+  std::vector&lt;std::pair&lt;double, double&gt;&gt; path_;
+  std::optional&lt;std::pair&lt;double, double&gt;&gt; goal_xy_;
+  std::optional&lt;double&gt; r_min_;
+
+  LocalLayer local_;
+  ReactiveSafetyLayer reactive_;
+
+  rclcpp::Subscription&lt;nav_msgs::msg::Path&gt;::SharedPtr sub_path_;
+  rclcpp::Subscription&lt;sensor_msgs::msg::LaserScan&gt;::SharedPtr sub_scan_;
+  rclcpp::Publisher&lt;geometry_msgs::msg::Twist&gt;::SharedPtr pub_cmd_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
+
+int main(int argc, char** argv) {
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared&lt;LayeredNavNode&gt;();
+  rclcpp::spin(node);
+  rclcpp::shutdown();
+  return 0;
+}
+      </code></pre>
+
+      <hr/>
+      <p><strong>Chapter14_Lesson1.java</strong></p>
+      <pre><code class="language-java">
+// Chapter14_Lesson1.java
+// ROS 2 (rcljava) layered navigation safety-filter skeleton.
+// Note: rcljava setup depends on your ROS 2 distribution and build tooling.
+//
+// Author: Abolfazl Mohammadijoo (course material)
+// License: MIT (see repository)
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import org.ros2.rcljava.RCLJava;
+import org.ros2.rcljava.node.Node;
+import org.ros2.rcljava.timer.WallTimer;
+
+import geometry_msgs.msg.Twist;
+import nav_msgs.msg.Path;
+import sensor_msgs.msg.LaserScan;
+
+class Pose2D {
+  public double x, y, th;
+  public Pose2D(double x, double y, double th) { this.x = x; this.y = y; this.th = th; }
+}
+
+class Twist2D {
+  public double v, w;
+  public Twist2D(double v, double w) { this.v = v; this.w = w; }
+}
+
+class MathUtil {
+  public static double wrapPi(double a) {
+    while (a &lt;= -Math.PI) a += 2.0 * Math.PI;
+    while (a &gt; Math.PI) a -= 2.0 * Math.PI;
+    return a;
+  }
+  public static double clamp(double x, double lo, double hi) {
+    return Math.max(lo, Math.min(hi, x));
+  }
+}
+
+class LocalLayer {
+  private final double vMax, wMax, lookahead, kHeading;
+
+  public LocalLayer(double vMax, double wMax, double lookahead, double kHeading) {
+    this.vMax = vMax;
+    this.wMax = wMax;
+    this.lookahead = lookahead;
+    this.kHeading = kHeading;
+  }
+
+  private int closestIndex(List&lt;double[]&gt; path, Pose2D pose) {
+    int best = 0;
+    double bestD2 = Double.POSITIVE_INFINITY;
+    for (int i = 0; i &lt; path.size(); i++) {
+      double dx = path.get(i)[0] - pose.x;
+      double dy = path.get(i)[1] - pose.y;
+      double d2 = dx*dx + dy*dy;
+      if (d2 &lt; bestD2) { bestD2 = d2; best = i; }
+    }
+    return best;
+  }
+
+  private double[] lookaheadPoint(List&lt;double[]&gt; path, Pose2D pose) {
+    if (path.isEmpty()) return new double[] {pose.x, pose.y};
+    int i0 = closestIndex(path, pose);
+    double acc = 0.0;
+    double[] last = path.get(i0);
+    for (int j = i0 + 1; j &lt; path.size(); j++) {
+      double[] cur = path.get(j);
+      acc += Math.hypot(cur[0] - last[0], cur[1] - last[1]);
+      if (acc &gt;= lookahead) return cur;
+      last = cur;
+    }
+    return path.get(path.size() - 1);
+  }
+
+  public Twist2D computeNominal(List&lt;double[]&gt; path, Pose2D pose, double[] goal) {
+    if (path.isEmpty()) return new Twist2D(0.0, 0.0);
+
+    double[] tgt = lookaheadPoint(path, pose);
+    double des = Math.atan2(tgt[1] - pose.y, tgt[0] - pose.x);
+    double eTh = MathUtil.wrapPi(des - pose.th);
+
+    double dGoal = Math.hypot(goal[0] - pose.x, goal[1] - pose.y);
+    double v = MathUtil.clamp(0.6 * dGoal, 0.0, vMax);
+    double w = MathUtil.clamp(kHeading * eTh, -wMax, wMax);
+
+    if (dGoal &lt; 0.15) { v = 0.0; w = 0.0; }
+    return new Twist2D(v, w);
+  }
+}
+
+class ReactiveSafetyLayer {
+  private final double vMax, wMax, dSafe, dStop;
+
+  public ReactiveSafetyLayer(double vMax, double wMax, double dSafe, double dStop) {
+    this.vMax = vMax;
+    this.wMax = wMax;
+    this.dSafe = dSafe;
+    this.dStop = dStop;
+  }
+
+  public Twist2D filter(Twist2D uNom, Optional&lt;Double&gt; rMin) {
+    double v = MathUtil.clamp(uNom.v, -vMax, vMax);
+    double w = MathUtil.clamp(uNom.w, -wMax, wMax);
+
+    if (!rMin.isPresent()) return new Twist2D(v, w);
+
+    double r = rMin.get();
+    if (r &lt;= dStop) return new Twist2D(0.0, 0.0);
+
+    if (r &lt; dSafe) {
+      double s = (r - dStop) / Math.max(1e-6, (dSafe - dStop));
+      s = MathUtil.clamp(s, 0.0, 1.0);
+      v *= s;
+    }
+    return new Twist2D(v, w);
+  }
+}
+
+public class Chapter14_Lesson1 {
+  static class LayeredNavNode extends Node {
+    private final LocalLayer local = new LocalLayer(0.8, 1.2, 0.8, 2.0);
+    private final ReactiveSafetyLayer reactive = new ReactiveSafetyLayer(0.8, 1.2, 0.40, 0.20);
+
+    private final List&lt;double[]&gt; path = new ArrayList&lt;&gt;();
+    private Optional&lt;double[]&gt; goal = Optional.empty();
+    private Pose2D pose = new Pose2D(0.0, 0.0, 0.0); // In practice from TF/localization
+    private Optional&lt;Double&gt; rMin = Optional.empty();
+
+    private final org.ros2.rcljava.publisher.Publisher&lt;Twist&gt; pubCmd;
+
+    LayeredNavNode() {
+      super("chapter14_lesson1_layered_nav_java");
+
+      // Subscribers
+      this.createSubscription(Path.class, "global_path", (Path msg) -&gt; onPath(msg));
+      this.createSubscription(LaserScan.class, "scan", (LaserScan msg) -&gt; onScan(msg));
+
+      // Publisher
+      pubCmd = this.createPublisher(Twist.class, "cmd_vel");
+
+      // 20 Hz timer
+      WallTimer timer = this.createWallTimer(50, this::onTimer);
+
+      this.getLogger().info("Layered navigation node started (local+reactive, Java).");
+    }
+
+    private void onPath(Path msg) {
+      path.clear();
+      for (var ps : msg.getPoses()) {
+        double x = ps.getPose().getPosition().getX();
+        double y = ps.getPose().getPosition().getY();
+        path.add(new double[] {x, y});
+      }
+      if (!path.isEmpty()) goal = Optional.of(path.get(path.size() - 1));
+      this.getLogger().info("Received global path with " + path.size() + " points.");
+    }
+
+    private void onScan(LaserScan msg) {
+      double best = Double.POSITIVE_INFINITY;
+      boolean any = false;
+      for (float rf : msg.getRanges()) {
+        double r = (double) rf;
+        if (Double.isFinite(r)) {
+          any = true;
+          if (r &lt; best) best = r;
+        }
+      }
+      rMin = any ? Optional.of(best) : Optional.empty();
+    }
+
+    private void onTimer() {
+      Twist out = new Twist();
+
+      if (path.isEmpty() || !goal.isPresent()) {
+        out.getLinear().setX(0.0);
+        out.getAngular().setZ(0.0);
+        pubCmd.publish(out);
+        return;
+      }
+
+      Twist2D uNom = local.computeNominal(path, pose, goal.get());
+      Twist2D u = reactive.filter(uNom, rMin);
+
+      out.getLinear().setX(u.v);
+      out.getAngular().setZ(u.w);
+      pubCmd.publish(out);
+    }
+  }
+
+  public static void main(String[] args) {
+    RCLJava.rclJavaInit();
+    LayeredNavNode node = new LayeredNavNode();
+    RCLJava.spin(node);
+    node.dispose();
+    RCLJava.shutdown();
+  }
+}
+      </code></pre>
+
+      <hr/>
+      <p><strong>Chapter14_Lesson1.m</strong></p>
+      <pre><code class="language-matlab">
+% Chapter14_Lesson1.m
+% Layered navigation architecture demo in MATLAB/Simulink:
+%   - Global layer: plan on an occupancy grid (black-box A* planner)
+%   - Local layer: track waypoints with a simple heading controller
+%   - Reactive layer: speed scaling / emergency stop based on nearest obstacle range
+%
+% Author: Abolfazl Mohammadijoo (course material)
+% License: MIT (see repository)
+
+clear; clc;
+
+%% 1) Build a toy occupancy grid map
+% 0: free, 1: occupied
+mapSize = [60, 60];
+occ = zeros(mapSize);
+
+% Add obstacles (rectangles)
+occ(25:35, 28:32) = 1;   % obstacle block
+occ(40:45, 40:55) = 1;
+
+% Inflate obstacles for global safety margin (simple dilation)
+inflateRadius = 2; % cells
+se = strel('disk', inflateRadius, 0);
+occInfl = imdilate(occ, se);
+
+start = [5, 10];   % [row, col]
+goal  = [55, 50];
+
+%% 2) Global layer: plan a path on the grid
+% For teaching: use a simple A* (implemented below).
+pathRC = astar_grid(occInfl, start, goal);  % returns [r,c] points
+
+if isempty(pathRC)
+    error('No path found.');
+end
+
+% Convert to XY in meters (assume cell=0.1m)
+cellSize = 0.1;
+pathXY = [(pathRC(:,2)-1)*cellSize, (pathRC(:,1)-1)*cellSize]; % x=col, y=row
+
+%% 3) Local layer params (unicycle tracking)
+vMax = 0.8; wMax = 1.2;
+kHeading = 2.0;
+lookahead = 0.8; % meters
+
+%% 4) Reactive safety params
+dSafe = 0.40;   % begin slowing down
+dStop = 0.20;   % emergency stop
+
+%% 5) Simulate unicycle motion
+pose = [pathXY(1,1), pathXY(1,2), 0]; % [x,y,theta]
+dt = 0.02;
+T  = 20.0;
+
+% Obstacles as circles for near-field range demo (separate from grid)
+obs = [ ...
+    3.0, 0.0, 0.35;
+    4.5, 0.6, 0.25
+];
+
+log = [];
+for t = 0:dt:T
+    goalXY = pathXY(end,:);
+
+    % Local: compute nominal command toward lookahead point
+    [uNom, tgt] = local_track(pathXY, pose, lookahead, kHeading, vMax, wMax, goalXY);
+
+    % Reactive: estimate nearest range to obstacles and filter
+    rMin = nearest_range_circles(pose, obs, 0.20); % footprint radius 0.20m
+    u = reactive_filter(uNom, rMin, vMax, wMax, dSafe, dStop);
+
+    log = [log; t, pose, uNom, rMin, u];
+
+    % Integrate
+    pose = step_unicycle(pose, u, dt);
+
+    if norm(goalXY - pose(1:2)) &lt; 0.12
+        break;
+    end
+end
+
+%% 6) Plot results
+figure; imagesc(1-occ); axis image; colormap gray; hold on;
+plot(pathRC(:,2), pathRC(:,1), 'b-', 'LineWidth', 2);
+plot(start(2), start(1), 'go', 'MarkerSize', 8, 'LineWidth', 2);
+plot(goal(2),  goal(1),  'ro', 'MarkerSize', 8, 'LineWidth', 2);
+title('Global Layer: Planned Path on Occupancy Grid (free=white)');
+hold off;
+
+figure; plot(log(:,1), log(:,4), 'LineWidth', 1.5);
+xlabel('t (s)'); ylabel('theta (rad)'); grid on;
+title('Heading vs Time');
+
+figure; plot(log(:,1), log(:,6), 'LineWidth', 1.5); hold on;
+plot(log(:,1), log(:,8), 'LineWidth', 1.5);
+xlabel('t (s)'); ylabel('v (m/s)'); grid on;
+legend('v_{nom}', 'v_{safe}');
+title('Reactive Layer: Speed Scaling');
+
+disp('Done. Final pose [x y th]:');
+disp(pose);
+
+%% -------------------- Local functions --------------------
+
+function poseNext = step_unicycle(pose, u, dt)
+x = pose(1); y = pose(2); th = pose(3);
+v = u(1); w = u(2);
+x = x + dt * v * cos(th);
+y = y + dt * v * sin(th);
+th = wrap_pi(th + dt * w);
+poseNext = [x,y,th];
+end
+
+function th = wrap_pi(th)
+while th &lt;= -pi
+    th = th + 2*pi;
+end
+while th &gt; pi
+    th = th - 2*pi;
+end
+end
+
+function [uNom, tgt] = local_track(pathXY, pose, lookahead, kHeading, vMax, wMax, goalXY)
+% Find closest point on path
+dx = pathXY(:,1) - pose(1);
+dy = pathXY(:,2) - pose(2);
+[~, i0] = min(dx.^2 + dy.^2);
+
+% March forward to get lookahead point
+acc = 0;
+tgt = pathXY(end,:);
+last = pathXY(i0,:);
+for j = i0+1:size(pathXY,1)
+    cur = pathXY(j,:);
+    acc = acc + norm(cur - last);
+    if acc &gt;= lookahead
+        tgt = cur;
+        break;
+    end
+    last = cur;
+end
+
+des = atan2(tgt(2)-pose(2), tgt(1)-pose(1));
+eTh = wrap_pi(des - pose(3));
+
+dGoal = norm(goalXY - pose(1:2));
+v = min(vMax, max(0, 0.6*dGoal));
+w = min(wMax, max(-wMax, kHeading*eTh));
+
+if dGoal &lt; 0.15
+    v = 0; w = 0;
+end
+
+uNom = [v, w];
+end
+
+function rMin = nearest_range_circles(pose, obs, footprintR)
+% obs rows: [x,y,r]
+x = pose(1); y = pose(2);
+best = inf;
+for i = 1:size(obs,1)
+    d = hypot(x-obs(i,1), y-obs(i,2)) - (obs(i,3) + footprintR);
+    best = min(best, d);
+end
+rMin = best;
+end
+
+function u = reactive_filter(uNom, rMin, vMax, wMax, dSafe, dStop)
+v = min(vMax, max(-vMax, uNom(1)));
+w = min(wMax, max(-wMax, uNom(2)));
+
+if isempty(rMin) || isnan(rMin)
+    u = [v,w]; return;
+end
+
+if rMin &lt;= dStop
+    u = [0,0]; return;
+end
+
+if rMin &lt; dSafe
+    s = (rMin - dStop) / max(1e-6, (dSafe - dStop));
+    s = min(1, max(0, s));
+    v = v * s;
+end
+
+u = [v,w];
+end
+
+function path = astar_grid(occ, startRC, goalRC)
+% Simple A* on 4-connected grid.
+% occ: 0 free, 1 occupied
+% startRC: [r,c], goalRC: [r,c]
+R = size(occ,1); C = size(occ,2);
+
+start = sub2ind([R C], startRC(1), startRC(2));
+goal  = sub2ind([R C], goalRC(1),  goalRC(2));
+
+% Validate
+if occ(start) == 1 || occ(goal) == 1
+    path = []; return;
+end
+
+% Data structures
+g = inf(R*C,1);
+f = inf(R*C,1);
+came = zeros(R*C,1);
+
+open = false(R*C,1);
+closed = false(R*C,1);
+
+g(start) = 0;
+f(start) = heuristic(startRC, goalRC);
+open(start) = true;
+
+% 4-neighbors
+nbr = [ -1 0; 1 0; 0 -1; 0 1 ];
+
+while any(open)
+    % pick open node with min f
+    idxOpen = find(open);
+    [~, k] = min(f(idxOpen));
+    cur = idxOpen(k);
+
+    if cur == goal
+        path = reconstruct_path(came, cur, [R C]);
+        return;
+    end
+
+    open(cur) = false;
+    closed(cur) = true;
+
+    [cr, cc] = ind2sub([R C], cur);
+
+    for i = 1:4
+        nr = cr + nbr(i,1);
+        nc = cc + nbr(i,2);
+        if nr &lt; 1 || nr &gt; R || nc &lt; 1 || nc &gt; C
+            continue;
+        end
+        nind = sub2ind([R C], nr, nc);
+        if occ(nind) == 1 || closed(nind)
+            continue;
+        end
+
+        tentative = g(cur) + 1.0;
+        if ~open(nind)
+            open(nind) = true;
+        elseif tentative &gt;= g(nind)
+            continue;
+        end
+
+        came(nind) = cur;
+        g(nind) = tentative;
+        f(nind) = tentative + heuristic([nr,nc], goalRC);
+    end
+end
+
+path = []; % no path
+end
+
+function h = heuristic(rc, goalRC)
+% Manhattan distance
+h = abs(rc(1)-goalRC(1)) + abs(rc(2)-goalRC(2));
+end
+
+function path = reconstruct_path(came, cur, sz)
+inds = cur;
+while came(cur) ~= 0
+    cur = came(cur);
+    inds = [cur; inds];
+end
+[r, c] = ind2sub(sz, inds);
+path = [r c];
+end
+      </code></pre>
+
+      <hr/>
+      <p><strong>Chapter14_Lesson1.nb</strong></p>
+      <pre><code class="language-mathematica">
+(* Chapter14_Lesson1.nb
+   Wolfram Language notebook-style script (plain text) illustrating a layered navigation architecture:
+     - Global layer: shortest path on a grid graph with obstacles
+     - Local layer: lookahead tracking producing nominal {v, w}
+     - Reactive layer: safety filter scaling v based on nearest obstacle range
+
+   Author: Abolfazl Mohammadijoo (course material)
+   License: MIT (see repository)
+*)
+
+ClearAll["Global`*"];
+
+(* -------------------------
+   1) Build a toy grid world
+   ------------------------- *)
+gridSize = {60, 60};
+obstacles = ConstantArray[0, gridSize];
+
+(* Add rectangular obstacles (rows, cols) *)
+Do[obstacles[[r, c]] = 1, {r, 25, 35}, {c, 28, 32}];
+Do[obstacles[[r, c]] = 1, {r, 40, 45}, {c, 40, 55}];
+
+startRC = {5, 10};
+goalRC  = {55, 50};
+
+If[obstacles[[Sequence @@ startRC]] == 1 || obstacles[[Sequence @@ goalRC]] == 1,
+  Print["Start/goal invalid (occupied)."]; Abort[];
+];
+
+(* Inflate obstacles (simple morphological dilation) *)
+inflateRadius = 2;
+inflated = ImageData @ Dilation[Image[obstacles], inflateRadius];
+
+(* -------------------------
+   2) Global layer: A* / shortest path on a grid graph
+   ------------------------- *)
+neighbors4[{r_, c_}] := Select[{ {r - 1, c}, {r + 1, c}, {r, c - 1}, {r, c + 1} },
+  1 &lt;= #[[1]] &lt;= gridSize[[1]] &amp;&amp; 1 &lt;= #[[2]] &lt;= gridSize[[2]] &amp;&amp;
+  inflated[[#[[1]], #[[2]]]] == 0 &amp;
+];
+
+hManhattan[a_, b_] := Abs[a[[1]] - b[[1]]] + Abs[a[[2]] - b[[2]]];
+
+aStar[start_, goal_] := Module[
+  {open = &lt;||&gt;, came = &lt;||&gt;, g = &lt;||&gt;, f = &lt;||&gt;, current, curKey, nbrs, tent, nKey},
+  open[start] = True;
+  g[start] = 0;
+  f[start] = hManhattan[start, goal];
+
+  While[Length[Keys[open]] &gt; 0,
+    current = First @ MinimalBy[Keys[open], f[#] &amp;];
+    If[current === goal, Break[]];
+
+    KeyDropFrom[open, current];
+    nbrs = neighbors4[current];
+
+    Do[
+      tent = g[current] + 1;
+      If[! KeyExistsQ[g, nb] || tent &lt; g[nb],
+        came[nb] = current;
+        g[nb] = tent;
+        f[nb] = tent + hManhattan[nb, goal];
+        open[nb] = True;
+      ],
+      {nb, nbrs}
+    ];
+  ];
+
+  If[! KeyExistsQ[came, goal] &amp;&amp; start =!= goal, Return[{}]];
+
+  (* reconstruct *)
+  curKey = goal;
+  Reap[
+    Sow[curKey];
+    While[curKey =!= start,
+      curKey = came[curKey];
+      Sow[curKey];
+    ]
+  ][[2, 1]] // Reverse
+];
+
+pathRC = aStar[startRC, goalRC];
+If[pathRC === {}, Print["No path found."]; Abort[]];
+
+cellSize = 0.1; (* meters *)
+pathXY = ({ #[[2]] - 1, #[[1]] - 1} * cellSize) &amp; /@ pathRC; (* {x,y} *)
+
+(* -------------------------
+   3) Local layer: lookahead tracking (unicycle)
+   ------------------------- *)
+wrapPi[a_] := Module[{x = a}, While[x &lt;= -Pi, x += 2 Pi]; While[x &gt; Pi, x -= 2 Pi]; x];
+clamp[x_, lo_, hi_] := Max[lo, Min[hi, x]];
+
+closestIndex[path_, pose_] := First @ Ordering[Norm /@ (path - pose[[1 ;; 2]]), 1];
+
+lookaheadPoint[path_, pose_, L_] := Module[{i0, acc = 0., last, cur, j},
+  i0 = closestIndex[path, pose];
+  last = path[[i0]];
+  For[j = i0 + 1, j &lt;= Length[path], j++,
+    cur = path[[j]];
+    acc += Norm[cur - last];
+    If[acc &gt;= L, Return[cur]];
+    last = cur;
+  ];
+  path[[-1]]
+];
+
+localNominal[path_, pose_, goal_, vMax_, wMax_, L_, kH_] := Module[
+  {tgt, des, eTh, dGoal, v, w},
+  tgt = lookaheadPoint[path, pose, L];
+  des = ArcTan @@ (tgt - pose[[1 ;; 2]]) // N;
+  eTh = wrapPi[des - pose[[3]]];
+  dGoal = Norm[goal - pose[[1 ;; 2]]];
+  v = clamp[0.6 dGoal, 0., vMax];
+  w = clamp[kH eTh, -wMax, wMax];
+  If[dGoal &lt; 0.15, v = 0.; w = 0.];
+  {v, w, tgt}
+];
+
+(* -------------------------
+   4) Reactive layer: speed scaling / stop based on nearest obstacle range
+   ------------------------- *)
+obsCircles = {
+  {3.0, 0.0, 0.35},
+  {4.5, 0.6, 0.25}
+};
+footprintR = 0.20;
+
+nearestRange[pose_, circles_] := Module[{x = pose[[1]], y = pose[[2]], best = Infinity, d},
+  Do[
+    d = Sqrt[(x - c[[1]])^2 + (y - c[[2]])^2] - (c[[3]] + footprintR);
+    If[d &lt; best, best = d],
+    {c, circles}
+  ];
+  best
+];
+
+reactiveFilter[uNom_, rMin_, vMax_, wMax_, dSafe_, dStop_] := Module[
+  {v = clamp[uNom[[1]], -vMax, vMax], w = clamp[uNom[[2]], -wMax, wMax], s},
+  If[rMin &lt;= dStop, Return[{0., 0.}]];
+  If[rMin &lt; dSafe,
+    s = (rMin - dStop)/Max[10^-6, (dSafe - dStop)];
+    s = clamp[s, 0., 1.];
+    v = v s;
+  ];
+  {v, w}
+];
+
+(* -------------------------
+   5) Simulate
+   ------------------------- *)
+vMax = 0.8; wMax = 1.2; L = 0.8; kH = 2.0;
+dSafe = 0.40; dStop = 0.20;
+
+pose = {pathXY[[1, 1]], pathXY[[1, 2]], 0.0}; (* {x,y,theta} *)
+dt = 0.02; T = 20.0;
+goalXY = pathXY[[-1]];
+
+log = Reap[
+  Do[
+    rMin = nearestRange[pose, obsCircles];
+    {vNom, wNom, tgt} = localNominal[pathXY, pose, goalXY, vMax, wMax, L, kH];
+    uSafe = reactiveFilter[{vNom, wNom}, rMin, vMax, wMax, dSafe, dStop];
+
+    Sow[{t, pose[[1]], pose[[2]], pose[[3]], vNom, wNom, rMin, uSafe[[1]], uSafe[[2]]}];
+
+    (* unicycle step *)
+    pose = {
+      pose[[1]] + dt uSafe[[1]] Cos[pose[[3]]],
+      pose[[2]] + dt uSafe[[1]] Sin[pose[[3]]],
+      wrapPi[pose[[3]] + dt uSafe[[2]]]
+    };
+
+    If[Norm[goalXY - pose[[1 ;; 2]]] &lt; 0.12, Break[]];
+    ,
+    {t, 0, T, dt}
+  ]
+][[2, 1]];
+
+Print["Done. Final pose: ", pose];
+
+(* Quick plot: rMin and vNom vs vSafe *)
+ListLinePlot[
+  {
+    log[[All, 7]], (* rMin *)
+    log[[All, 5]], (* vNom *)
+    log[[All, 8]]  (* vSafe *)
+  },
+  PlotLegends -&gt; {"rMin", "vNom", "vSafe"},
+  GridLines -&gt; Automatic,
+  AxesLabel -&gt; {"k", "value"},
+  PlotLabel -&gt; "Reactive Layer Effect"
+];
+
+(* Visualize occupancy and global path (grid coordinates) *)
+Show[
+  ArrayPlot[1 - inflated, ColorRules -&gt; {0 -&gt; White, 1 -&gt; GrayLevel[0.2]}, Frame -&gt; True,
+    PlotLabel -&gt; "Global Layer: Inflated Obstacles (white=free)"],
+  Graphics[{Blue, Thick, Line[Reverse /@ pathRC]}]
+];
+      </code></pre>
+
+      <p>
+        Practical note: in a real robot, you will typically run the reactive safety process at the highest rate and in the
+        most reliable compute domain (real-time capable), and treat it as <em>non-negotiable</em>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Interface Contracts):</strong>
+        You have a global path represented by waypoints <strong>\( \mathcal{P} = \{\mathbf{p}_0,\dots,\mathbf{p}_N\} \)</strong>
+        and a local controller producing <strong>\( \mathbf{u}_\text{nom}(t) \)</strong>.
+        Propose a minimal set of quantities that must be shared between global and local layers to ensure consistency when the map is updated.
+      </p>
+      <p>
+        <strong>Solution:</strong> At minimum:
+        (i) the path geometry (ordered waypoints or spline coefficients),
+        (ii) a frame identifier and transform timestamp (so local layer knows the path is in the same frame as <strong>\( \hat{\mathbf{x} } \)</strong>),
+        (iii) a validity horizon or revision number (so local layer can reject stale paths),
+        and (iv) goal tolerance parameters (so local layer knows when the goal is satisfied without waiting for perfect coincidence).
+      </p>
+
+      <p>
+        <strong>Problem 2 (Time-Scale Design):</strong>
+        Suppose your robot moves at <strong>\( v \approx 1.0 \)</strong> m/s and can stop within <strong>\( 0.4 \)</strong> m.
+        If the reactive layer uses only a forward range sensor, derive a conservative bound on its update period <strong>\( T_r \)</strong>
+        to guarantee it can issue a stop before collision, assuming worst-case perception delay equals <strong>\( T_r \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        In worst case, the robot may travel <strong>\( v T_r \)</strong> meters before the next reactive update.
+        To ensure stopping within <strong>\( 0.4 \)</strong> m, require <strong>\( v T_r \le 0.4 \)</strong>, hence
+        <strong>\( T_r \le 0.4 / 1.0 = 0.4 \)</strong> s (2.5 Hz). In practice you add margins for braking dynamics,
+        sensor noise, and computation, so you choose much smaller <strong>\( T_r \)</strong> (e.g., 10–20 ms).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Barrier Invariance):</strong>
+        Let <strong>\( h(t) \)</strong> satisfy the differential inequality <strong>\( \dot{h}(t) + \alpha h(t) \ge 0 \)</strong>, with <strong>\( \alpha &gt; 0 \)</strong>.
+        Prove that <strong>\( h(0) \ge 0 \Rightarrow h(t) \ge 0 \)</strong> for all <strong>\( t \ge 0 \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong> Rearrange: <strong>\( \dot{h}(t) \ge -\alpha h(t) \)</strong>.
+        Consider the comparison system <strong>\( \dot{z}(t) = -\alpha z(t) \)</strong>, <strong>\( z(0)=h(0) \)</strong>, whose solution is
+        <strong>\( z(t)=e^{-\alpha t}h(0) \ge 0 \)</strong>. By the comparison lemma, <strong>\( h(t) \ge z(t) \ge 0 \)</strong>, hence invariance.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Local MPC Decrease):</strong>
+        Assume the terminal inequality
+        <strong>\( V_f(f(\mathbf{x},k_f(\mathbf{x}))) - V_f(\mathbf{x}) \le -\ell(\mathbf{x},k_f(\mathbf{x}),\mathcal{P}) \)</strong>
+        holds on <strong>\( \mathcal{X}_f \)</strong>. Explain why this suggests the receding-horizon value function decreases after applying the first segment of the optimal control.
+      </p>
+      <p>
+        <strong>Solution:</strong> After executing the first part of the optimal control for duration <strong>\( \Delta \)</strong>, you can build a feasible candidate
+        for the new optimization by (i) shifting the remaining optimal control forward and (ii) appending the terminal controller <strong>\( k_f \)</strong>.
+        The terminal inequality ensures the appended part does not increase total cost; therefore the new optimal cost is no larger than this feasible candidate,
+        giving a net decrease by at least the incurred stage cost over <strong>\( [0,\Delta] \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 5 (Authority Order):</strong>
+        Consider a situation where the global layer demands motion through a narrow passage, the local layer attempts to follow,
+        but the reactive layer repeatedly stops due to near-field detections. Describe two architectural responses that preserve safety
+        and still enable progress.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        (i) Trigger a higher-level mode switch: stop-and-wait (yield), rotate-in-place to improve sensing, or back up slightly, then request a new global plan.
+        (ii) Modify constraints upstream: increase safety margins in the local feasibility set (inflation / footprint margin),
+        or add a “no-go” region to the global map so the next global plan avoids the problematic passage. In both cases, safety retains priority while the system
+        adapts by replanning or changing mode.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formalized the standard AMR navigation stack as a layered control architecture:
+        a global planner producing a map-level path, a local command generator that tracks the path while handling constraints,
+        and a reactive safety filter that enforces collision-avoidance invariants. The core engineering principles are:
+        time-scale separation, explicit interface contracts, and strict authority ordering where safety can override tracking.
+        In Lesson 2 we will formalize the map-side representation that connects global and local layers: costmaps and inflation.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. References</h2>
+    <ol>
+      <li>
+        Brooks, R.A. (1986). A robust layered control system for a mobile robot.
+        <em>IEEE Journal of Robotics and Automation</em>, 2(1), 14–23.
+      </li>
+      <li>
+        Arkin, R.C. (1989). Motor schema-based mobile robot navigation.
+        <em>The International Journal of Robotics Research</em>, 8(4), 92–112.
+      </li>
+      <li>
+        Macenski, S., Martín, F., White, R., &amp; Clavero, J.G. (2020).
+        The Marathon 2: A Navigation System.
+        <em>Proceedings of the IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)</em>.
+      </li>
+      <li>
+        Macenski, S., Moore, T., Lu, D.V., Merzlyakov, A., &amp; Ferguson, M. (2023).
+        From the desks of ROS maintainers: A survey of modern &amp; capable mobile robotics algorithms in ROS 2.
+        <em>Robotics and Autonomous Systems</em>.
+      </li>
+      <li>
+        Ames, A.D., Xu, X., Grizzle, J.W., &amp; Tabuada, P. (2017).
+        Control barrier function based quadratic programs for safety critical systems.
+        <em>IEEE Transactions on Automatic Control</em>, 62(8), 3861–3876.
+      </li>
+      <li>
+        Khatib, O. (1986). Real-time obstacle avoidance for manipulators and mobile robots.
+        <em>The International Journal of Robotics Research</em>, 5(1), 90–98.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson5.html">
+          <small>(previous chapter)</small> Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson2.html">
+          Lesson 2: Costmaps and Inflation Concepts
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="active-lesson" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

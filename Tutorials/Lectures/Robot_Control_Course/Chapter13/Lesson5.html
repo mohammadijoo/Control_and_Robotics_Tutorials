@@ -1,0 +1,1845 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 13: Safety-Critical Robot Control (Technical Layer Only) - Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints | Robot Control</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</h1>
+    <h3>
+      <strong
+        >Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints</strong
+      >
+    </h3>
+    <p>
+      In this lab-style lesson, we implement a safety filter that enforces
+      joint-limit and workspace-avoidance constraints using control barrier
+      functions (CBFs) and quadratic programs (QPs). We work at the
+      velocity-command level so that the safety layer can sit on top of any
+      existing joint- or task-space controller without re-deriving robot
+      dynamics. We derive the mathematical constraints, then provide Python,
+      C++, Java, MATLAB/Simulink, and Wolfram Mathematica implementations.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Lab Goals and System Setup -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Lab Goals and System Setup</h2>
+    <div class="down-content">
+      <p>
+        We consider an <strong>n-DOF manipulator</strong> controlled at the
+        <em>joint-velocity</em> level. The low-level robot interface accepts a
+        command <strong>\( \mathbf{v} \in \mathbb{R}^n \)</strong> and updates
+        joint positions via
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{q}}(t) = \mathbf{v}(t), \quad \mathbf{q}(t) \in
+        \mathbb{R}^n \]
+      </h4>
+      <p>
+        where <strong>\( \mathbf{q} \)</strong> collects joint angles (or
+        generalized coordinates). A <em>nominal controller</em> (from previous
+        chapters) provides a desired joint velocity
+        <strong
+          >\( \mathbf{v}_{\text{nom}}(\mathbf{q}, \mathbf{q}_d,
+          \dot{\mathbf{q}}_d) \)</strong
+        >
+        for tracking some reference. Our goal is to compute instead a
+        <em>safe velocity</em>
+        <strong>\( \mathbf{v}_{\text{safe}} \)</strong> that:
+      </p>
+      <ul>
+        <li>
+          Stays as close as possible to
+          <strong>\( \mathbf{v}_{\text{nom}} \)</strong>,
+        </li>
+        <li>Guarantees joint limits are never violated,</li>
+        <li>
+          Ensures the end-effector stays outside forbidden workspace regions
+          (e.g., obstacles).
+        </li>
+      </ul>
+      <p>
+        This is achieved by wrapping the nominal controller with a CBF-QP safety
+        filter:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  R["Reference / Task"] --> N["Nominal Controller (PD, CT, etc.)"]
+  N --> VN["Joint velocity v_nom"]
+  VN --> SF["Safety Filter (QP with CBF constraints)"]
+  SF --> VS["Joint velocity v_safe"]
+  VS --> ROB["Robot (joint-level interface)"]
+  ROB --> MEAS["Sensors (q, qdot, ee pose)"]
+  MEAS --> N
+        </pre>
+      </div>
+      <p>
+        The lab is conceptually the same for simulated or real robots. In
+        practice, you will implement the safety filter in a loop with sampling
+        time
+        <strong>\( T_s \)</strong>, using measured
+        <strong>\( \mathbf{q}(k) \)</strong> and possibly end-effector pose
+        <strong>\( \mathbf{p}(k) \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: CBF-Based Safety Filter at Velocity Level -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. CBF-Based Safety Filter at Velocity Level</h2>
+    <div class="down-content">
+      <p>
+        At the joint-velocity level, the system is <em>control-affine</em> in
+        the state <strong>\( \mathbf{x} = \mathbf{q} \)</strong> with input
+        <strong>\( \mathbf{u} = \mathbf{v} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{\mathbf{x}} = \dot{\mathbf{q}} = \mathbf{v}. \]
+      </h4>
+      <p>
+        A <strong>safe set</strong> is defined by a continuously differentiable
+        function <strong>\( h : \mathbb{R}^n \to \mathbb{R} \)</strong> as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathcal{C} = \{ \mathbf{q} \in \mathbb{R}^n \,\vert\, h(\mathbf{q})
+        \ge 0 \}. \]
+      </h4>
+      <p>
+        The set <strong>\( \mathcal{C} \)</strong> is
+        <em>forward invariant</em> if any trajectory starting in
+        <strong>\( \mathcal{C} \)</strong> never leaves it. A
+        <strong>zeroing control barrier function (ZCBF)</strong> condition at
+        velocity level is:
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{h}(\mathbf{q}, \mathbf{v}) = \nabla h(\mathbf{q})^{\top}
+        \mathbf{v} \ge -\alpha\big(h(\mathbf{q})\big), \]
+      </h4>
+      <p>
+        where <strong>\( \alpha \)</strong> is an extended class-\(\mathcal{K}\)
+        function (e.g. <strong>\( \alpha(s) = \gamma s \)</strong> with
+        <strong>\( \gamma &gt; 0 \)</strong>). If the above inequality is
+        satisfied for all time, and the system is locally Lipschitz, then
+        <strong>\( \mathcal{C} \)</strong> is forward invariant, i.e., safety is
+        guaranteed.
+      </p>
+      <p>
+        In a QP-based safety filter, we enforce this inequality as a
+        <em>linear constraint</em> in <strong>\( \mathbf{v} \)</strong>:
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla h(\mathbf{q})^{\top} \mathbf{v} +
+        \alpha\big(h(\mathbf{q})\big) \ge 0. \]
+      </h4>
+      <p>
+        For multiple CBFs <strong>\( h_j \)</strong>, the safe set is the
+        intersection
+        <strong>\( \mathcal{C} = \bigcap_j \mathcal{C}_j \)</strong>, and the QP
+        includes one linear inequality per CBF.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Joint-Limit CBFs -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Joint-Limit CBFs</h2>
+    <div class="down-content">
+      <p>
+        For each joint <strong>\( i \in \{1,\dots,n\} \)</strong>, let
+        <strong>\( q_{i,\min} \)</strong> and
+        <strong>\( q_{i,\max} \)</strong> denote its mechanical limits. We want
+        <strong>\( q_{i,\min} \le q_i \le q_{i,\max} \)</strong> for all time.
+        We encode this as two scalar CBFs:
+      </p>
+      <h4 class="mathJax">
+        \[ h_i^{\min}(\mathbf{q}) = q_i - q_{i,\min}, \quad
+        h_i^{\max}(\mathbf{q}) = q_{i,\max} - q_i. \]
+      </h4>
+      <p>
+        The safe set is <strong>\( h_i^{\min} \ge 0 \)</strong> and
+        <strong>\( h_i^{\max} \ge 0 \)</strong>. Their gradients are
+        <strong>\( \nabla h_i^{\min} = \mathbf{e}_i \)</strong> and
+        <strong>\( \nabla h_i^{\max} = -\mathbf{e}_i \)</strong>, where
+        <strong>\( \mathbf{e}_i \)</strong> is the i-th canonical basis vector.
+        The CBF conditions become
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \dot{h}_i^{\min}(\mathbf{q}, \mathbf{v}) &=
+        \mathbf{e}_i^{\top} \mathbf{v} \ge
+        -\alpha\big(h_i^{\min}(\mathbf{q})\big), \\ \dot{h}_i^{\max}(\mathbf{q},
+        \mathbf{v}) &= -\mathbf{e}_i^{\top} \mathbf{v} \ge
+        -\alpha\big(h_i^{\max}(\mathbf{q})\big). \end{aligned} \]
+      </h4>
+      <p>
+        For a linear choice <strong>\( \alpha(s) = \gamma s \)</strong> with
+        <strong>\( \gamma &gt; 0 \)</strong>, we obtain the pair of inequalities
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{e}_i^{\top} \mathbf{v} + \gamma (q_i -
+        q_{i,\min}) &\ge 0, \\ -\mathbf{e}_i^{\top} \mathbf{v} + \gamma
+        (q_{i,\max} - q_i) &\ge 0. \end{aligned} \]
+      </h4>
+      <p>
+        These are <em>affine constraints</em> in
+        <strong>\( \mathbf{v} \)</strong> and can be directly inserted into the
+        QP. Near the joint limits, the allowable velocity range shrinks and
+        prevents violation of the constraints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Workspace-Avoidance CBFs via Kinematics -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Workspace-Avoidance CBFs via Kinematics</h2>
+    <div class="down-content">
+      <p>
+        Let
+        <strong>\( \mathbf{p}(\mathbf{q}) \in \mathbb{R}^3 \)</strong> denote
+        the end-effector position (known from forward kinematics). Assume there
+        is a <em>spherical forbidden region</em> with center
+        <strong>\( \mathbf{c} \in \mathbb{R}^3 \)</strong> and radius
+        <strong>\( R &gt; 0 \)</strong>. A natural safety function is
+      </p>
+      <h4 class="mathJax">
+        \[ h_{\text{ws}}(\mathbf{q}) = \big\|\mathbf{p}(\mathbf{q}) -
+        \mathbf{c}\big\|^2 - R^2. \]
+      </h4>
+      <p>
+        The safe set <strong>\( \mathcal{C}_{\text{ws}} \)</strong> consists of
+        configurations where the end-effector is outside (or on) the sphere.
+        Using the manipulator Jacobian
+        <strong
+          >\( \mathbf{J}(\mathbf{q}) \in \mathbb{R}^{3 \times n} \)</strong
+        >
+        such that
+        <strong
+          >\( \dot{\mathbf{p}} = \mathbf{J}(\mathbf{q}) \mathbf{v} \)</strong
+        >, we compute
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla h_{\text{ws}}(\mathbf{q}) = 2\big(\mathbf{p}(\mathbf{q}) -
+        \mathbf{c}\big)^{\top} \mathbf{J}(\mathbf{q}), \]
+      </h4>
+      <p>and thus</p>
+      <h4 class="mathJax">
+        \[ \dot{h}_{\text{ws}}(\mathbf{q}, \mathbf{v}) =
+        2\big(\mathbf{p}(\mathbf{q}) - \mathbf{c}\big)^{\top}
+        \mathbf{J}(\mathbf{q}) \mathbf{v}. \]
+      </h4>
+      <p>The CBF constraint for workspace avoidance is</p>
+      <h4 class="mathJax">
+        \[ 2\big(\mathbf{p}(\mathbf{q}) - \mathbf{c}\big)^{\top}
+        \mathbf{J}(\mathbf{q}) \mathbf{v} +
+        \alpha\big(h_{\text{ws}}(\mathbf{q})\big) \ge 0. \]
+      </h4>
+      <p>
+        When the end-effector approaches the forbidden ball (i.e.,
+        <strong>\( h_{\text{ws}} \to 0 \)</strong>), the constraint shapes the
+        permitted velocity directions to steer the robot away from the obstacle
+        while minimally deviating from the nominal command.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: QP Formulation for the Safety Filter -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. QP Formulation for the Safety Filter</h2>
+    <div class="down-content">
+      <p>
+        Collect all CBF inequalities in the standard form
+        <strong
+          >\( \mathbf{A}(\mathbf{q}) \mathbf{v} \le \mathbf{b}(\mathbf{q})
+          \)</strong
+        >
+        or equivalently
+        <strong
+          >\( \mathbf{A}_{\text{cbf}} \mathbf{v} \ge \mathbf{c}_{\text{cbf}}
+          \)</strong
+        >. For implementation, we fix the sign convention as
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{A}(\mathbf{q}) \mathbf{v} \le \mathbf{b}(\mathbf{q}), \]
+      </h4>
+      <p>
+        where each row comes from one CBF inequality. For example, for a joint
+        lower bound constraint
+        <strong
+          >\( \mathbf{e}_i^{\top} \mathbf{v} + \gamma (q_i - q_{i,\min}) \ge 0
+          \)</strong
+        >, we can rewrite as
+        <strong
+          >\( -\mathbf{e}_i^{\top} \mathbf{v} \le \gamma (q_i - q_{i,\min})
+          \)</strong
+        >.
+      </p>
+      <p>A typical QP-based safety filter solves at each sampling step:</p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \mathbf{v}_{\text{safe}}(\mathbf{q}) &=
+        \arg\min_{\mathbf{v},\,\delta} \frac{1}{2} \big\|\mathbf{v} -
+        \mathbf{v}_{\text{nom}}\big\|^2 + \frac{\lambda}{2} \delta^2 \\
+        \text{s.t. } \quad \mathbf{A}(\mathbf{q}) \mathbf{v} &\le
+        \mathbf{b}(\mathbf{q}) + \delta \mathbf{1}, \\ \delta &\ge 0,
+        \end{aligned} \]
+      </h4>
+      <p>
+        where <strong>\( \delta \)</strong> is a <em>slack variable</em> (shared
+        or per-constraint) that guarantees feasibility. A large
+        <strong>\( \lambda \gg 1 \)</strong> penalizes any violation of safety
+        constraints, effectively implementing a “soft” barrier.
+      </p>
+      <p>
+        <strong>Continuous-time safety argument.</strong> If
+        <strong>\( \delta \equiv 0 \)</strong>, the CBF constraints enforce
+        <strong>\( \dot{h}_j \ge -\alpha(h_j) \)</strong> for all
+        <strong>j</strong>, which ensures forward invariance of each safe set
+        <strong>\( \mathcal{C}_j \)</strong> under standard CBF assumptions.
+        Thus, the QP solution is guaranteed to be safe <em>if</em> the QP is
+        feasible and solved at sufficiently high rate (<strong
+          >\( T_s \)</strong
+        >
+        small) and the dynamics are well approximated by the velocity-level
+        model.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Implementation Algorithm and Real-Time Loop -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Implementation Algorithm and Real-Time Loop</h2>
+    <div class="down-content">
+      <p>
+        The implementation is a repeated loop at sampling time
+        <strong>\( T_s \)</strong>. At each step, we:
+      </p>
+      <ol>
+        <li>
+          Read the current joint state <strong>\( \mathbf{q}(k) \)</strong> and
+          (optionally) <strong>\( \dot{\mathbf{q}}(k) \)</strong>.
+        </li>
+        <li>
+          Evaluate forward kinematics
+          <strong>\( \mathbf{p}(\mathbf{q}(k)) \)</strong> and Jacobian
+          <strong>\( \mathbf{J}(\mathbf{q}(k)) \)</strong>.
+        </li>
+        <li>
+          Compute the nominal command
+          <strong>\( \mathbf{v}_{\text{nom}}(k) \)</strong>.
+        </li>
+        <li>Construct CBF inequalities for joint limits and workspace.</li>
+        <li>
+          Solve the QP for <strong>\( \mathbf{v}_{\text{safe}}(k) \)</strong>.
+        </li>
+        <li>
+          Send <strong>\( \mathbf{v}_{\text{safe}}(k) \)</strong> to the robot.
+        </li>
+      </ol>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Start at time k"] --> M["Measure q(k), qdot(k)"]
+  M --> KIN["Compute ee pose p(q) and Jacobian J(q)"]
+  KIN --> NOM["Compute nominal velocity v_nom(k)"]
+  NOM --> CBF["Build CBF constraints (joint + workspace)"]
+  CBF --> QP["Solve QP: min ||v - v_nom||^2 s.t. CBF"]
+  QP --> CMD["Apply v_safe(k) to robot"]
+  CMD --> ADV["Advance time: k := k+1"]
+  ADV --> S
+        </pre>
+      </div>
+      <p>
+        Numerically, it is crucial that the QP solver runs within the control
+        period
+        <strong>\( T_s \)</strong>. For small n and few constraints, this is
+        easily satisfied with standard solvers.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation (NumPy + QP Solver) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation (NumPy + QP Solver)</h2>
+    <div class="down-content">
+      <p>
+        We consider a planar 2-DOF arm with joint limits and a single spherical
+        (circular in plane) workspace forbidden region. Forward kinematics and
+        Jacobian are implemented directly. For the QP, you may use a package
+        such as
+        <code>qpsolvers</code> or <code>cvxopt</code>; here we assume a generic
+        <code>solve_qp</code> interface.
+      </p>
+      <pre><code class="language-python">
+import numpy as np
+
+# Robot parameters for planar 2-DOF arm (for illustration)
+L1, L2 = 1.0, 1.0  # link lengths
+
+def forward_kinematics(q):
+    q1, q2 = q
+    x = L1 * np.cos(q1) + L2 * np.cos(q1 + q2)
+    y = L1 * np.sin(q1) + L2 * np.sin(q1 + q2)
+    return np.array([x, y])
+
+def jacobian(q):
+    q1, q2 = q
+    s1 = np.sin(q1); c1 = np.cos(q1)
+    s12 = np.sin(q1 + q2); c12 = np.cos(q1 + q2)
+    J11 = -L1 * s1 - L2 * s12
+    J12 = -L2 * s12
+    J21 =  L1 * c1 + L2 * c12
+    J22 =  L2 * c12
+    return np.array([[J11, J12],
+                     [J21, J22]])
+
+# Joint limits
+q_min = np.array([-np.pi / 2.0, -np.pi / 2.0])
+q_max = np.array([ np.pi / 2.0,  np.pi / 2.0])
+
+# Workspace forbidden circle
+c_obs = np.array([0.5, 0.5])
+R_obs = 0.3
+
+gamma_joint = 5.0
+gamma_ws = 5.0
+lambda_slack = 1e3
+
+def build_cbf_constraints(q):
+    """
+    Build A, b for inequalities A v &lt;= b.
+    Includes:
+      - 2 inequalities per joint (min, max)
+      - 1 workspace-avoidance inequality
+    """
+    n = q.shape[0]
+    A_list = []
+    b_list = []
+
+    # Joint limit constraints
+    for i in range(n):
+        # h_min = q_i - q_min_i
+        h_min = q[i] - q_min[i]
+        # e_i^T v + gamma * h_min &gt;= 0
+        # Rewrite: -e_i^T v &lt;= gamma * h_min
+        e_i = np.zeros(n)
+        e_i[i] = 1.0
+        A_list.append(-e_i)
+        b_list.append(gamma_joint * h_min)
+
+        # h_max = q_max_i - q_i
+        h_max = q_max[i] - q[i]
+        # -e_i^T v + gamma * h_max &gt;= 0
+        # Rewrite: e_i^T v &lt;= gamma * h_max
+        A_list.append(e_i)
+        b_list.append(gamma_joint * h_max)
+
+    # Workspace avoidance
+    p = forward_kinematics(q)
+    J = jacobian(q)
+    diff = p - c_obs
+    h_ws = np.dot(diff, diff) - R_obs**2
+    # 2 diff^T J v + gamma_ws * h_ws &gt;= 0
+    # Rewrite: -2 diff^T J v &lt;= gamma_ws * h_ws
+    a_ws = -2.0 * diff @ J  # row vector
+    A_list.append(a_ws)
+    b_list.append(gamma_ws * h_ws)
+
+    A = np.vstack(A_list)      # shape (m, n)
+    b = np.array(b_list)       # shape (m,)
+    return A, b
+
+def safety_filter(q, v_nom, solve_qp):
+    """
+    Given q and nominal velocity v_nom, solve QP:
+      min_v,delta  0.5 ||v - v_nom||^2 + 0.5 * lambda_slack * delta^2
+      s.t.         A v &lt;= b + delta
+                   delta &gt;= 0
+    The solve_qp callback should accept (H, f, A, b, C, d)
+    representing:
+      min 0.5 x^T H x + f^T x
+      s.t. A x &lt;= b, C x = d
+    """
+    n = v_nom.shape[0]
+    A, b = build_cbf_constraints(q)
+
+    # Decision variable x = [v; delta]
+    H = np.zeros((n + 1, n + 1))
+    # Quadratic term for v
+    H[:n, :n] = np.eye(n)
+    # Quadratic term for delta
+    H[n, n] = lambda_slack
+
+    f = np.zeros(n + 1)
+    f[:n] = -v_nom
+
+    # Inequalities: A v - 1 * delta &lt;= b
+    m = A.shape[0]
+    A_qp = np.zeros((m + 1, n + 1))
+    b_qp = np.zeros(m + 1)
+
+    # CBF constraints
+    A_qp[:m, :n] = A
+    A_qp[:m, n] = -1.0
+    b_qp[:m] = b
+
+    # delta &gt;= 0  becomes  -delta &lt;= 0
+    A_qp[m, n] = -1.0
+    b_qp[m] = 0.0
+
+    # No equality constraints
+    C = None
+    d = None
+
+    x_opt = solve_qp(H, f, A_qp, b_qp, C, d)
+    v_safe = x_opt[:n]
+    return v_safe
+
+# Example usage (assuming some solve_qp implementation):
+# def solve_qp(H, f, A, b, C, d):
+#     ...
+# In a control loop:
+# while running:
+#     q = get_current_joint_positions()
+#     v_nom = nominal_controller(q, q_des, qdot_des)
+#     v_safe = safety_filter(q, v_nom, solve_qp)
+#     send_velocity_command(v_safe)
+      </code></pre>
+      <p>
+        In a real implementation, <code>solve_qp</code> can be backed by
+        <code>qpsolvers</code>, <code>osqp</code>, <code>cvxopt</code>, or
+        similar packages. For robotics kinematics, you may replace the
+        hand-coded planar model by libraries such as <code>pinocchio</code> or
+        <code>roboticstoolbox-python</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation (Eigen + QP Skeleton) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation (Eigen + QP Skeleton)</h2>
+    <div class="down-content">
+      <p>
+        In C++, we can use <code>Eigen</code> for linear algebra and a QP solver
+        such as <code>OsqpEigen</code> or <code>qpOASES</code>. Below is a
+        simplified skeleton that assumes:
+      </p>
+      <ul>
+        <li>
+          <code>forwardKinematics(q)</code> returns end-effector position,
+        </li>
+        <li><code>jacobian(q)</code> returns the Jacobian,</li>
+        <li>
+          <code>solveQP(H, f, A, b)</code> solves the QP with inequality
+          constraints.
+        </li>
+      </ul>
+      <pre><code class="language-cpp">
+#include &lt;Eigen/Dense&gt;
+
+// Global parameters (for illustration)
+const double gamma_joint = 5.0;
+const double gamma_ws    = 5.0;
+const double lambda_slack = 1e3;
+
+Eigen::Vector2d forwardKinematics(const Eigen::Vector2d&amp; q);
+Eigen::Matrix&lt;double, 2, 2&gt; jacobian(const Eigen::Vector2d&amp; q);
+
+// Solve QP: min 0.5 x^T H x + f^T x  s.t. A x &lt;= b
+Eigen::VectorXd solveQP(const Eigen::MatrixXd&amp; H,
+                        const Eigen::VectorXd&amp; f,
+                        const Eigen::MatrixXd&amp; A,
+                        const Eigen::VectorXd&amp; b);
+
+void buildCBFConstraints(const Eigen::Vector2d&amp; q,
+                         Eigen::MatrixXd&amp; A,
+                         Eigen::VectorXd&amp; b)
+{
+    const int n = 2;
+    const int m = 2 * n + 1; // 2 constraints per joint + workspace
+    A.resize(m, n);
+    b.resize(m);
+
+    Eigen::Vector2d q_min(-M_PI / 2.0, -M_PI / 2.0);
+    Eigen::Vector2d q_max( M_PI / 2.0,  M_PI / 2.0);
+
+    int row = 0;
+    for (int i = 0; i &lt; n; ++i)
+    {
+        // Lower limit: q_i - q_min_i &gt;= 0
+        double h_min = q(i) - q_min(i);
+        Eigen::Vector2d e_i = Eigen::Vector2d::Zero();
+        e_i(i) = 1.0;
+
+        // e_i^T v + gamma_joint * h_min &gt;= 0  =&gt;  -e_i^T v &lt;= gamma_joint * h_min
+        A.row(row) = -e_i.transpose();
+        b(row) = gamma_joint * h_min;
+        ++row;
+
+        // Upper limit: q_max_i - q_i &gt;= 0
+        double h_max = q_max(i) - q(i);
+        // -e_i^T v + gamma_joint * h_max &gt;= 0  =&gt;  e_i^T v &lt;= gamma_joint * h_max
+        A.row(row) = e_i.transpose();
+        b(row) = gamma_joint * h_max;
+        ++row;
+    }
+
+    // Workspace constraint
+    Eigen::Vector2d c_obs(0.5, 0.5);
+    double R_obs = 0.3;
+
+    Eigen::Vector2d p = forwardKinematics(q);
+    Eigen::Matrix&lt;double, 2, 2&gt; J = jacobian(q);
+    Eigen::Vector2d diff = p - c_obs;
+    double h_ws = diff.squaredNorm() - R_obs * R_obs;
+
+    // 2 diff^T J v + gamma_ws * h_ws &gt;= 0
+    // =&gt; -(2 diff^T J) v &lt;= gamma_ws * h_ws
+    Eigen::RowVector2d a_ws = -2.0 * diff.transpose() * J;
+    A.row(row) = a_ws;
+    b(row) = gamma_ws * h_ws;
+}
+
+Eigen::Vector2d safetyFilter(const Eigen::Vector2d&amp; q,
+                             const Eigen::Vector2d&amp; v_nom)
+{
+    const int n = 2;
+    Eigen::MatrixXd A_cbf;
+    Eigen::VectorXd b_cbf;
+    buildCBFConstraints(q, A_cbf, b_cbf);
+    int m = static_cast&lt;int&gt;(b_cbf.size());
+
+    // Decision x = [v; delta] in R^{n+1}
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(n + 1, n + 1);
+    H.block(0, 0, n, n) = Eigen::Matrix2d::Identity();
+    H(n, n) = lambda_slack;
+
+    Eigen::VectorXd f = Eigen::VectorXd::Zero(n + 1);
+    f.segment(0, n) = -v_nom;
+
+    // Inequalities: A_cbf v - delta &lt;= b_cbf   and   -delta &lt;= 0
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero(m + 1, n + 1);
+    Eigen::VectorXd b(m + 1);
+
+    A.block(0, 0, m, n) = A_cbf;
+    A.block(0, n, m, 1) = -Eigen::VectorXd::Ones(m);
+    b.segment(0, m) = b_cbf;
+
+    A(m, n) = -1.0;
+    b(m) = 0.0;
+
+    Eigen::VectorXd x_opt = solveQP(H, f, A, b);
+    return x_opt.segment(0, n);
+}
+      </code></pre>
+      <p>
+        Here, <code>solveQP</code> can be implemented with
+        <code>OsqpEigen</code>, <code>qpOASES</code>, or any other convex QP
+        solver. Robot kinematics can be implemented with <code>Pinocchio</code>,
+        <code>KDL</code>, or custom code, provided you supply
+        <code>forwardKinematics</code> and <code>jacobian</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation (Projected Gradient QP) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (Projected Gradient QP)</h2>
+    <div class="down-content">
+      <p>
+        Java has fewer off-the-shelf QP solvers, but one can use optimization
+        libraries such as <code>ojAlgo</code> or
+        <code>Apache Commons Math</code>. Below, we sketch a simple projected
+        gradient method for the QP, suitable for small problems.
+      </p>
+      <pre><code class="language-java">
+public class SafetyFilter2D {
+
+    private static final double GAMMA_JOINT = 5.0;
+    private static final double GAMMA_WS = 5.0;
+    private static final double R_OBS = 0.3;
+    private static final double[] C_OBS = {0.5, 0.5};
+
+    // Forward kinematics and Jacobian for planar 2-DOF arm
+    public static double[] forwardKinematics(double[] q, double L1, double L2) {
+        double q1 = q[0], q2 = q[1];
+        double x = L1 * Math.cos(q1) + L2 * Math.cos(q1 + q2);
+        double y = L1 * Math.sin(q1) + L2 * Math.sin(q1 + q2);
+        return new double[]{x, y};
+    }
+
+    public static double[][] jacobian(double[] q, double L1, double L2) {
+        double q1 = q[0], q2 = q[1];
+        double s1 = Math.sin(q1), c1 = Math.cos(q1);
+        double s12 = Math.sin(q1 + q2), c12 = Math.cos(q1 + q2);
+        double J11 = -L1 * s1 - L2 * s12;
+        double J12 = -L2 * s12;
+        double J21 =  L1 * c1 + L2 * c12;
+        double J22 =  L2 * c12;
+        return new double[][]{
+                {J11, J12},
+                {J21, J22}
+        };
+    }
+
+    // Build inequalities A v &lt;= b for given q
+    public static void buildConstraints(double[] q,
+                                        double[][] A,
+                                        double[] b) {
+        double[] qMin = {-Math.PI / 2.0, -Math.PI / 2.0};
+        double[] qMax = { Math.PI / 2.0,  Math.PI / 2.0};
+
+        int row = 0;
+        // Joint limits
+        for (int i = 0; i &lt; 2; ++i) {
+            double hMin = q[i] - qMin[i];
+            // -e_i^T v &lt;= gamma * hMin
+            A[row][0] = (i == 0) ? -1.0 : 0.0;
+            A[row][1] = (i == 1) ? -1.0 : 0.0;
+            b[row] = GAMMA_JOINT * hMin;
+            row++;
+
+            double hMax = qMax[i] - q[i];
+            // e_i^T v &lt;= gamma * hMax
+            A[row][0] = (i == 0) ? 1.0 : 0.0;
+            A[row][1] = (i == 1) ? 1.0 : 0.0;
+            b[row] = GAMMA_JOINT * hMax;
+            row++;
+        }
+
+        // Workspace
+        double L1 = 1.0, L2 = 1.0;
+        double[] p = forwardKinematics(q, L1, L2);
+        double[][] J = jacobian(q, L1, L2);
+        double dx = p[0] - C_OBS[0];
+        double dy = p[1] - C_OBS[1];
+        double hWs = dx * dx + dy * dy - R_OBS * R_OBS;
+
+        double a1 = -2.0 * (dx * J[0][0] + dy * J[1][0]);
+        double a2 = -2.0 * (dx * J[0][1] + dy * J[1][1]);
+
+        A[row][0] = a1;
+        A[row][1] = a2;
+        b[row] = GAMMA_WS * hWs;
+    }
+
+    // Simple projected gradient descent for small QP:
+    // min 0.5 ||v - vNom||^2  s.t.  A v &lt;= b
+    public static double[] projectQP(double[] vNom,
+                                     double[][] A,
+                                     double[] b,
+                                     int maxIter,
+                                     double stepSize) {
+        double[] v = vNom.clone();
+        int m = b.length;
+        for (int it = 0; it &lt; maxIter; ++it) {
+            // Gradient of objective: v - vNom
+            double g0 = v[0] - vNom[0];
+            double g1 = v[1] - vNom[1];
+            v[0] -= stepSize * g0;
+            v[1] -= stepSize * g1;
+
+            // Project onto each half-space sequentially
+            for (int i = 0; i &lt; m; ++i) {
+                double ai0 = A[i][0];
+                double ai1 = A[i][1];
+                double lhs = ai0 * v[0] + ai1 * v[1];
+                if (lhs &gt; b[i]) {
+                    double norm2 = ai0 * ai0 + ai1 * ai1;
+                    if (norm2 &gt; 1e-8) {
+                        double alpha = (lhs - b[i]) / norm2;
+                        v[0] -= alpha * ai0;
+                        v[1] -= alpha * ai1;
+                    }
+                }
+            }
+        }
+        return v;
+    }
+
+    public static double[] safetyFilter(double[] q, double[] vNom) {
+        // A has 5 rows (4 joint constraints + 1 workspace) and 2 columns
+        double[][] A = new double[5][2];
+        double[] b = new double[5];
+        buildConstraints(q, A, b);
+        return projectQP(vNom, A, b, 50, 0.1);
+    }
+}
+      </code></pre>
+      <p>
+        The simple projected gradient method is not as numerically robust as a
+        full QP solver, but it is often sufficient for low-dimensional lab
+        examples and does not require external native libraries.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB/Simulink and Mathematica Implementations -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB/Simulink and Mathematica Implementations</h2>
+    <div class="down-content">
+      <h3>10.1 MATLAB/Simulink (Robotics System Toolbox + quadprog)</h3>
+      <p>
+        MATLAB provides both robotics modeling tools and a QP solver
+        <code>quadprog</code>. Assume we have a <code>rigidBodyTree</code> model
+        <code>robot</code> and we wish to implement the safety filter in a
+        <code>MATLAB Function</code> block in Simulink.
+      </p>
+      <pre><code class="language-matlab">
+function v_safe = cbf_safety_filter(q, v_nom, robot)
+% CBF-based safety filter at joint-velocity level
+% q      : current joint positions (nx1)
+% v_nom  : nominal joint velocities (nx1)
+% robot  : rigidBodyTree (for FK and Jacobian)
+
+n = numel(q);
+gamma_joint = 5.0;
+gamma_ws    = 5.0;
+lambda_slack = 1e3;
+
+% Joint limits from robot model
+q_min = robot.homeConfiguration;
+q_max = robot.homeConfiguration;
+for i = 1:n
+    q_min(i) = robot.Bodies{i}.Joint.PositionLimits(1);
+    q_max(i) = robot.Bodies{i}.Joint.PositionLimits(2);
+end
+
+% Forbidden sphere
+c_obs = [0.5; 0.5; 0.0];
+R_obs = 0.3;
+
+% Build constraints A v &lt;= b
+A = [];
+b = [];
+
+% Joint limits
+for i = 1:n
+    h_min = q(i) - q_min(i);
+    e_i   = zeros(1, n); e_i(i) = 1;
+    % -e_i v &lt;= gamma_joint * h_min
+    A = [A; -e_i];
+    b = [b; gamma_joint * h_min];
+
+    h_max = q_max(i) - q(i);
+    % e_i v &lt;= gamma_joint * h_max
+    A = [A; e_i];
+    b = [b; gamma_joint * h_max];
+end
+
+% Workspace avoidance using end-effector body
+eeName = robot.BodyNames{end};
+T = getTransform(robot, q, eeName);
+p = T(1:3, 4);
+J = geometricJacobian(robot, q, eeName);
+Jp = J(1:3, :);  % translational part
+
+diff = p - c_obs;
+h_ws = diff' * diff - R_obs^2;
+
+% 2 diff^T Jp v + gamma_ws * h_ws &gt;= 0
+% =&gt; -(2 diff^T Jp) v &lt;= gamma_ws * h_ws
+a_ws = -2 * diff' * Jp;
+A = [A; a_ws];
+b = [b; gamma_ws * h_ws];
+
+% QP: min 0.5 [v;delta]' H [v;delta] + f' [v;delta]
+H = blkdiag(eye(n), lambda_slack);
+f = [-v_nom; 0];
+
+m = size(A, 1);
+A_qp = [A, -ones(m, 1);  % A v - delta &lt;= b
+        zeros(1, n), -1]; % -delta &lt;= 0
+b_qp = [b; 0];
+
+% No equality constraints
+Aeq = [];
+beq = [];
+
+opts = optimoptions('quadprog', 'Display', 'off');
+x_opt = quadprog(H, f, A_qp, b_qp, Aeq, beq, [], [], [], opts);
+v_safe = x_opt(1:n);
+      </code></pre>
+      <p>
+        In Simulink, you can call <code>cbf_safety_filter</code> from a MATLAB
+        Function block, feeding it measured joint positions and nominal
+        velocities, and routing its output to the joint velocity command block.
+      </p>
+
+      <h3>10.2 Wolfram Mathematica (QuadraticOptimization)</h3>
+      <p>
+        Mathematica has a high-level quadratic optimization interface that can
+        directly express the CBF-QP.
+      </p>
+      <pre><code class="language-mathematica">
+(* Joint-limit and workspace CBF-QP for 2-DOF planar arm *)
+
+L1 = 1.0; L2 = 1.0;
+qMin = {-Pi/2, -Pi/2};
+qMax = { Pi/2,  Pi/2};
+cObs = {0.5, 0.5};
+rObs = 0.3;
+gammaJoint = 5.0;
+gammaWs = 5.0;
+lambdaSlack = 1000.0;
+
+forwardKinematics[{q1_, q2_}] := {
+  L1 Cos[q1] + L2 Cos[q1 + q2],
+  L1 Sin[q1] + L2 Sin[q1 + q2]
+};
+
+jacobian[{q1_, q2_}] := {
+  {-L1 Sin[q1] - L2 Sin[q1 + q2], -L2 Sin[q1 + q2]},
+  { L1 Cos[q1] + L2 Cos[q1 + q2],  L2 Cos[q1 + q2]}
+};
+
+cbfSafetyFilter[qVec_List, vNom_List] := Module[
+  {q1, q2, v1, v2, delta, q, p, J, diff, hMin, hMax, hWs,
+   ineqs, vSafe},
+  {q1, q2} = qVec;
+  q = {q1, q2};
+
+  p = forwardKinematics[q];
+  J = jacobian[q];
+  diff = p - cObs;
+  hWs = diff.diff - rObs^2;
+
+  (* Decision variables *)
+  {v1, v2, delta} = {Subscript[v, 1], Subscript[v, 2], \[Delta]};
+
+  ineqs = {};
+
+  (* Joint CBFs *)
+  Do[
+    hMin = q[[i]] - qMin[[i]];
+    AppendTo[ineqs, -{If[i == 1, 1, 0], If[i == 2, 1, 0]}.{v1, v2}
+      &lt;= gammaJoint hMin + delta],
+    {i, 1, 2}
+  ];
+  Do[
+    hMax = qMax[[i]] - q[[i]];
+    AppendTo[ineqs, {If[i == 1, 1, 0], If[i == 2, 1, 0]}.{v1, v2}
+      &lt;= gammaJoint hMax + delta],
+    {i, 1, 2}
+  ];
+
+  (* Workspace CBF *)
+  With[{a = -2 diff.J},
+    AppendTo[ineqs, a.{v1, v2} &lt;= gammaWs hWs + delta]
+  ];
+
+  AppendTo[ineqs, delta &gt;= 0];
+
+  vSafe = {v1, v2} /. 
+    QuadraticOptimization[
+      0.5 ((v1 - vNom[[1]])^2 + (v2 - vNom[[2]])^2) +
+        0.5 lambdaSlack delta^2,
+      ineqs,
+      {v1, v2, delta}
+    ];
+
+  vSafe
+]
+      </code></pre>
+      <p>
+        The function <code>cbfSafetyFilter</code> takes the current joint angles
+        and nominal velocities and returns the safe velocity command, using
+        <code>QuadraticOptimization</code> to enforce CBF inequalities.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Invariance for Joint-Limit CBF):</strong>
+        Consider a single joint with dynamics \( \dot{q} = v \) and safety
+        function \( h(q) = q - q_{\min} \). Show that if the control input \(
+        v(t) \) satisfies \( v(t) + \gamma h(q(t)) \ge 0 \) for all \( t \ge 0
+        \) with \( \gamma &gt; 0 \), then the set \( \mathcal{C} = \{ q
+        \,\vert\, h(q) \ge 0 \} \) is forward invariant.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The derivative of \( h \) is
+      </p>
+      <h4 class="mathJax">
+        \[ \dot{h}(q(t)) = \frac{\mathrm{d}}{\mathrm{d}t}\big(q(t) -
+        q_{\min}\big) = \dot{q}(t) = v(t). \]
+      </h4>
+      <p>By assumption, \( v(t) + \gamma h(q(t)) \ge 0 \), so</p>
+      <h4 class="mathJax">\[ \dot{h}(t) \ge -\gamma h(t). \]</h4>
+      <p>
+        This scalar differential inequality has the comparison solution \(
+        \tilde{h}(t) = h(0) e^{-\gamma t} \). Standard comparison lemmas imply
+        \( h(t) \ge \tilde{h}(t) \) for all \( t \ge 0 \). If \( h(0) \ge 0 \),
+        then \( \tilde{h}(t) \ge 0 \) for all \( t \ge 0 \), and thus \( h(t)
+        \ge 0 \). Hence \( q(t) \in \mathcal{C} \) for all \( t \ge 0 \), and
+        the safe set is forward invariant.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Gradient of Workspace CBF):</strong>
+        Let \( h_{\text{ws}}(\mathbf{q}) = \|\mathbf{p}(\mathbf{q}) -
+        \mathbf{c}\|^2 - R^2 \), where \( \mathbf{p}(\mathbf{q}) \) is the
+        end-effector position and \( \mathbf{J}(\mathbf{q}) \) is its Jacobian.
+        Derive \( \nabla h_{\text{ws}}(\mathbf{q}) \) and confirm the expression
+        used in this lesson.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Write \( \mathbf{r}(\mathbf{q}) = \mathbf{p}(\mathbf{q}) - \mathbf{c}
+        \). Then
+      </p>
+      <h4 class="mathJax">
+        \[ h_{\text{ws}}(\mathbf{q}) =
+        \mathbf{r}(\mathbf{q})^{\top}\mathbf{r}(\mathbf{q}) - R^2. \]
+      </h4>
+      <p>Differentiating with respect to \( \mathbf{q} \),</p>
+      <h4 class="mathJax">
+        \[ \nabla h_{\text{ws}}(\mathbf{q}) = 2\,\mathbf{r}(\mathbf{q})^{\top}
+        \frac{\partial \mathbf{r}(\mathbf{q})}{\partial \mathbf{q}} =
+        2\,\big(\mathbf{p}(\mathbf{q}) - \mathbf{c}\big)^{\top} \frac{\partial
+        \mathbf{p}(\mathbf{q})}{\partial \mathbf{q}}. \]
+      </h4>
+      <p>
+        By definition of the geometric Jacobian, \( \frac{\partial
+        \mathbf{p}(\mathbf{q})}{\partial \mathbf{q}} = \mathbf{J}(\mathbf{q})
+        \), so
+      </p>
+      <h4 class="mathJax">
+        \[ \nabla h_{\text{ws}}(\mathbf{q}) = 2\big(\mathbf{p}(\mathbf{q}) -
+        \mathbf{c}\big)^{\top} \mathbf{J}(\mathbf{q}), \]
+      </h4>
+      <p>
+        which matches the expression used earlier. The CBF time derivative is
+        then \( \dot{h}_{\text{ws}} = \nabla h_{\text{ws}} \mathbf{v} \).
+      </p>
+
+      <p>
+        <strong>Problem 3 (Feasibility with Slack Variable):</strong>
+        Consider the QP
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{aligned} \min_{\mathbf{v},\delta} \quad
+        &\frac{1}{2}\|\mathbf{v} - \mathbf{v}_{\text{nom}}\|^2 +
+        \frac{\lambda}{2} \delta^2 \\ \text{s.t.} \quad &\mathbf{A}\mathbf{v}
+        \le \mathbf{b} + \delta \mathbf{1}, \\ &\delta \ge 0. \end{aligned} \]
+      </h4>
+      <p>
+        Show that this QP is always feasible for any \( \mathbf{v}_{\text{nom}}
+        \) and any \( \mathbf{A}, \mathbf{b} \), and explain the effect of
+        letting \( \lambda \to \infty \).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Feasibility is demonstrated by constructing at least one feasible point.
+        Choose \( \mathbf{v} = \mathbf{v}_{\text{nom}} \). For each constraint
+        row \( i \), \( \mathbf{a}_i^{\top} \mathbf{v}_{\text{nom}} \le b_i +
+        \delta \) is required. Let
+      </p>
+      <h4 class="mathJax">
+        \[ \delta^{\ast} = \max\Big\{0, \max_i \big(\mathbf{a}_i^{\top}
+        \mathbf{v}_{\text{nom}} - b_i\big)\Big\}. \]
+      </h4>
+      <p>
+        Then \( \delta^{\ast} \ge 0 \) and \( \mathbf{a}_i^{\top}
+        \mathbf{v}_{\text{nom}} - b_i \le \delta^{\ast} \) for all \( i \), so
+        all constraints are satisfied. Hence the feasible set is non-empty. As
+        \( \lambda \to \infty \), the optimizer is increasingly penalized for
+        non-zero \( \delta \), so optimal solutions tend to enforce \( \delta
+        \approx 0 \) whenever the hard constraints \( \mathbf{A}\mathbf{v} \le
+        \mathbf{b} \) are feasible. Thus, a large \( \lambda \) approximates
+        strict CBF constraints, while still guaranteeing feasibility when the
+        nominal command would otherwise violate safety.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Discrete-Time Approximation):</strong>
+        Suppose the continuous-time condition \( \dot{h}(\mathbf{q},\mathbf{v})
+        \ge -\gamma h(\mathbf{q}) \) holds and the system is sampled with period
+        \( T_s \). Show that a first-order Euler approximation yields
+      </p>
+      <h4 class="mathJax">
+        \[ h_{k+1} \approx h_k + T_s \dot{h}_k \ge h_k - \gamma T_s h_k = (1 -
+        \gamma T_s) h_k. \]
+      </h4>
+      <p>
+        Under what condition on \( \gamma T_s \) does this imply that \( h_k \ge
+        0 \) for all \( k \) if \( h_0 \ge 0 \)?
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        From the inequality, we have \( h_{k+1} \ge (1 - \gamma T_s) h_k \). If
+        \( 0 \le \gamma T_s \le 1 \), then the scalar factor \( 1 - \gamma T_s
+        \) lies in \( [0,1] \), and therefore \( h_{k+1} \ge 0 \) whenever \(
+        h_k \ge 0 \). By induction, \( h_k \ge 0 \) for all \( k \) if \( h_0
+        \ge 0 \). Thus, a sufficient condition is \( \gamma T_s \le 1 \), which
+        is consistent with intuitive requirements that the sampling period be
+        small compared to the barrier feedback rate.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lab, we implemented a CBF-QP safety filter that enforces
+        joint-limit and workspace constraints at the joint-velocity level. We
+        derived joint and workspace CBFs, showed how to form linear inequality
+        constraints in the velocity command, and embedded them into a quadratic
+        program that minimally distorts an arbitrary nominal controller. We also
+        presented implementations in Python, C++, Java, MATLAB/Simulink, and
+        Wolfram Mathematica, emphasizing how kinematic models and QP solvers
+        interface with the safety filter loop. These ideas extend naturally to
+        more complex robots and richer safe sets (e.g., self-avoidance,
+        human-robot separation) while keeping the same mathematical structure.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Prajna, S., Jadbabaie, A., &amp; Papachristodoulou, A. (2007). A
+        framework for worst-case and stochastic safety verification using
+        barrier certificates. <em>IEEE Transactions on Automatic Control</em>,
+        52(8), 1415–1428.
+      </li>
+      <li>
+        Tee, K. P., Ge, S. S., &amp; Tay, E. H. (2009). Barrier Lyapunov
+        functions for the control of output-constrained nonlinear systems.
+        <em>Automatica</em>, 45(4), 918–927.
+      </li>
+      <li>
+        Ames, A. D., Xu, X., Grizzle, J. W., &amp; Tabuada, P. (2017). Control
+        barrier function based quadratic programs for safety critical systems.
+        <em>IEEE Transactions on Automatic Control</em>, 62(8), 3861–3876.
+      </li>
+      <li>
+        Ames, A. D., Coogan, S., Egerstedt, M., Notomista, G., Saha, S., &amp;
+        Tabuada, P. (2019). Control barrier functions: Theory and applications.
+        <em>European Journal of Control</em>, 54, 1–29.
+      </li>
+      <li>
+        Romdlony, M. Z., &amp; Jayawardhana, B. (2016). Stabilization with
+        guaranteed safety using control Lyapunov–barrier function.
+        <em>Automatica</em>, 66, 39–47.
+      </li>
+      <li>
+        Nguyen, Q., Sreenath, K. (2016). Exponential control barrier functions
+        for enforcing high relative-degree safety-critical constraints.
+        <em>American Control Conference (ACC)</em>, 322–328.
+      </li>
+      <li>
+        Wang, L., Ames, A. D. (2017). Safety barrier certificates for collisions
+        avoidance in multi-robot systems.
+        <em>IEEE Transactions on Robotics</em>, 33(3), 661–674.
+      </li>
+      <li>
+        Wieland, P., &amp; Allgöwer, F. (2007). Constructive safety using
+        control barrier functions.
+        <em>IFAC Proceedings Volumes</em>, 40(12), 462–467.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson4.html">
+          Lesson 4: Safe Control Under Input Limits
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter14/Lesson1.html">
+          <small>(next chapter)</small> Lesson 1: Coordinating Many DOFs with Multiple Tasks
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Robot Control</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Control Prerequisites for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: Review of Feedback Control Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State-Space Modeling for Mechanical Systems (using given models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Linearization Around Operating Points
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Stability Notions (Lyapunov, BIBO, input-to-state stability)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Performance Specs (overshoot, settling, tracking error, energy)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Actuator-Space and Joint-Space Control Basics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Joint-Space Control Objectives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: PD / PID in Joint Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Gravity Compensation (using existing dynamics)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Practical Gain Tuning Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Lab: Joint Servoing on a Simulated/Real Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Model-Based Nonlinear Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Computed-Torque / Inverse-Dynamics Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Feedback Linearization for Manipulators
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Stability &amp; Robustness Properties
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Implementation Details (filters, saturation, rate limits)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare PD vs Computed-Torque Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Task-Space (Operational-Space) Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Task-Space vs Joint-Space Control Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Operational-Space Control Structure (concept + equations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Redundancy Handling in Control (null-space control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Task Prioritization and Hierarchies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Lab: End-Effector Trajectory Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Constrained and Contact-Aware Control (Conceptual + Practical)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Sources of Constraints (joints, workspace, contacts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: Control Under Equality Constraints (projection idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Control Under Inequality Constraints (saturation &amp; feasibility)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Contact Transitions and Impact Awareness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Contact-safe Control Demo
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Force and Compliant Interaction Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Motivation for Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Hybrid Position/Force Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Impedance Control (stiffness–damping shaping)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Admittance Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Choosing Impedance vs Admittance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson6.html" class="" data-chapter="Chapter6" data-lesson="Lesson6">
+                      Lesson 6: Lab: Surface Following / Peg-in-Hole (control side only)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Robust Robot Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Uncertainty Types (parametric, unmodeled dynamics, disturbances)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Robust Stability Conditions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Sliding-Mode Control for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Disturbance Observers (DOB) and Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Robust Tracking with Disturbances
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Adaptive Control</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Motivation and Assumptions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Adaptive Computed-Torque Structure
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Parameter Update Laws and Stability Proof Sketches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Persistent Excitation and Practical Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Adaptive Control vs Fixed-Model Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Optimal Control for Manipulators</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Cost Functions for Robots (tracking, energy, smoothness)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Finite-Horizon LQR (using linearized models)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Nonlinear Optimal Control Overview (DDP/iLQR idea)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Trade-offs Between Optimality and Real-Time Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: LQR Stabilization / iLQR Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Model Predictive Control (MPC)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Receding-Horizon Principle
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: MPC Formulation for Robot Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Handling Constraints with MPC
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Real-Time MPC and Warm-Starting
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: MPC for Joint/Task-Space Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: State Estimation for Control (Control-Facing Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Why Estimation Matters for Feedback
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Observer Design for Robot States
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Extended Kalman Filter (EKF) for Joint/End-Effector State
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Delay, Drift, and Sensor-Fusion Effects on Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Observer-Based Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Digital Control and Real-Time Implementation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Sampling, Zero-Order Hold, and Discretization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Discrete-Time Stability and Performance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Multi-Rate Control Loops
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Real-Time Scheduling and Jitter Effects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement Controller with Real Loop Timing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Safety-Critical Robot Control (Technical Layer Only)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Control Barrier Functions (CBF) Fundamentals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Safe Set Design for Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: CBF-QP Controllers in Joint/Task Space
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Safe Control Under Input Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="active-lesson" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Enforcing Joint/Workspace Safety Constraints
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Whole-Body Control Overview (Without Dynamics Re-derivation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Coordinating Many DOFs with Multiple Tasks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Task Stacks and Quadratic Programming (QP) Control
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Contact-Consistent Control (conceptual)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Prioritization vs Optimality Trade-offs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Simple Legged/ Humanoid Task Control
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Learning-Augmented Control (Non-RL Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Why Combine Learning with Control?
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Residual / Delta-Model Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Gaussian Process (GP) Error Compensation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Stability-Preserving Learning Wrappers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Learning Residual Dynamics for Better Tracking
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Capstone Control Project</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Controller Architecture Selection
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Implementation and Debugging
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Stability/Robustness Evaluation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Final Demonstration and Technical Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

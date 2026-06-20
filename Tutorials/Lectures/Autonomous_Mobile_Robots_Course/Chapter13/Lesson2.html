@@ -1,0 +1,2107 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus) - Lesson 2: Feature-Based vs Direct Methods | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</h1>
+    <h3><strong>Lesson 2: Feature-Based vs Direct Methods</strong></h3>
+    <p>
+      This lesson contrasts two dominant paradigms for visual odometry / visual
+      SLAM tracking:
+      <em>feature-based</em> methods that minimize geometric reprojection error
+      of sparse landmarks, and <em>direct</em> methods that minimize photometric
+      (intensity) error over pixels/patches. We formalize both as probabilistic
+      estimation problems, derive their Gauss–Newton updates, and map the theory
+      to practical AMR constraints (limited compute, motion blur, lighting
+      changes, and dynamic objects).
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 12, we treated SLAM back-ends as nonlinear least squares over
+        poses (and possibly landmarks). In Chapter 13, we focus on the
+        <em>front-end tracking</em> step that provides relative motion
+        constraints. Two measurement models dominate:
+      </p>
+      <ul>
+        <li>
+          <strong>Feature-based:</strong> convert images into discrete
+          measurements (keypoints + descriptors), then estimate motion by
+          minimizing <em>geometric</em> residuals.
+        </li>
+        <li>
+          <strong>Direct:</strong> avoid descriptors; estimate motion by
+          minimizing <em>photometric</em> residuals between pixel intensities
+          after warping.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Input images (I_{t-1}, I_t)"] --> B["Preprocess (undistort, grayscale, pyramid)"]
+  B --> C{"Choose measurement \nrepresentation"}
+  C --> F["Sparse features"]
+  C --> D["Pixel intensities"]
+  F --> F1["Detect + describe (e.g., ORB)"]
+  F1 --> F2["Match + RANSAC geometry checks"]
+  F2 --> F3["Minimize reprojection error → pose update"]
+  D --> D1["Select pixels/patches (high gradient)"]
+  D1 --> D2["Minimize photometric error → pose update"]
+  F3 --> K["Keyframe decision + local map update"]
+  D2 --> K
+        </pre>
+      </div>
+
+      <p>
+        Both paradigms typically feed a graph-based back-end (Chapter 12) by
+        producing relative pose constraints and quality scores (inlier ratio,
+        residual statistics, covariance approximations).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Common State, Notation, and Probabilistic View -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Common State, Notation, and Probabilistic View</h2>
+    <div class="down-content">
+      <p>
+        Let the robot carry a monocular camera. Between consecutive frames we
+        estimate a relative pose
+        <strong>\( \mathbf{T} \in SE(3) \)</strong> (rotation + translation). In
+        this AMR course, you can interpret <strong>\( \mathbf{T} \)</strong> as
+        “the rigid transform mapping points from the previous camera frame to
+        the current camera frame”. For optimization, we parameterize a small
+        update by a 6-vector
+        <strong>\( \delta\boldsymbol{\theta}\in\mathbb{R}^6 \)</strong>
+        (3 for small rotation, 3 for translation).
+      </p>
+
+      <p>
+        Both feature and direct methods can be expressed as Maximum Likelihood
+        estimation with Gaussian noise: choose
+        <strong>\( \hat{\mathbf{T}} \)</strong> that minimizes a sum of squared
+        residuals. The difference is what the “residual” is computed from.
+      </p>
+
+      <p>
+        When outliers exist (mismatches, moving objects), we replace squared
+        loss by a robust loss
+        <strong> \( \rho(\cdot) \):</strong> this converts the problem into
+        Iteratively Reweighted Least Squares (IRLS).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Feature-Based Methods (Geometric Residuals) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Feature-Based Methods (Geometric Residuals)</h2>
+    <div class="down-content">
+      <p>
+        Feature-based pipelines extract a set of correspondences
+        <strong> \( (\mathbf{u}_i, \mathbf{u}'_i) \):</strong>
+        pixel locations in frame <strong>\( t-1 \)</strong> and frame
+        <strong>\( t \)</strong>. A calibrated pinhole camera model maps a 3D
+        point <strong>\( \mathbf{P} \)</strong> in the camera frame to pixel
+        coordinates:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{u} = \pi\!\left(\mathbf{K}\mathbf{P}\right),\quad
+        \pi\!\left(\begin{bmatrix}X\\Y\\Z\end{bmatrix}\right)=
+        \begin{bmatrix}X/Z\\Y/Z\end{bmatrix},\quad \mathbf{K}= \begin{bmatrix}
+        f_x & 0 & c_x\\ 0 & f_y & c_y\\ 0 & 0 & 1 \end{bmatrix} \]
+      </h4>
+
+      <p>
+        If we have a set of 3D map points
+        <strong>\( \mathbf{P}_j \)</strong> (from triangulation or a local map)
+        and their observed pixels <strong> \( \mathbf{u}'_j \):</strong> the
+        standard residual is <em>reprojection error</em>:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \mathbf{r}_j(\mathbf{T}) = \mathbf{u}'_j -
+        \pi\!\left(\mathbf{K}\left(\mathbf{R}\mathbf{P}_j+\mathbf{t}\right)\right),
+        \qquad \mathbf{T}=\begin{bmatrix}\mathbf{R}&\mathbf{t}\\ \mathbf{0}^\top
+        & 1\end{bmatrix} \]
+      </h4>
+
+      <p>The (robust) objective becomes:</p>
+
+      <h4 class="mathJax">
+        \[ \min_{\mathbf{T}} \sum_{j=1}^{N} \rho\!\left(
+        \mathbf{r}_j(\mathbf{T})^\top
+        \mathbf{\Sigma}_j^{-1}\mathbf{r}_j(\mathbf{T}) \right) \]
+      </h4>
+
+      <p>
+        <strong>Gauss–Newton step (core derivation).</strong>
+        Linearize each residual around current estimate
+        <strong>\( \mathbf{T}_0 \)</strong>:
+        <strong>
+          \( \mathbf{r}_j(\mathbf{T}_0 \oplus \delta\boldsymbol{\theta}) \approx
+          \mathbf{r}_j(\mathbf{T}_0)+\mathbf{J}_j\delta\boldsymbol{\theta}
+          \):</strong
+        >
+        where <strong>\( \mathbf{J}_j \)</strong> is the Jacobian. Stacking
+        residuals gives:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \delta\boldsymbol{\theta}^\star =
+        \arg\min_{\delta\boldsymbol{\theta}} \left\lVert
+        \mathbf{W}^{1/2}\left(\mathbf{r}+\mathbf{J}\delta\boldsymbol{\theta}\right)\right\rVert_2^2
+        \Rightarrow
+        \left(\mathbf{J}^\top\mathbf{W}\mathbf{J}\right)\delta\boldsymbol{\theta}
+        = -\mathbf{J}^\top\mathbf{W}\mathbf{r} \]
+      </h4>
+
+      <p>
+        This same normal-equation structure is the backbone of bundle adjustment
+        (multi-frame, multi-point) that you will use implicitly when running
+        modern SLAM stacks. The main front-end differences are:
+      </p>
+      <ul>
+        <li>
+          <strong>Pros:</strong> robust to moderate illumination changes; good
+          long-term matching with descriptors; natural outlier rejection via
+          RANSAC.
+        </li>
+        <li>
+          <strong>Cons:</strong> needs texture/keypoints; matching can be heavy;
+          failures under motion blur and repeated patterns.
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Direct Methods (Photometric Residuals) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Direct Methods (Photometric Residuals)</h2>
+    <div class="down-content">
+      <p>
+        Direct methods treat pixel intensities as measurements. Let a pixel in
+        the reference image be
+        <strong> \( \mathbf{p} = (x,y)^\top \):</strong> and let
+        <strong> \( I_{t-1}(\mathbf{p}) \)</strong> be its intensity. If we can
+        warp <strong> \( \mathbf{p} \)</strong> into the current image under
+        pose <strong>\( \mathbf{T} \)</strong>
+        (using a depth estimate), we define a photometric residual:
+        <strong> \( r(\mathbf{p},\mathbf{T}) \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ r(\mathbf{p},\mathbf{T}) =
+        I_t\!\left(\omega(\mathbf{p},\mathbf{T},d(\mathbf{p}))\right) -
+        I_{t-1}(\mathbf{p}) \]
+      </h4>
+
+      <p>
+        Here, <strong> \( d(\mathbf{p}) \):</strong> is the (inverse) depth
+        associated with pixel <strong>\( \mathbf{p} \)</strong>, and
+        <strong> \( \omega(\cdot) \):</strong> is the warp induced by the 3D
+        motion and projection. The direct objective (with robust loss) is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \min_{\mathbf{T}} \sum_{\mathbf{p}\in\Omega} \rho\!\left(
+        \frac{r(\mathbf{p},\mathbf{T})^2}{\sigma_I^2} \right) \]
+      </h4>
+
+      <p>
+        <strong>Key linearization (why gradients matter).</strong>
+        Using first-order Taylor expansion of the current image around the
+        warped location:
+      </p>
+
+      <h4 class="mathJax">
+        \[ I_t(\mathbf{p}+\delta\mathbf{p}) \approx I_t(\mathbf{p}) + \nabla
+        I_t(\mathbf{p})^\top \delta\mathbf{p} \]
+      </h4>
+
+      <p>
+        Combining with warp parameterization gives the Jacobian for
+        Gauss–Newton:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \frac{\partial r}{\partial \boldsymbol{\theta}} = \nabla
+        I_t(\omega)^\top \frac{\partial \omega}{\partial \boldsymbol{\theta}} \]
+      </h4>
+
+      <p>
+        <strong>Important practical condition.</strong>
+        If <strong>\( \lVert \nabla I \rVert \)</strong> is small (flat region),
+        the problem becomes ill-conditioned: pixels with
+        <strong>\( \lVert \nabla I \rVert \; &lt; \; \epsilon \)</strong> are
+        typically rejected.
+      </p>
+
+      <p>
+        <strong>Illumination model extension.</strong>
+        If brightness constancy fails, a common model is affine intensity
+        change:
+        <strong> \( I_t(\cdot) \approx a\,I_{t-1}(\cdot)+b \):</strong>
+        then residual becomes:
+      </p>
+
+      <h4 class="mathJax">
+        \[ r(\mathbf{p},\mathbf{T},a,b) =
+        I_t\!\left(\omega(\mathbf{p},\mathbf{T},d(\mathbf{p}))\right) -
+        \left(a\,I_{t-1}(\mathbf{p})+b\right) \]
+      </h4>
+
+      <p>
+        This lets the optimizer absorb exposure changes, which matters for AMRs
+        moving between lighting zones.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: A Unified Optimization View (IRLS + Normal Equations) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. A Unified Optimization View (IRLS + Normal Equations)</h2>
+    <div class="down-content">
+      <p>
+        Both paradigms are robust nonlinear least squares problems. With robust
+        loss <strong>\( \rho \)</strong>, IRLS turns the problem into repeated
+        weighted least squares. Define scalar residuals (photometric) or stacked
+        residuals (reprojection). At iteration <strong>\( k \)</strong>, weights
+        are:
+        <strong> \( w_i^{(k)} = \psi(r_i^{(k)}) / r_i^{(k)} \):</strong>
+        where <strong>\( \psi = \rho' \)</strong>.
+      </p>
+
+      <h4 class="mathJax">
+        \[ \left(\mathbf{J}^\top\mathbf{W}\mathbf{J}\right)\delta =
+        -\mathbf{J}^\top\mathbf{W}\mathbf{r}, \qquad
+        \mathbf{W}=\operatorname{diag}(w_1,\dots,w_M) \]
+      </h4>
+
+      <p>
+        <strong>Interpretation for AMR pipelines:</strong>
+        feature-based methods build <strong>\( \mathbf{r} \)</strong> from
+        sparse correspondences (often tens to thousands), while direct methods
+        build <strong>\( \mathbf{r} \)</strong> from many pixels/patches
+        (hundreds to tens of thousands), but typically keep
+        <strong>\( \mathbf{J}^\top\mathbf{W}\mathbf{J} \)</strong> small via
+        low-dimensional motion parameters and sparse pixel selection.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Practical Tradeoffs for AMR -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Practical Tradeoffs for AMR</h2>
+    <div class="down-content">
+      <p>
+        For ground robots, motion is often smooth and dominated by yaw +
+        translation, but the camera still experiences vibration and motion blur.
+        Key considerations:
+      </p>
+      <ul>
+        <li>
+          <strong>Texture and scene structure:</strong> feature-based prefers
+          corner-rich scenes; direct can exploit weak texture if gradients exist
+          broadly (but struggles on uniform floors/walls).
+        </li>
+        <li>
+          <strong>Motion blur:</strong> descriptors degrade; direct methods can
+          also fail if gradients vanish, but coarse-to-fine helps.
+        </li>
+        <li>
+          <strong>Lighting changes:</strong> features are often more invariant;
+          direct requires photometric calibration or affine brightness terms.
+        </li>
+        <li>
+          <strong>Dynamic objects:</strong> both need robust loss; feature
+          pipelines often rely on RANSAC; direct uses robust weights + pixel
+          selection.
+        </li>
+        <li>
+          <strong>Compute budget:</strong> feature matching can dominate CPU;
+          direct can be efficient if sparse direct pixels are used.
+        </li>
+      </ul>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  S["Initialize pose from motion model"] --> P["Build image pyramid"]
+  P --> L["Process levels (coarse to fine)"]
+  L --> R["Compute residual r = I_t(w(x)) - I_ref(x)"]
+  R --> J["Compute Jacobian J = grad(I_t) * d(w)/d(theta)"]
+  J --> N["Solve (J^T W J) delta = -J^T W r"]
+  N --> U["Update parameters: theta = theta + delta"]
+  U --> C{"Stop if ||delta|| is small"}
+  C -->|"yes"| O["Return pose + quality metrics"]
+  C -->|"no"| R
+  </pre
+        >
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation (OpenCV)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> Chapter13_Lesson2.py</p>
+      <p>
+        The script demonstrates: (1) a feature-based relative pose estimate via
+        ORB + Essential matrix + recoverPose, and (2) a direct translation-only
+        photometric alignment via Gauss–Newton (coarse-to-fine). The direct part
+        is intentionally simplified to isolate the core idea: minimizing
+        intensity residuals.
+      </p>
+      <pre><code class="language-python"># Chapter13_Lesson2.py
+"""
+Autonomous Mobile Robots — Chapter 13, Lesson 2
+Feature-Based vs Direct Methods (minimal runnable demo)
+
+Dependencies:
+  pip install opencv-python numpy
+
+Usage:
+  python Chapter13_Lesson2.py --img1 path/to/frame1.png --img2 path/to/frame2.png
+  (Optionally provide camera intrinsics via --fx --fy --cx --cy)
+"""
+import argparse
+import numpy as np
+import cv2
+
+def load_gray(path: str) -&gt; np.ndarray:
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"Could not read image: {path}")
+    return img
+
+def feature_based_relative_pose(I1, I2, K, nfeatures=2000):
+    """ORB + matching + Essential matrix (calibrated) + recoverPose.
+    Returns (R, t_unit, inlier_mask, pts1, pts2) where t has unit norm (scale ambiguous for monocular).
+    """
+    orb = cv2.ORB_create(nfeatures=nfeatures)
+    k1, d1 = orb.detectAndCompute(I1, None)
+    k2, d2 = orb.detectAndCompute(I2, None)
+    if d1 is None or d2 is None or len(k1) &lt; 8 or len(k2) &lt; 8:
+        raise RuntimeError("Not enough features/descriptors to estimate pose.")
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    matches = bf.knnMatch(d1, d2, k=2)
+
+    # Lowe ratio test
+    good = []
+    for m, n in matches:
+        if m.distance &lt; 0.75 * n.distance:
+            good.append(m)
+    if len(good) &lt; 8:
+        raise RuntimeError("Not enough good matches after ratio test.")
+
+    pts1 = np.float32([k1[m.queryIdx].pt for m in good])
+    pts2 = np.float32([k2[m.trainIdx].pt for m in good])
+
+    # Robust Essential matrix with RANSAC
+    E, inliers = cv2.findEssentialMat(
+        pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0
+    )
+    if E is None:
+        raise RuntimeError("findEssentialMat failed.")
+
+    # recoverPose expects inliers mask
+    inliers = inliers.astype(bool).ravel()
+    pts1_in = pts1[inliers]
+    pts2_in = pts2[inliers]
+    if len(pts1_in) &lt; 8:
+        raise RuntimeError("Not enough inliers to recover pose.")
+
+    _, R, t, _ = cv2.recoverPose(E, pts1_in, pts2_in, K)
+    t = t.ravel()
+    t_unit = t / (np.linalg.norm(t) + 1e-12)
+    return R, t_unit, inliers, pts1, pts2
+
+def robust_huber_weights(r, delta):
+    """Huber weights for residual vector r (1D)."""
+    a = np.abs(r)
+    w = np.ones_like(r, dtype=np.float32)
+    mask = a &gt; delta
+    w[mask] = (delta / (a[mask] + 1e-12)).astype(np.float32)
+    return w
+
+def direct_align_translation(I_ref, I_cur, levels=4, iters=10, huber_delta=5.0):
+    """Coarse-to-fine direct alignment for 2D translation (u,v) in pixels.
+    Minimizes sum rho(I_cur(x+u,y+v) - I_ref(x,y)).
+    """
+    # Build pyramids
+    pyr_ref = [I_ref.astype(np.float32)]
+    pyr_cur = [I_cur.astype(np.float32)]
+    for _ in range(1, levels):
+        pyr_ref.append(cv2.pyrDown(pyr_ref[-1]))
+        pyr_cur.append(cv2.pyrDown(pyr_cur[-1]))
+
+    u, v = 0.0, 0.0  # translation at current pyramid scale
+    for lvl in reversed(range(levels)):
+        R = pyr_ref[lvl]
+        C = pyr_cur[lvl]
+        # scale translation to this level
+        scale = 2.0 ** lvl
+        u_lvl = u / scale
+        v_lvl = v / scale
+
+        for _ in range(iters):
+            # Warp current image by (u_lvl, v_lvl)
+            M = np.array([[1.0, 0.0, u_lvl],
+                          [0.0, 1.0, v_lvl]], dtype=np.float32)
+            Cw = cv2.warpAffine(C, M, (R.shape[1], R.shape[0]), flags=cv2.INTER_LINEAR)
+
+            # Compute residual and gradients
+            r = (Cw - R)
+
+            # Use gradients of warped current image (forward-additive LK)
+            Ix = cv2.Sobel(Cw, cv2.CV_32F, 1, 0, ksize=3)
+            Iy = cv2.Sobel(Cw, cv2.CV_32F, 0, 1, ksize=3)
+
+            # Exclude a border to avoid interpolation artifacts
+            b = 10
+            r0 = r[b:-b, b:-b].reshape(-1)
+            gx = Ix[b:-b, b:-b].reshape(-1)
+            gy = Iy[b:-b, b:-b].reshape(-1)
+
+            # Reject near-zero gradient pixels
+            g2 = gx*gx + gy*gy
+            mask = g2 &gt; 1e-4
+            r0 = r0[mask]
+            gx = gx[mask]
+            gy = gy[mask]
+            if r0.size &lt; 200:
+                break
+
+            w = robust_huber_weights(r0, huber_delta)
+            # Normal equations for translation: A = [gx gy], solve (A^T W A) d = -A^T W r
+            A11 = float(np.sum(w * gx * gx))
+            A12 = float(np.sum(w * gx * gy))
+            A22 = float(np.sum(w * gy * gy))
+            b1  = float(np.sum(w * gx * r0))
+            b2  = float(np.sum(w * gy * r0))
+
+            H = np.array([[A11, A12],
+                          [A12, A22]], dtype=np.float64)
+            g = np.array([b1, b2], dtype=np.float64)
+
+            # Solve with damping if ill-conditioned
+            lam = 1e-3 * (H[0,0] + H[1,1] + 1e-12)
+            H_damped = H + lam * np.eye(2)
+
+            try:
+                duv = -np.linalg.solve(H_damped, g)
+            except np.linalg.LinAlgError:
+                break
+
+            u_lvl += float(duv[0])
+            v_lvl += float(duv[1])
+
+            if np.linalg.norm(duv) &lt; 1e-3:
+                break
+
+        # bring back to full-res units
+        u = u_lvl * scale
+        v = v_lvl * scale
+
+    return u, v
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--img1", required=True, help="Path to reference image (t-1).")
+    ap.add_argument("--img2", required=True, help="Path to current image (t).")
+    ap.add_argument("--fx", type=float, default=525.0)
+    ap.add_argument("--fy", type=float, default=525.0)
+    ap.add_argument("--cx", type=float, default=319.5)
+    ap.add_argument("--cy", type=float, default=239.5)
+    ap.add_argument("--no_vis", action="store_true", help="Disable visualization windows.")
+    args = ap.parse_args()
+
+    I1 = load_gray(args.img1)
+    I2 = load_gray(args.img2)
+
+    K = np.array([[args.fx, 0.0, args.cx],
+                  [0.0, args.fy, args.cy],
+                  [0.0, 0.0, 1.0]], dtype=np.float64)
+
+    print("=== Feature-based (ORB + Essential + recoverPose) ===")
+    R, t_unit, inliers, pts1, pts2 = feature_based_relative_pose(I1, I2, K)
+    print("R =\n", R)
+    print("t (unit norm) =", t_unit, "(monocular scale unknown)")
+
+    print("\n=== Direct (translation-only photometric alignment) ===")
+    u, v = direct_align_translation(I1, I2, levels=4, iters=15, huber_delta=5.0)
+    print(f"Estimated pixel translation: u={u:.3f}, v={v:.3f}")
+
+    if not args.no_vis:
+        # Draw inlier matches
+        orb = cv2.ORB_create(nfeatures=2000)
+        k1, d1 = orb.detectAndCompute(I1, None)
+        k2, d2 = orb.detectAndCompute(I2, None)
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        matches = bf.knnMatch(d1, d2, k=2)
+        good = []
+        for m, n in matches:
+            if m.distance &lt; 0.75 * n.distance:
+                good.append(m)
+        # Mask by inliers computed earlier (aligned with 'good' list)
+        inlier_list = [m for m, ok in zip(good, inliers.tolist()) if ok]
+        vis = cv2.drawMatches(I1, k1, I2, k2, inlier_list[:60], None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+        cv2.imshow("Inlier matches (top 60)", vis)
+
+        # Visualize direct alignment by warping I2 back toward I1
+        M = np.array([[1.0, 0.0, -u],
+                      [0.0, 1.0, -v]], dtype=np.float32)
+        I2w = cv2.warpAffine(I2, M, (I1.shape[1], I1.shape[0]))
+        diff = cv2.absdiff(I1, I2w)
+        cv2.imshow("Direct alignment: abs(I1 - warp(I2))", diff)
+
+        cv2.waitKey(0)
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation (OpenCV)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> Chapter13_Lesson2.cpp</p>
+      <pre><code class="language-cpp">// Chapter13_Lesson2.cpp
+/*
+Autonomous Mobile Robots — Chapter 13, Lesson 2
+Feature-Based vs Direct Methods (C++ / OpenCV)
+
+Build (example):
+  g++ -O2 -std=c++17 Chapter13_Lesson2.cpp -o lesson2 `pkg-config --cflags --libs opencv4`
+
+Run:
+  ./lesson2 --img1 frame1.png --img2 frame2.png --fx 525 --fy 525 --cx 319.5 --cy 239.5
+*/
+#include &lt;iostream&gt;
+#include &lt;vector&gt;
+#include &lt;string&gt;
+#include &lt;cmath&gt;
+#include &lt;opencv2/opencv.hpp&gt;
+
+static cv::Mat loadGray(const std::string&amp; path) {
+    cv::Mat img = cv::imread(path, cv::IMREAD_GRAYSCALE);
+    if (img.empty()) throw std::runtime_error("Could not read image: " + path);
+    return img;
+}
+
+static void featureBasedRelativePose(
+    const cv::Mat&amp; I1, const cv::Mat&amp; I2, const cv::Mat&amp; K,
+    cv::Mat&amp; R, cv::Mat&amp; t_unit, cv::Mat&amp; inlierMask,
+    std::vector&lt;cv::Point2f&gt;&amp; pts1, std::vector&lt;cv::Point2f&gt;&amp; pts2
+) {
+    auto orb = cv::ORB::create(2000);
+    std::vector&lt;cv::KeyPoint&gt; k1, k2;
+    cv::Mat d1, d2;
+    orb-&gt;detectAndCompute(I1, cv::noArray(), k1, d1);
+    orb-&gt;detectAndCompute(I2, cv::noArray(), k2, d2);
+    if (d1.empty() || d2.empty()) throw std::runtime_error("Not enough descriptors.");
+
+    cv::BFMatcher bf(cv::NORM_HAMMING, false);
+    std::vector&lt;std::vector&lt;cv::DMatch&gt;&gt; knn;
+    bf.knnMatch(d1, d2, knn, 2);
+
+    std::vector&lt;cv::DMatch&gt; good;
+    good.reserve(knn.size());
+    for (auto&amp; pair : knn) {
+        if (pair.size() &lt; 2) continue;
+        if (pair[0].distance &lt; 0.75f * pair[1].distance) good.push_back(pair[0]);
+    }
+    if (good.size() &lt; 8) throw std::runtime_error("Not enough good matches.");
+
+    pts1.clear(); pts2.clear();
+    pts1.reserve(good.size()); pts2.reserve(good.size());
+    for (auto&amp; m : good) {
+        pts1.push_back(k1[m.queryIdx].pt);
+        pts2.push_back(k2[m.trainIdx].pt);
+    }
+
+    cv::Mat E = cv::findEssentialMat(pts1, pts2, K, cv::RANSAC, 0.999, 1.0, inlierMask);
+    if (E.empty()) throw std::runtime_error("findEssentialMat failed.");
+
+    cv::Mat t;
+    cv::recoverPose(E, pts1, pts2, K, R, t, inlierMask);
+    double nrm = cv::norm(t);
+    t_unit = (nrm &gt; 0) ? (t / nrm) : t;
+}
+
+static inline float huberWeight(float r, float delta) {
+    float a = std::fabs(r);
+    return (a &lt;= delta) ? 1.0f : (delta / (a + 1e-12f));
+}
+
+static cv::Point2d directAlignTranslation(
+    const cv::Mat&amp; Iref_u8, const cv::Mat&amp; Icur_u8,
+    int levels = 4, int iters = 15, float huberDelta = 5.0f
+) {
+    std::vector&lt;cv::Mat&gt; pyrRef, pyrCur;
+    pyrRef.reserve(levels); pyrCur.reserve(levels);
+    pyrRef.push_back(Iref_u8);
+    pyrCur.push_back(Icur_u8);
+    for (int i = 1; i &lt; levels; ++i) {
+        cv::Mat r, c;
+        cv::pyrDown(pyrRef.back(), r);
+        cv::pyrDown(pyrCur.back(), c);
+        pyrRef.push_back(r); pyrCur.push_back(c);
+    }
+
+    double u = 0.0, v = 0.0;
+
+    for (int lvl = levels - 1; lvl &gt;= 0; --lvl) {
+        cv::Mat Rf, Cf;
+        pyrRef[lvl].convertTo(Rf, CV_32F);
+        pyrCur[lvl].convertTo(Cf, CV_32F);
+
+        double scale = std::pow(2.0, lvl);
+        double uL = u / scale;
+        double vL = v / scale;
+
+        for (int it = 0; it &lt; iters; ++it) {
+            cv::Mat M = (cv::Mat_&lt;float&gt;(2,3) &lt;&lt; 1.f, 0.f, (float)uL, 0.f, 1.f, (float)vL);
+            cv::Mat Cw;
+            cv::warpAffine(Cf, Cw, M, Rf.size(), cv::INTER_LINEAR);
+
+            cv::Mat r = Cw - Rf;
+
+            cv::Mat Ix, Iy;
+            cv::Sobel(Cw, Ix, CV_32F, 1, 0, 3);
+            cv::Sobel(Cw, Iy, CV_32F, 0, 1, 3);
+
+            const int b = 10;
+            double A11=0, A12=0, A22=0, b1=0, b2=0;
+            int count = 0;
+            for (int y = b; y &lt; r.rows - b; ++y) {
+                const float* pr  = r.ptr&lt;float&gt;(y);
+                const float* pgx = Ix.ptr&lt;float&gt;(y);
+                const float* pgy = Iy.ptr&lt;float&gt;(y);
+                for (int x = b; x &lt; r.cols - b; ++x) {
+                    float gx = pgx[x], gy = pgy[x];
+                    float g2 = gx*gx + gy*gy;
+                    if (g2 &lt;= 1e-4f) continue;
+                    float ri = pr[x];
+                    float w  = huberWeight(ri, huberDelta);
+                    A11 += w*gx*gx;
+                    A12 += w*gx*gy;
+                    A22 += w*gy*gy;
+                    b1  += w*gx*ri;
+                    b2  += w*gy*ri;
+                    count++;
+                }
+            }
+            if (count &lt; 500) break;
+
+            cv::Mat H = (cv::Mat_&lt;double&gt;(2,2) &lt;&lt; A11, A12, A12, A22);
+            cv::Mat g = (cv::Mat_&lt;double&gt;(2,1) &lt;&lt; b1, b2);
+            double lam = 1e-3 * (H.at&lt;double&gt;(0,0) + H.at&lt;double&gt;(1,1) + 1e-12);
+            H += lam * cv::Mat::eye(2,2,CV_64F);
+
+            cv::Mat duv;
+            if (!cv::solve(H, -g, duv, cv::DECOMP_CHOLESKY)) break;
+
+            uL += duv.at&lt;double&gt;(0,0);
+            vL += duv.at&lt;double&gt;(1,0);
+
+            if (cv::norm(duv) &lt; 1e-3) break;
+        }
+
+        u = uL * scale;
+        v = vL * scale;
+    }
+
+    return cv::Point2d(u, v);
+}
+
+int main(int argc, char** argv) {
+    const cv::String keys =
+        "{help h | | show help }"
+        "{img1  | | path to reference image }"
+        "{img2  | | path to current image }"
+        "{fx    |525| fx }"
+        "{fy    |525| fy }"
+        "{cx    |319.5| cx }"
+        "{cy    |239.5| cy }"
+        "{no_vis|0| disable visualization }";
+
+    cv::CommandLineParser parser(argc, argv, keys);
+    if (parser.has("help") || !parser.has("img1") || !parser.has("img2")) {
+        std::cout &lt;&lt; "Usage: ./lesson2 --img1 a.png --img2 b.png [--fx ... --fy ... --cx ... --cy ...]\n";
+        return 0;
+    }
+
+    std::string img1 = parser.get&lt;cv::String&gt;("img1");
+    std::string img2 = parser.get&lt;cv::String&gt;("img2");
+    double fx = parser.get&lt;double&gt;("fx");
+    double fy = parser.get&lt;double&gt;("fy");
+    double cx = parser.get&lt;double&gt;("cx");
+    double cy = parser.get&lt;double&gt;("cy");
+    bool noVis = parser.get&lt;int&gt;("no_vis") != 0;
+
+    cv::Mat I1 = loadGray(img1);
+    cv::Mat I2 = loadGray(img2);
+
+    cv::Mat K = (cv::Mat_&lt;double&gt;(3,3) &lt;&lt; fx, 0, cx, 0, fy, cy, 0, 0, 1);
+
+    std::cout &lt;&lt; "=== Feature-based (ORB + Essential + recoverPose) ===\n";
+    cv::Mat R, t_unit, inliers;
+    std::vector&lt;cv::Point2f&gt; pts1, pts2;
+    featureBasedRelativePose(I1, I2, K, R, t_unit, inliers, pts1, pts2);
+    std::cout &lt;&lt; "R=\n" &lt;&lt; R &lt;&lt; "\n";
+    std::cout &lt;&lt; "t (unit norm)=\n" &lt;&lt; t_unit.t() &lt;&lt; " (monocular scale unknown)\n";
+
+    std::cout &lt;&lt; "\n=== Direct (translation-only photometric alignment) ===\n";
+    cv::Point2d uv = directAlignTranslation(I1, I2);
+    std::cout &lt;&lt; "Estimated pixel translation: u=" &lt;&lt; uv.x &lt;&lt; ", v=" &lt;&lt; uv.y &lt;&lt; "\n";
+
+    if (!noVis) {
+        cv::Mat M = (cv::Mat_&lt;float&gt;(2,3) &lt;&lt; 1.f, 0.f, (float)-uv.x, 0.f, 1.f, (float)-uv.y);
+        cv::Mat I2w;
+        cv::warpAffine(I2, I2w, M, I1.size(), cv::INTER_LINEAR);
+        cv::Mat diff; cv::absdiff(I1, I2w, diff);
+        cv::imshow("abs(I1 - warp(I2))", diff);
+        cv::waitKey(0);
+    }
+
+    return 0;
+}
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation (OpenCV)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> Chapter13_Lesson2.java</p>
+      <p>
+        Here, the “direct” example is KLT optical flow: it aligns image patches
+        by minimizing photometric error, so it belongs to intensity-based
+        tracking even though it outputs sparse point correspondences.
+      </p>
+      <pre><code class="language-java">// Chapter13_Lesson2.java
+/*
+Autonomous Mobile Robots — Chapter 13, Lesson 2
+Feature-Based vs Direct Methods (Java / OpenCV)
+
+Notes:
+- Requires OpenCV Java bindings (org.opencv.*) in your classpath.
+- This demo shows:
+  (1) Feature-based: ORB + Essential matrix + recoverPose
+  (2) Direct (sparse): KLT optical flow (photometric patch alignment) + robust transform estimate
+*/
+import org.opencv.core.*;
+import org.opencv.calib3d.Calib3d;
+import org.opencv.features2d.*;
+import org.opencv.imgcodecs.Imgcodecs;
+import org.opencv.imgproc.Imgproc;
+import org.opencv.video.Video;
+
+import java.util.*;
+
+public class Chapter13_Lesson2 {
+    static {
+        System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+    }
+
+    static Mat loadGray(String path) {
+        Mat img = Imgcodecs.imread(path, Imgcodecs.IMREAD_GRAYSCALE);
+        if (img.empty()) throw new RuntimeException("Could not read image: " + path);
+        return img;
+    }
+
+    static class PoseResult {
+        Mat R;
+        Mat tUnit;
+        Mat inliersMask;
+        MatOfPoint2f pts1;
+        MatOfPoint2f pts2;
+    }
+
+    static PoseResult featureBasedPose(Mat I1, Mat I2, Mat K) {
+        ORB orb = ORB.create(2000);
+
+        MatOfKeyPoint k1 = new MatOfKeyPoint();
+        MatOfKeyPoint k2 = new MatOfKeyPoint();
+        Mat d1 = new Mat(), d2 = new Mat();
+
+        orb.detectAndCompute(I1, new Mat(), k1, d1);
+        orb.detectAndCompute(I2, new Mat(), k2, d2);
+
+        if (d1.empty() || d2.empty()) throw new RuntimeException("Not enough descriptors.");
+
+        DescriptorMatcher matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING);
+        List&lt;MatOfDMatch&gt; knn = new ArrayList&lt;&gt;();
+        matcher.knnMatch(d1, d2, knn, 2);
+
+        List&lt;DMatch&gt; good = new ArrayList&lt;&gt;();
+        for (MatOfDMatch pair : knn) {
+            DMatch[] ms = pair.toArray();
+            if (ms.length &lt; 2) continue;
+            if (ms[0].distance &lt; 0.75 * ms[1].distance) good.add(ms[0]);
+        }
+        if (good.size() &lt; 8) throw new RuntimeException("Not enough good matches.");
+
+        KeyPoint[] kp1 = k1.toArray();
+        KeyPoint[] kp2 = k2.toArray();
+
+        List&lt;Point&gt; p1 = new ArrayList&lt;&gt;();
+        List&lt;Point&gt; p2 = new ArrayList&lt;&gt;();
+        for (DMatch m : good) {
+            p1.add(kp1[m.queryIdx].pt);
+            p2.add(kp2[m.trainIdx].pt);
+        }
+
+        MatOfPoint2f pts1 = new MatOfPoint2f();
+        MatOfPoint2f pts2 = new MatOfPoint2f();
+        pts1.fromList(p1);
+        pts2.fromList(p2);
+
+        Mat inliers = new Mat();
+        Mat E = Calib3d.findEssentialMat(pts1, pts2, K, Calib3d.RANSAC, 0.999, 1.0, inliers);
+        if (E.empty()) throw new RuntimeException("findEssentialMat failed.");
+
+        Mat R = new Mat();
+        Mat t = new Mat();
+        Calib3d.recoverPose(E, pts1, pts2, K, R, t, inliers);
+
+        double norm = Core.norm(t);
+        Mat tUnit = (norm &gt; 0) ? t.mul(new Scalar(1.0 / norm)) : t;
+
+        PoseResult out = new PoseResult();
+        out.R = R; out.tUnit = tUnit; out.inliersMask = inliers; out.pts1 = pts1; out.pts2 = pts2;
+        return out;
+    }
+
+    static Point directSparseKLTTranslation(Mat I1, Mat I2) {
+        Mat corners = new Mat();
+        Imgproc.goodFeaturesToTrack(I1, corners, 400, 0.01, 8.0);
+
+        MatOfPoint2f p0 = new MatOfPoint2f(corners);
+        MatOfPoint2f p1 = new MatOfPoint2f();
+        MatOfByte status = new MatOfByte();
+        MatOfFloat err = new MatOfFloat();
+
+        Video.calcOpticalFlowPyrLK(I1, I2, p0, p1, status, err);
+
+        Point[] a = p0.toArray();
+        Point[] b = p1.toArray();
+        byte[] st = status.toArray();
+
+        List&lt;Double&gt; dx = new ArrayList&lt;&gt;();
+        List&lt;Double&gt; dy = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; st.length; i++) {
+            if (st[i] == 0) continue;
+            dx.add(b[i].x - a[i].x);
+            dy.add(b[i].y - a[i].y);
+        }
+        if (dx.size() &lt; 20) return new Point(0, 0);
+
+        Collections.sort(dx);
+        Collections.sort(dy);
+        double medx = dx.get(dx.size()/2);
+        double medy = dy.get(dy.size()/2);
+
+        return new Point(medx, medy);
+    }
+
+    public static void main(String[] args) {
+        if (args.length &lt; 2) {
+            System.out.println("Usage: java Chapter13_Lesson2 &lt;img1&gt; &lt;img2&gt; [fx fy cx cy]");
+            return;
+        }
+        String img1 = args[0];
+        String img2 = args[1];
+        double fx = (args.length &gt;= 3) ? Double.parseDouble(args[2]) : 525.0;
+        double fy = (args.length &gt;= 4) ? Double.parseDouble(args[3]) : 525.0;
+        double cx = (args.length &gt;= 5) ? Double.parseDouble(args[4]) : 319.5;
+        double cy = (args.length &gt;= 6) ? Double.parseDouble(args[5]) : 239.5;
+
+        Mat I1 = loadGray(img1);
+        Mat I2 = loadGray(img2);
+
+        Mat K = Mat.eye(3, 3, CvType.CV_64F);
+        K.put(0,0, fx); K.put(1,1, fy);
+        K.put(0,2, cx); K.put(1,2, cy);
+
+        System.out.println("=== Feature-based (ORB + Essential + recoverPose) ===");
+        PoseResult pr = featureBasedPose(I1, I2, K);
+        System.out.println("R:\n" + pr.R.dump());
+        System.out.println("t (unit norm):\n" + pr.tUnit.dump() + " (monocular scale unknown)");
+
+        System.out.println("\n=== Direct (sparse KLT photometric tracking) ===");
+        Point uv = directSparseKLTTranslation(I1, I2);
+        System.out.printf("Estimated pixel translation (median flow): u=%.3f, v=%.3f%n", uv.x, uv.y);
+    }
+}
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB / Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB / Simulink Implementation (Computer Vision Toolbox)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> Chapter13_Lesson2.m</p>
+      <p>
+        MATLAB provides high-level, well-tested primitives for both approaches.
+        Feature-based: ORB + essential matrix. Direct (sparse): KLT point
+        tracking, which performs patch-based photometric alignment. In Simulink,
+        these steps are typically wrapped inside a MATLAB Function block for
+        rapid prototyping.
+      </p>
+      <pre><code class="language-matlab">% Chapter13_Lesson2.m
+% Autonomous Mobile Robots — Chapter 13, Lesson 2
+% Feature-Based vs Direct Methods (MATLAB)
+%
+% Requirements:
+%   - Computer Vision Toolbox (for ORB/KLT/essential matrix helpers)
+
+clear; clc;
+
+% ---- User inputs ----
+img1Path = "frame1.png";   % reference (t-1)
+img2Path = "frame2.png";   % current (t)
+
+I1 = im2gray(imread(img1Path));
+I2 = im2gray(imread(img2Path));
+
+% Camera intrinsics (example defaults; replace with your calibration)
+fx = 525; fy = 525; cx = 319.5; cy = 239.5;
+intrinsics = cameraIntrinsics([fx fy], [cx cy], size(I1));
+
+fprintf("=== Feature-based (ORB + Essential + relativeCameraPose) ===\n");
+points1 = detectORBFeatures(I1);
+points2 = detectORBFeatures(I2);
+
+[feat1, valid1] = extractFeatures(I1, points1);
+[feat2, valid2] = extractFeatures(I2, points2);
+
+idxPairs = matchFeatures(feat1, feat2, "MaxRatio", 0.75, "Unique", true);
+matched1 = valid1(idxPairs(:,1));
+matched2 = valid2(idxPairs(:,2));
+
+% Estimate essential matrix with RANSAC
+[E, inlierIdx] = estimateEssentialMatrix(matched1, matched2, intrinsics, ...
+    "Confidence", 99.9, "MaxNumTrials", 2000);
+
+in1 = matched1(inlierIdx);
+in2 = matched2(inlierIdx);
+
+% Recover relative pose (R, t up to scale)
+[orient, loc] = relativeCameraPose(E, intrinsics, in1, in2);
+t_unit = loc(:) / (norm(loc) + 1e-12);
+
+disp("R = "); disp(orient);
+disp("t (unit norm, scale unknown) = "); disp(t_unit');
+
+fprintf("\n=== Direct (sparse KLT / photometric tracking) ===\n");
+tracker = vision.PointTracker("MaxBidirectionalError", 2.0);
+p0 = detectMinEigenFeatures(I1, "MinQuality", 0.01);
+p0 = p0.Location;
+
+initialize(tracker, p0, I1);
+[p1, valid] = tracker(I2);
+
+p0v = p0(valid,:);
+p1v = p1(valid,:);
+
+% Robust translation estimate via median flow
+flow = p1v - p0v;
+uv = median(flow, 1);
+fprintf("Estimated pixel translation (median flow): u=%.3f, v=%.3f\n", uv(1), uv(2));
+
+% Optional: estimate a similarity transform (rotation+translation) in the image plane
+if size(p0v,1) &gt;= 20
+    tform = estimateGeometricTransform2D(p0v, p1v, "similarity", ...
+        "MaxNumTrials", 2000, "Confidence", 99.0);
+    disp("Estimated 2D similarity transform (image plane):");
+    disp(tform.A);
+end
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation (Wolfram Language)</h2>
+    <div class="down-content">
+      <p><strong>File:</strong> Chapter13_Lesson2.nb</p>
+      <p>
+        The notebook below demonstrates image alignment in two modes: a
+        feature-driven transform estimate, and an intensity-driven transform
+        estimate. (Function availability depends on Mathematica version.)
+      </p>
+      <pre><code class="language-mathematica">(* Chapter13_Lesson2.nb *)
+Notebook[{
+  Cell["Autonomous Mobile Robots — Chapter 13, Lesson 2\nFeature-Based vs Direct Methods (Wolfram Language)", "Text"],
+  Cell[BoxData@ToBoxes[
+    Row[{
+      "(* User inputs *)\n",
+      "img1 = Import[\"frame1.png\"]; (* reference (t-1) *)\n",
+      "img2 = Import[\"frame2.png\"]; (* current (t) *)\n\n",
+      "g1 = ColorConvert[img1, \"Grayscale\"]; g2 = ColorConvert[img2, \"Grayscale\"]; \n\n",
+      "(* Feature-based alignment (keypoints) *)\n",
+      "(* Many WL versions support FindGeometricTransform with Method -&gt; \"Feature\" *)\n",
+      "tfFeature = Quiet@FindGeometricTransform[g2, g1, TransformationClass -&gt; \"Similarity\", Method -&gt; \"Feature\"];\n",
+      "Print[\"Feature-based transform:\"]; Print[tfFeature];\n\n",
+      "(* Direct (intensity-based) alignment *)\n",
+      "tfIntensity = Quiet@FindGeometricTransform[g2, g1, TransformationClass -&gt; \"Translation\", Method -&gt; \"Intensity\"];\n",
+      "Print[\"Direct (intensity) transform:\"]; Print[tfIntensity];\n\n",
+      "(* Visual check: overlay after alignment *)\n",
+      "g2a = ImageTransformation[g2, First[tfIntensity]];\n",
+      "Show[ImageAdd[ImageAdjust[g1, {0,1}], Colorize[ImageAdjust[g2a, {0,1}], ColorFunction -&gt; \"SolarColors\"]], ImageSize -&gt; Large]\n"
+    }]
+  ], "Input"]
+},
+WindowSize -&gt; {1000, 700},
+WindowTitle -&gt; "Chapter13 Lesson2"
+]
+</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Direct Translation Update):</strong>
+        Consider translation-only direct alignment:
+        <strong> \( r_i(u,v)=I_t(x_i+u,y_i+v)-I_{t-1}(x_i,y_i) \):</strong>
+        for pixels <strong>\( (x_i,y_i) \)</strong>. Derive the Gauss–Newton
+        update for <strong>\( (u,v) \)</strong> assuming a first-order Taylor
+        approximation of <strong>\( I_t \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Taylor expand around current <strong>\( (u_0,v_0) \)</strong>:
+        <strong>
+          \( I_t(x_i+u_0+\delta u, y_i+v_0+\delta v) \approx
+          I_t(\omega_i)+\nabla I_t(\omega_i)^\top[\delta u,\delta v]^\top
+          \):</strong
+        >
+        where <strong>\( \omega_i=(x_i+u_0,y_i+v_0) \)</strong>. Hence:
+        <strong>
+          \( r_i(u_0+\delta u,v_0+\delta v)\approx
+          r_i(u_0,v_0)+[I_x(\omega_i)\;\; I_y(\omega_i)]\begin{bmatrix}\delta
+          u\\\delta v\end{bmatrix} \):</strong
+        >
+        Stack all residuals:
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{r} \approx \mathbf{r}_0 + \mathbf{J}\delta,\quad
+        \mathbf{J}_i=\begin{bmatrix}I_x(\omega_i) &
+        I_y(\omega_i)\end{bmatrix},\quad \delta=\begin{bmatrix}\delta u\\\delta
+        v\end{bmatrix} \]
+      </h4>
+      <p>
+        Minimizing
+        <strong>\( \lVert \mathbf{r}_0 + \mathbf{J}\delta\rVert_2^2 \)</strong>
+        yields:
+      </p>
+      <h4 class="mathJax">
+        \[ (\mathbf{J}^\top\mathbf{J})\delta = -\mathbf{J}^\top\mathbf{r}_0,
+        \qquad \begin{bmatrix}u\\v\end{bmatrix} \leftarrow
+        \begin{bmatrix}u\\v\end{bmatrix} + \delta \]
+      </h4>
+
+      <p>
+        <strong>Problem 2 (Reprojection Normal Equations):</strong>
+        For feature-based pose estimation with residuals
+        <strong>
+          \(
+          \mathbf{r}_j(\mathbf{T})=\mathbf{u}'_j-\pi(\mathbf{K}(\mathbf{R}\mathbf{P}_j+\mathbf{t}))
+          \):</strong
+        >
+        show that Gauss–Newton leads to normal equations
+        <strong>
+          \( (\mathbf{J}^\top\mathbf{J})\delta = -\mathbf{J}^\top\mathbf{r}
+          \):</strong
+        >
+        after first-order linearization.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Linearize the stacked residual vector around current estimate:
+        <strong>
+          \( \mathbf{r}(\boldsymbol{\theta}_0+\delta)\approx
+          \mathbf{r}(\boldsymbol{\theta}_0)+\mathbf{J}\delta \):</strong
+        >
+        where <strong>\( \boldsymbol{\theta} \)</strong> parameterizes the pose.
+        Minimizing the squared norm gives the least-squares optimality
+        condition:
+      </p>
+      <h4 class="mathJax">
+        \[ 0 = \frac{\partial}{\partial \delta} \left\lVert \mathbf{r}_0 +
+        \mathbf{J}\delta \right\rVert_2^2 =
+        2\mathbf{J}^\top(\mathbf{r}_0+\mathbf{J}\delta) \Rightarrow
+        (\mathbf{J}^\top\mathbf{J})\delta = -\mathbf{J}^\top\mathbf{r}_0 \]
+      </h4>
+
+      <p>
+        <strong>Problem 3 (Affine Brightness Compensation):</strong>
+        Suppose direct residual uses affine brightness:
+        <strong> \( r_i = I_t(\omega_i) - (a I_{t-1}(p_i) + b) \):</strong>
+        where <strong>\( a,b \)</strong> are unknown. Holding pose fixed, derive
+        the least-squares solution for <strong>\( a,b \)</strong>.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        For fixed warp, define scalars <strong>\( y_i=I_t(\omega_i) \)</strong>,
+        <strong>\( x_i=I_{t-1}(p_i) \)</strong>. Then
+        <strong>\( r_i = y_i - (a x_i + b) \)</strong>. Minimize:
+      </p>
+      <h4 class="mathJax">\[ \min_{a,b}\sum_{i=1}^M (y_i - a x_i - b)^2 \]</h4>
+      <p>
+        This is linear regression with design matrix
+        <strong
+          >\( \mathbf{A}=\begin{bmatrix}x_1 & 1\\ \vdots & \vdots\\ x_M &
+          1\end{bmatrix} \)</strong
+        >
+        and vector <strong>\( \mathbf{y}=[y_1,\dots,y_M]^\top \)</strong>. The
+        normal equations give:
+      </p>
+      <h4 class="mathJax">
+        \[ \begin{bmatrix}a\\b\end{bmatrix} =
+        (\mathbf{A}^\top\mathbf{A})^{-1}\mathbf{A}^\top\mathbf{y} \]
+      </h4>
+
+      <p>
+        <strong>Problem 4 (Huber Robustification as Weighted LS):</strong>
+        Using Huber loss
+        <strong> \( \rho(r)=\tfrac{1}{2}r^2 \)</strong> for
+        <strong>\( |r|\le\delta \)</strong> and
+        <strong> \( \rho(r)=\delta(|r|-\tfrac{1}{2}\delta) \)</strong>
+        otherwise, show that IRLS weight is <strong> \( w(r)=1 \)</strong> for
+        small residuals and <strong> \( w(r)=\delta/|r| \)</strong> for large
+        residuals.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        For IRLS, weights are <strong>\( w(r)=\psi(r)/r \)</strong> with
+        <strong>\( \psi=\rho'(r) \)</strong>. For Huber:
+        <strong> \( \psi(r)=r \)</strong> if
+        <strong>\( |r|\le\delta \)</strong>, and
+        <strong>\( \psi(r)=\delta\,\operatorname{sign}(r) \)</strong> if
+        <strong>\( |r|&gt;\delta \)</strong>. Therefore:
+        <strong> \( w(r)=1 \)</strong> if <strong>\( |r|\le\delta \)</strong>,
+        and <strong> \( w(r)=\delta/|r| \)</strong> if
+        <strong>\( |r|&gt;\delta \)</strong>.
+      </p>
+
+      <p>
+        <strong>Problem 5 (When Direct Fails):</strong>
+        Consider the normal matrix for translation-only direct alignment:
+        <strong>
+          \( \mathbf{H}=\sum_i \nabla I(\omega_i)\nabla I(\omega_i)^\top
+          \):</strong
+        >
+        show that if gradients are all collinear,
+        <strong>\( \mathbf{H} \)</strong> is singular (not invertible), and
+        interpret this geometrically.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        If all gradients are collinear, there exists a unit vector
+        <strong>\( \mathbf{g} \)</strong> and scalars
+        <strong>\( \alpha_i \)</strong> such that
+        <strong> \( \nabla I(\omega_i)=\alpha_i\mathbf{g} \):</strong>
+        then
+      </p>
+      <h4 class="mathJax">
+        \[ \mathbf{H}=\sum_i \alpha_i^2 \mathbf{g}\mathbf{g}^\top = \left(\sum_i
+        \alpha_i^2\right)\mathbf{g}\mathbf{g}^\top \]
+      </h4>
+      <p>
+        The matrix <strong>\( \mathbf{g}\mathbf{g}^\top \)</strong> has rank 1
+        in 2D, so <strong>\( \mathbf{H} \)</strong> has rank 1 and is singular.
+        Geometrically, intensity changes only along the gradient direction;
+        motion orthogonal to that direction produces near-identical intensities,
+        so translation is not observable in that direction (the classic aperture
+        problem).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        Feature-based methods transform images into sparse geometric
+        measurements and estimate motion by minimizing reprojection error,
+        typically with strong outlier rejection (RANSAC) and descriptor
+        matching. Direct methods treat intensities as measurements and estimate
+        motion by minimizing photometric error, relying on image gradients,
+        warping, and robust weighting. Both reduce to the same Gauss–Newton/IRLS
+        normal equations, differing mainly in how residuals and Jacobians are
+        constructed. For AMRs, the best choice depends on texture, blur,
+        lighting variability, compute constraints, and the amount of dynamic
+        content.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Journal-Style) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Lowe, D.G. (2004). Distinctive image features from scale-invariant
+        keypoints.
+        <em>International Journal of Computer Vision</em>, 60(2), 91–110.
+      </li>
+      <li>
+        Baker, S., &amp; Matthews, I. (2004). Lucas-Kanade 20 years on: A
+        unifying framework.
+        <em>International Journal of Computer Vision</em>, 56(3), 221–255.
+      </li>
+      <li>
+        Mur-Artal, R., &amp; Tardós, J.D. (2017). ORB-SLAM2: An open-source SLAM
+        system for monocular, stereo, and RGB-D cameras.
+        <em>IEEE Transactions on Robotics</em>, 33(5), 1255–1262.
+      </li>
+      <li>
+        Engel, J., Koltun, V., &amp; Cremers, D. (2018). Direct Sparse Odometry.
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        40(3), 611–625.
+      </li>
+      <li>
+        Grossberg, M.D., &amp; Nayar, S.K. (2003). Determining the camera
+        response from images: What is knowable?
+        <em>IEEE Transactions on Pattern Analysis and Machine Intelligence</em>,
+        25(11), 1455–1467.
+      </li>
+      <li>
+        Huber, P.J. (1964). Robust estimation of a location parameter.
+        <em>Annals of Mathematical Statistics</em>, 35(1), 73–101.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter13/Lesson1.html">
+          Lesson 1: Visual Odometry for Mobile Robots
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter13/Lesson3.html">
+          Lesson 3: Visual–Inertial Fusion Pipelines
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="active-lesson" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

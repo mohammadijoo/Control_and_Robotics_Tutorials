@@ -1,0 +1,2257 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 2: Graph Search for High-DOF Robots - Lesson 3: Lattice Planners and Motion Primitives | Advanced Robotics</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+
+
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 2: Graph Search for High-DOF Robots</h1>
+    <h3><strong>Lesson 3: Lattice Planners and Motion Primitives</strong></h3>
+    <p>
+      This lesson develops <em>state lattices</em> and <em>motion primitives</em> as
+      a way to embed the continuous kinematics and simple dynamics of high-DOF robots
+      into graph search. We formalize lattices as structured graphs in configuration or
+      state space, derive motion primitives from the underlying system dynamics, and
+      analyze resolution completeness and suboptimality. A substantial portion of the
+      lesson is devoted to implementable algorithms in Python, C++, Java, MATLAB/Simulink,
+      and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Motivation and Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Motivation and Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In previous lessons we treated planning as graph search over an abstract discrete
+        state space with edges representing feasible transitions and costs.
+        For high-DOF robots with nonholonomic or kinodynamic constraints, however,
+        arbitrary edges are not allowed: motions must be dynamically feasible
+        trajectories of the underlying system
+        <strong>\( \dot{\mathbf{x}} = f(\mathbf{x}, \mathbf{u}) \)</strong>.
+      </p>
+      <p>
+        <strong>State lattices</strong> address this by imposing a regular structure on
+        the discrete state space (like a grid in configuration/state space) and
+        by using <strong>motion primitives</strong> as edges. Each motion primitive is a
+        short, pre-computed, dynamically feasible trajectory that can be reused from
+        many lattice states by exploiting symmetry (e.g. translation invariance in
+        workspace).
+      </p>
+      <p>
+        Formally, let the continuous state space be
+        <strong>\( X \subset \mathbb{R}^n \)</strong> or a manifold such as
+        <strong>\( \mathrm{SE}(2) \)</strong>. A state lattice is a directed graph
+        <strong>\( \mathcal{L} = (V, E) \)</strong> with
+        <strong>\( V \subset X \)</strong> arranged in a regular pattern and
+        each edge <strong>\( e = (v_i, v_j) \in E \)</strong> corresponding to a
+        feasible trajectory segment of the robot.
+      </p>
+      <p>
+        A typical pipeline for lattice planning is:
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Continuous model: x_dot = f(x,u)"] --> B["Design discrete state set (lattice)"]
+  B --> C["Synthesize motion primitives from dynamics"]
+  C --> D["Instantiate lattice graph (states + edges)"]
+  D --> E["Run graph search (Dijkstra / A*)"]
+  E --> F["Concatenate primitives to trajectory"]
+  F --> G["Send reference trajectory to low-level controller"]
+        </pre>
+      </div>
+      <p>
+        The key questions we study are:
+      </p>
+      <ul>
+        <li>How to construct a lattice in configuration or state space?</li>
+        <li>How to design dynamically feasible motion primitives?</li>
+        <li>What completeness or optimality guarantees can we give with finite resolution?</li>
+        <li>How to implement lattice planners efficiently for high-DOF robots?</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Formal Definition of a State Lattice -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Formal Definition of a State Lattice</h2>
+    <div class="down-content">
+      <p>
+        Let the state space be a smooth manifold
+        <strong>\( X \)</strong> (for example, configuration space or
+        state space including velocities). A state lattice is defined by:
+      </p>
+      <ul>
+        <li>
+          A <em>discrete state set</em>
+          <strong>\( V = \{ \mathbf{x}_k \}_{k=1}^N \subset X \)</strong>, obtained
+          by a regular discretization in some coordinate chart
+          (e.g., uniform grid in <strong>\( x,y,\theta \)</strong>).
+        </li>
+        <li>
+          A finite set of <em>control templates</em>
+          <strong>\( \mathcal{U}_p = \{u^1(\cdot),\dots,u^m(\cdot)\} \)</strong> on a
+          fixed horizon <strong>\( [0,T_p] \)</strong>.
+        </li>
+        <li>
+          A <em>transition rule</em> that integrates
+          <strong>\( \dot{\mathbf{x}} = f(\mathbf{x},\mathbf{u}(t)) \)</strong> from
+          each vertex <strong>\( \mathbf{x}_k \)</strong> with each primitive
+          <strong>\( u^j(\cdot) \)</strong> to generate an outgoing edge
+          <strong>\( e = (\mathbf{x}_k, \mathbf{x}_\ell) \)</strong>.
+        </li>
+      </ul>
+      <p>
+        More concretely, for each vertex <strong>\( \mathbf{x}_k \)</strong> and
+        primitive <strong>\( u^j(\cdot) \)</strong>, define the trajectory
+      </p>
+      <h4 class="mathJax">
+        \[
+        \mathbf{x}(t; \mathbf{x}_k, u^j) \text{ solves }
+        \dot{\mathbf{x}}(t) = f(\mathbf{x}(t), u^j(t)), \quad
+        \mathbf{x}(0) = \mathbf{x}_k, \quad t \in [0, T_p].
+        \]
+      </h4>
+      <p>
+        Then, if the end state <strong>\( \mathbf{x}(T_p; \mathbf{x}_k, u^j) \)</strong>
+        lies close to some lattice vertex <strong>\( \mathbf{x}_\ell \)</strong> (within
+        a snapping tolerance), we create a directed edge
+        <strong>\( e = (\mathbf{x}_k, \mathbf{x}_\ell) \)</strong> with cost
+      </p>
+      <h4 class="mathJax">
+        \[
+        c(e) = \int_0^{T_p} \ell(\mathbf{x}(t), u^j(t)) \, dt,
+        \]
+      </h4>
+      <p>
+        where <strong>\( \ell \)</strong> is a running cost, often simply
+        path length or time. The graph
+        <strong>\( \mathcal{L} = (V,E) \)</strong> thus encodes both
+        geometry and dynamics.
+      </p>
+      <p>
+        Regularity of <strong>\( V \)</strong> (e.g., a grid in
+        <strong>\( x,y,\theta \)</strong>) implies that each vertex has the same
+        pattern of outgoing edges; this “shift-invariance” enables efficient
+        pre-computation and reuse of motion primitives.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Motion Primitives as Dynamically Feasible Local Plans -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Motion Primitives as Dynamically Feasible Local Plans</h2>
+    <div class="down-content">
+      <p>
+        Motion primitives are short trajectories that satisfy the robot’s
+        differential constraints and often bounds on control inputs. For a
+        car-like robot with wheelbase <strong>\( L \)</strong>, state
+        <strong>\( \mathbf{x} = (x,y,\theta) \)</strong>, forward speed
+        <strong>\( v \)</strong>, and steering angle
+        <strong>\( \phi \)</strong>, the kinematic model is
+      </p>
+      <h4 class="mathJax">
+        \[
+        \dot{x} = v \cos\theta, \quad
+        \dot{y} = v \sin\theta, \quad
+        \dot{\theta} = \frac{v}{L} \tan\phi.
+        \]
+      </h4>
+      <p>
+        A simple family of motion primitives fixes
+        <strong>\( v \)</strong> and <strong>\( \phi \)</strong> over a short time
+        window <strong>\( [0,T_p] \)</strong>. Integrating the dynamics yields
+        explicit formulas:
+      </p>
+      <ul>
+        <li>
+          For <strong>\( \phi = 0 \)</strong> (straight motion):
+          <h4 class="mathJax">
+            \[
+            x(T_p) = x(0) + v T_p \cos\theta(0), \quad
+            y(T_p) = y(0) + v T_p \sin\theta(0), \quad
+            \theta(T_p) = \theta(0).
+            \]
+          </h4>
+        </li>
+        <li>
+          For <strong>\( \phi \neq 0 \)</strong> (constant curvature):
+          let <strong>\( \kappa = \frac{\tan\phi}{L} \)</strong> be curvature. Then
+          <h4 class="mathJax">
+            \[
+            \theta(T_p) = \theta(0) + v \kappa T_p, \quad
+            x(T_p) = x(0) + \frac{1}{\kappa}\big(\sin(\theta(T_p)) - \sin(\theta(0))\big),
+            \]
+          </h4>
+          <h4 class="mathJax">
+            \[
+            y(T_p) = y(0) - \frac{1}{\kappa}\big(\cos(\theta(T_p)) - \cos(\theta(0))\big).
+            \]
+          </h4>
+        </li>
+      </ul>
+      <p>
+        Thus each primitive is parameterized by a choice of discrete curvature
+        <strong>\( \kappa_j \)</strong> (or steering angle
+        <strong>\( \phi_j \)</strong>) and time horizon
+        <strong>\( T_p \)</strong>. By discretizing these parameters, we obtain a
+        finite set of primitives that can be reused from any lattice pose
+        <strong>\( (x_i,y_i,\theta_i) \)</strong>.
+      </p>
+      <p>
+        In higher-DOF manipulators, the state lattice is more naturally defined in
+        joint space, and motion primitives may be constant-velocity or
+        spline-based joint motions respecting velocity/acceleration bounds.
+        The basic idea is the same: precompute dynamically feasible short motions
+        with controllable cost.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Lattice Construction for a SE(2) Car-Like Robot -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Lattice Construction for a \( \mathrm{SE}(2) \) Car-Like Robot</h2>
+    <div class="down-content">
+      <p>
+        Consider a planar car-like robot with pose
+        <strong>\( \mathbf{x} = (x,y,\theta) \)</strong>. A common lattice
+        construction is:
+      </p>
+      <ul>
+        <li>
+          Discretize position with grid steps
+          <strong>\( \Delta x, \Delta y \)</strong>.
+        </li>
+        <li>
+          Discretize orientation into
+          <strong>\( N_\theta \)</strong> equally spaced headings:
+          <h4 class="mathJax">
+            \[
+            \theta_k = \frac{2\pi k}{N_\theta}, \quad k = 0,\dots,N_\theta-1.
+            \]
+          </h4>
+        </li>
+      </ul>
+      <p>
+        The lattice vertices are then
+        <h4 class="mathJax">
+          \[
+          V = \left\{ (i\Delta x, j\Delta y, \theta_k) \;\middle|\;
+          i,j \in \mathbb{Z}, \; k \in \{0,\dots,N_\theta-1\} \right\}.
+          \]
+        </h4>
+      </p>
+      <p>
+        For each orientation index <strong>\( k \)</strong> we attach a set of
+        <em>reference primitives</em> (defined at the origin with heading zero),
+        then transform them by rotation and translation to obtain outgoing
+        transitions from any lattice pose. This exploits the symmetry of
+        the kinematic model under rigid motions.
+      </p>
+      <p>
+        Let a reference primitive start at <strong>\( (0,0,0) \)</strong> and end
+        at <strong>\( (\bar{x},\bar{y},\bar{\theta}) \)</strong> after integrating
+        the dynamics for <strong>\( T_p \)</strong>. From a generic state
+        <strong>\( (x,y,\theta_k) \)</strong>, the corresponding primitive’s end
+        pose is
+      </p>
+      <h4 class="mathJax">
+        \[
+        \begin{aligned}
+        x' &= x + \cos\theta_k \,\bar{x} - \sin\theta_k \,\bar{y}, \\
+        y' &= y + \sin\theta_k \,\bar{x} + \cos\theta_k \,\bar{y}, \\
+        \theta' &= \theta_k + \bar{\theta} \pmod{2\pi}.
+        \end{aligned}
+        \]
+      </h4>
+      <p>
+        Finally, <strong>\( (x',y',\theta') \)</strong> is snapped to the nearest
+        lattice vertex <strong>\( (i'\Delta x, j'\Delta y, \theta_{k'}) \)</strong>.
+        Collision checking for the primitive is done by sampling intermediate
+        points along the trajectory and verifying that the robot’s footprint does
+        not intersect configuration-space obstacles (which students saw in
+        Chapter 1).
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Search on Lattices and Heuristic Consistency -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Search on Lattices and Heuristic Consistency</h2>
+    <div class="down-content">
+      <p>
+        Once the lattice graph <strong>\( \mathcal{L} = (V,E) \)</strong> is
+        instantiated (or lazily generated during search), we can run standard
+        algorithms such as Dijkstra or A*. From Lesson 2, recall that a heuristic
+        <strong>\( h \)</strong> is <em>admissible</em> if it never overestimates
+        the true cost-to-go and <em>consistent</em> if it satisfies the triangle
+        inequality relative to edge costs.
+      </p>
+      <p>
+        A simple admissible heuristic for a car-like lattice with cost equal to
+        Euclidean path length is the Euclidean distance in the workspace
+        (ignoring heading):
+      </p>
+      <h4 class="mathJax">
+        \[
+        h((x,y,\theta), (x_g,y_g,\theta_g)) =
+        \sqrt{(x - x_g)^2 + (y - y_g)^2}.
+        \]
+      </h4>
+      <p>
+        If each primitive has cost at least the Euclidean distance between its
+        endpoints (for instance, if we use arc length of the trajectory as cost),
+        then this heuristic is admissible and, in fact, consistent:
+      </p>
+      <h4 class="mathJax">
+        \[
+        h(v) \leq c(v,v') + h(v') \quad \text{for all } (v,v') \in E.
+        \]
+      </h4>
+      <p>
+        Hence A* on the lattice yields an optimal path in the discrete graph,
+        which corresponds to a sequence of dynamically feasible primitives in
+        continuous space.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Resolution Completeness and Suboptimality -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Resolution Completeness and Suboptimality Guarantees</h2>
+    <div class="down-content">
+      <p>
+        Because lattices discretize both state and controls (via motion
+        primitives), they cannot be complete for the continuous planning
+        problem. Instead, they often enjoy <em>resolution completeness</em>:
+      </p>
+      <p>
+        <strong>Definition (Resolution Completeness).</strong>
+        A lattice planner is resolution-complete if there exists a resolution
+        parameter <strong>\( \delta &gt; 0 \)</strong> such that, whenever there
+        exists a feasible continuous trajectory with clearance
+        <strong>\( &gt; \delta \)</strong> from obstacles, the planner finds a
+        solution when the lattice spacing and primitive lengths are sufficiently
+        small (bounded by a function of <strong>\( \delta \)</strong>).
+      </p>
+      <p>
+        Under mild assumptions on <strong>\( f(\mathbf{x},\mathbf{u}) \)</strong>
+        (Lipschitz continuity) and controllability, one can show:
+      </p>
+      <ul>
+        <li>
+          For sufficiently small spatial and angular discretization and a rich
+          enough set of motion primitives, any feasible trajectory can be
+          approximated by concatenating lattice primitives.
+        </li>
+        <li>
+          The cost of the lattice plan differs from the continuous optimum by
+          at most <strong>\( \varepsilon(\delta) \)</strong>, where
+          <strong>\( \varepsilon(\delta) \to 0 \)</strong> as
+          <strong>\( \delta \to 0 \)</strong>.
+        </li>
+      </ul>
+      <p>
+        A standard proof sketch partitions an optimal continuous trajectory into
+        short segments of bounded length (depending on the discretization). Each
+        segment is approximated by a primitive sequence starting and ending near
+        lattice vertices, and Lipschitz continuity of the dynamics and running
+        cost bounds the approximation error.
+      </p>
+      <p>
+        In practice, the resolution is chosen to balance accuracy and
+        computational cost: the number of vertices scales roughly as
+        <strong>\( O\big((1/\Delta x)(1/\Delta y)(1/\Delta\theta)\big) \)</strong>
+        in a planar lattice, and the branching factor is the number of motion
+        primitives.
+      </p>
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  R["Choose resolution (dx, dy, dth)"] --> L["Instantiate lattice (size grows as 1/(dx dy dth))"]
+  L --> P["Search with A* using primitives"]
+  P --> Q["Solution quality: cost gap epsilon(delta)"]
+  Q --> T["Trade-off: finer resolution vs runtime"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Python Implementation of a Simple SE(2) Lattice Planner -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. Python Implementation of a Simple \( \mathrm{SE}(2) \) Lattice Planner</h2>
+    <div class="down-content">
+      <p>
+        We implement a small-footprint lattice planner for a car-like robot in
+        Python using A*. For simplicity, we work in a bounded grid and discretize
+        orientation into a small number of headings. We assume a binary occupancy
+        grid for collision checking.
+      </p>
+      <pre><code class="language-python">
+import heapq
+import math
+import numpy as np
+
+# Discretization parameters
+DX = 1.0
+DY = 1.0
+N_THETA = 16  # number of discrete headings
+DT = 1.0      # primitive duration
+V = 1.0       # forward speed
+L = 2.0       # wheelbase
+
+# Occupancy grid: 0 = free, 1 = obstacle
+# Here we just create a small empty grid as an example.
+NX, NY = 50, 30
+occ_grid = np.zeros((NX, NY), dtype=np.uint8)
+
+def in_bounds(ix, iy):
+    return 0 &lt;= ix &lt; NX and 0 &lt;= iy &lt; NY
+
+def is_free(ix, iy):
+    return in_bounds(ix, iy) and occ_grid[ix, iy] == 0
+
+def angle_index(theta):
+    """Map continuous angle to discrete index."""
+    theta = (theta + 2.0 * math.pi) % (2.0 * math.pi)
+    k = int(round(theta / (2.0 * math.pi) * N_THETA)) % N_THETA
+    return k
+
+def angle_from_index(k):
+    return 2.0 * math.pi * k / N_THETA
+
+# Precompute reference motion primitives at pose (0,0,0)
+STEER_ANGLES = [-0.4, 0.0, 0.4]  # radians, simple left/straight/right
+ref_primitives = []  # each entry: (dx, dy, dtheta, length)
+
+for phi in STEER_ANGLES:
+    kappa = math.tan(phi) / L  # curvature
+    if abs(kappa) &lt; 1e-6:
+        # straight-line primitive
+        dx = V * DT
+        dy = 0.0
+        dtheta = 0.0
+        length = V * DT
+    else:
+        # circular-arc primitive
+        dtheta = V * kappa * DT
+        th_end = dtheta  # from 0 to dtheta
+        dx = (1.0 / kappa) * math.sin(th_end)
+        dy = -(1.0 / kappa) * (math.cos(th_end) - 1.0)
+        length = abs(dtheta / kappa)
+    ref_primitives.append((dx, dy, dtheta, length))
+
+def successors(state):
+    """
+    state = (ix, iy, kth)
+    Returns list of (next_state, cost).
+    """
+    ix, iy, kth = state
+    theta = angle_from_index(kth)
+    succs = []
+    for dx_ref, dy_ref, dth_ref, length in ref_primitives:
+        # transform reference primitive to global frame
+        gx = ix * DX
+        gy = iy * DY
+        dx = math.cos(theta) * dx_ref - math.sin(theta) * dy_ref
+        dy = math.sin(theta) * dx_ref + math.cos(theta) * dy_ref
+        gx2 = gx + dx
+        gy2 = gy + dy
+        kth2 = angle_index(theta + dth_ref)
+        ix2 = int(round(gx2 / DX))
+        iy2 = int(round(gy2 / DY))
+
+        if not is_free(ix2, iy2):
+            continue
+
+        cost = length  # use arc length as cost
+        succs.append(((ix2, iy2, kth2), cost))
+    return succs
+
+def heuristic(state, goal_state):
+    ix, iy, _ = state
+    gx, gy, _ = goal_state
+    x = ix * DX
+    y = iy * DY
+    xg = gx * DX
+    yg = gy * DY
+    return math.hypot(x - xg, y - yg)
+
+def astar(start_state, goal_state):
+    """
+    A* search on the lattice.
+    state = (ix, iy, kth)
+    """
+    open_heap = []
+    g = {start_state: 0.0}
+    parent = {start_state: None}
+    f_start = heuristic(start_state, goal_state)
+    heapq.heappush(open_heap, (f_start, start_state))
+
+    closed = set()
+
+    while open_heap:
+        f_curr, curr = heapq.heappop(open_heap)
+        if curr in closed:
+            continue
+        closed.add(curr)
+
+        if (curr[0], curr[1]) == (goal_state[0], goal_state[1]):
+            # reached goal cell (ignoring exact orientation)
+            path = []
+            s = curr
+            while s is not None:
+                path.append(s)
+                s = parent[s]
+            path.reverse()
+            return path, g[curr]
+
+        for nbr, cost in successors(curr):
+            if nbr in closed:
+                continue
+            new_g = g[curr] + cost
+            if new_g &lt; g.get(nbr, float("inf")):
+                g[nbr] = new_g
+                parent[nbr] = curr
+                f_nbr = new_g + heuristic(nbr, goal_state)
+                heapq.heappush(open_heap, (f_nbr, nbr))
+
+    return None, float("inf")
+
+# Example usage
+start = (2, 2, angle_index(0.0))
+goal = (40, 20, angle_index(0.0))
+path, cost = astar(start, goal)
+print("Path length:", len(path), "Total cost:", cost)
+      </code></pre>
+      <p>
+        This implementation demonstrates the basic pattern: local motion primitives
+        provide successors, a geometric heuristic guides A*, and the result is a
+        sequence of states, each linked by a dynamically feasible primitive.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: C++ Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. C++ Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        The same logic can be implemented efficiently in C++ using the STL
+        <code>priority_queue</code>. Below is a condensed version focusing on
+        data structures and the A* loop.
+      </p>
+      <pre><code class="language-cpp">
+#include &lt;cmath&gt;
+#include &lt;queue&gt;
+#include &lt;vector&gt;
+#include &lt;limits&gt;
+#include &lt;unordered_map&gt;
+#include &lt;tuple&gt;
+
+struct State {
+  int ix, iy, kth;
+};
+
+struct Node {
+  State s;
+  double g;
+  double f;
+};
+
+struct NodeCmp {
+  bool operator()(const Node&amp; a, const Node&amp; b) const {
+    return a.f &gt; b.f; // min-heap via &gt;
+  }
+};
+
+struct StateHash {
+  std::size_t operator()(State const&amp; s) const noexcept {
+    return ((s.ix * 73856093) ^ (s.iy * 19349663) ^ (s.kth * 83492791));
+  }
+};
+
+struct StateEq {
+  bool operator()(State const&amp; a, State const&amp; b) const noexcept {
+    return a.ix == b.ix &amp;&amp; a.iy == b.iy &amp;&amp; a.kth == b.kth;
+  }
+};
+
+static const int NX = 50;
+static const int NY = 30;
+static const int N_THETA = 16;
+static const double DX = 1.0;
+static const double DY = 1.0;
+static const double L = 2.0;
+static const double V = 1.0;
+static const double DT = 1.0;
+
+// A tiny occupancy grid for demo
+int occ_grid[NX][NY] = {0};
+
+inline bool in_bounds(int ix, int iy) {
+  return 0 &lt;= ix &amp;&amp; ix &lt; NX &amp;&amp; 0 &lt;= iy &amp;&amp; iy &lt; NY;
+}
+
+inline bool is_free(int ix, int iy) {
+  return in_bounds(ix, iy) &amp;&amp; occ_grid[ix][iy] == 0;
+}
+
+int angle_index(double theta) {
+  double two_pi = 2.0 * M_PI;
+  theta = fmod(theta + two_pi, two_pi);
+  int k = static_cast&lt;int&gt;(std::round(theta / two_pi * N_THETA)) % N_THETA;
+  return k;
+}
+
+double angle_from_index(int k) {
+  return 2.0 * M_PI * k / N_THETA;
+}
+
+struct Primitive {
+  double dx_ref;
+  double dy_ref;
+  double dth_ref;
+  double length;
+};
+
+std::vector&lt;Primitive&gt; make_primitives() {
+  std::vector&lt;Primitive&gt; prims;
+  double steer[3] = {-0.4, 0.0, 0.4};
+  for (int i = 0; i &lt; 3; ++i) {
+    double phi = steer[i];
+    double kappa = std::tan(phi) / L;
+    Primitive p;
+    if (std::fabs(kappa) &lt; 1e-6) {
+      p.dx_ref = V * DT;
+      p.dy_ref = 0.0;
+      p.dth_ref = 0.0;
+      p.length = V * DT;
+    } else {
+      p.dth_ref = V * kappa * DT;
+      double th_end = p.dth_ref;
+      p.dx_ref = (1.0 / kappa) * std::sin(th_end);
+      p.dy_ref = -(1.0 / kappa) * (std::cos(th_end) - 1.0);
+      p.length = std::fabs(p.dth_ref / kappa);
+    }
+    prims.push_back(p);
+  }
+  return prims;
+}
+
+double heuristic(State const&amp; s, State const&amp; goal) {
+  double x = s.ix * DX;
+  double y = s.iy * DY;
+  double xg = goal.ix * DX;
+  double yg = goal.iy * DY;
+  return std::hypot(x - xg, y - yg);
+}
+
+int main() {
+  std::vector&lt;Primitive&gt; prims = make_primitives();
+
+  State start{2, 2, angle_index(0.0)};
+  State goal{40, 20, angle_index(0.0)};
+
+  std::priority_queue&lt;Node, std::vector&lt;Node&gt;, NodeCmp&gt; open;
+  std::unordered_map&lt;State, double, StateHash, StateEq&gt; g;
+  std::unordered_map&lt;State, State, StateHash, StateEq&gt; parent;
+
+  g[start] = 0.0;
+  parent[start] = start;
+  open.push(Node{start, 0.0, heuristic(start, goal)});
+
+  std::unordered_map&lt;State, bool, StateHash, StateEq&gt; closed;
+
+  while (!open.empty()) {
+    Node cur = open.top();
+    open.pop();
+
+    if (closed[cur.s]) continue;
+    closed[cur.s] = true;
+
+    if (cur.s.ix == goal.ix &amp;&amp; cur.s.iy == goal.iy) {
+      // Reconstruct and output path if desired
+      break;
+    }
+
+    double theta = angle_from_index(cur.s.kth);
+    for (auto const&amp; p : prims) {
+      double gx = cur.s.ix * DX;
+      double gy = cur.s.iy * DY;
+      double dx = std::cos(theta) * p.dx_ref - std::sin(theta) * p.dy_ref;
+      double dy = std::sin(theta) * p.dx_ref + std::cos(theta) * p.dy_ref;
+      double gx2 = gx + dx;
+      double gy2 = gy + dy;
+      double th2 = theta + p.dth_ref;
+
+      State s2;
+      s2.ix = static_cast&lt;int&gt;(std::round(gx2 / DX));
+      s2.iy = static_cast&lt;int&gt;(std::round(gy2 / DY));
+      s2.kth = angle_index(th2);
+
+      if (!is_free(s2.ix, s2.iy)) continue;
+
+      double new_g = g[cur.s] + p.length;
+      auto it = g.find(s2);
+      if (it == g.end() || new_g &lt; it-&gt;second) {
+        g[s2] = new_g;
+        parent[s2] = cur.s;
+        double f = new_g + heuristic(s2, goal);
+        open.push(Node{s2, new_g, f});
+      }
+    }
+  }
+
+  return 0;
+}
+      </code></pre>
+      <p>
+        This code omits explicit path reconstruction and collision sampling along
+        primitives, but it illustrates how the structured lattice and motion
+        primitives fit naturally into the A* framework.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Java Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. Java Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        In Java, we can encapsulate the lattice planner into a class with
+        an inner <code>Node</code> representing states and using a
+        <code>PriorityQueue</code> for the open set.
+      </p>
+      <pre><code class="language-java">
+import java.util.*;
+import static java.lang.Math.*;
+
+public class LatticePlanner {
+
+    static final int NX = 50, NY = 30, N_THETA = 16;
+    static final double DX = 1.0, DY = 1.0, L = 2.0, V = 1.0, DT = 1.0;
+
+    static int[][] occGrid = new int[NX][NY];
+
+    static class State {
+        int ix, iy, kth;
+        State(int ix, int iy, int kth) {
+            this.ix = ix; this.iy = iy; this.kth = kth;
+        }
+        @Override public boolean equals(Object o) {
+            if (!(o instanceof State)) return false;
+            State s = (State)o;
+            return ix == s.ix &amp;&amp; iy == s.iy &amp;&amp; kth == s.kth;
+        }
+        @Override public int hashCode() {
+            return ix * 73856093 ^ iy * 19349663 ^ kth * 83492791;
+        }
+    }
+
+    static class Node implements Comparable&lt;Node&gt; {
+        State s;
+        double g, f;
+        Node(State s, double g, double f) {
+            this.s = s; this.g = g; this.f = f;
+        }
+        public int compareTo(Node other) {
+            return Double.compare(this.f, other.f);
+        }
+    }
+
+    static class Primitive {
+        double dxRef, dyRef, dthRef, length;
+        Primitive(double dx, double dy, double dth, double len) {
+            dxRef = dx; dyRef = dy; dthRef = dth; length = len;
+        }
+    }
+
+    static boolean inBounds(int ix, int iy) {
+        return ix &gt;= 0 &amp;&amp; ix &lt; NX &amp;&amp; iy &gt;= 0 &amp;&amp; iy &lt; NY;
+    }
+
+    static boolean isFree(int ix, int iy) {
+        return inBounds(ix, iy) &amp;&amp; occGrid[ix][iy] == 0;
+    }
+
+    static int angleIndex(double theta) {
+        double twoPi = 2.0 * PI;
+        theta = (theta + twoPi) % twoPi;
+        int k = (int) Math.round(theta / twoPi * N_THETA) % N_THETA;
+        return k;
+    }
+
+    static double angleFromIndex(int k) {
+        return 2.0 * PI * k / N_THETA;
+    }
+
+    static List&lt;Primitive&gt; makePrimitives() {
+        double[] steer = {-0.4, 0.0, 0.4};
+        List&lt;Primitive&gt; prims = new ArrayList&lt;&gt;();
+        for (double phi : steer) {
+            double kappa = Math.tan(phi) / L;
+            if (Math.abs(kappa) &lt; 1e-6) {
+                prims.add(new Primitive(V * DT, 0.0, 0.0, V * DT));
+            } else {
+                double dth = V * kappa * DT;
+                double thEnd = dth;
+                double dx = (1.0 / kappa) * Math.sin(thEnd);
+                double dy = -(1.0 / kappa) * (Math.cos(thEnd) - 1.0);
+                double length = Math.abs(dth / kappa);
+                prims.add(new Primitive(dx, dy, dth, length));
+            }
+        }
+        return prims;
+    }
+
+    static double heuristic(State s, State goal) {
+        double x = s.ix * DX;
+        double y = s.iy * DY;
+        double xg = goal.ix * DX;
+        double yg = goal.iy * DY;
+        return Math.hypot(x - xg, y - yg);
+    }
+
+    public static List&lt;State&gt; astar(State start, State goal) {
+        List&lt;Primitive&gt; prims = makePrimitives();
+        PriorityQueue&lt;Node&gt; open = new PriorityQueue&lt;&gt;();
+        Map&lt;State, Double&gt; g = new HashMap&lt;&gt;();
+        Map&lt;State, State&gt; parent = new HashMap&lt;&gt;();
+        Set&lt;State&gt; closed = new HashSet&lt;&gt;();
+
+        g.put(start, 0.0);
+        parent.put(start, null);
+        open.add(new Node(start, 0.0, heuristic(start, goal)));
+
+        while (!open.isEmpty()) {
+            Node cur = open.poll();
+            if (closed.contains(cur.s)) continue;
+            closed.add(cur.s);
+
+            if (cur.s.ix == goal.ix &amp;&amp; cur.s.iy == goal.iy) {
+                List&lt;State&gt; path = new ArrayList&lt;&gt;();
+                State s = cur.s;
+                while (s != null) {
+                    path.add(s);
+                    s = parent.get(s);
+                }
+                Collections.reverse(path);
+                return path;
+            }
+
+            double theta = angleFromIndex(cur.s.kth);
+            for (Primitive p : prims) {
+                double gx = cur.s.ix * DX;
+                double gy = cur.s.iy * DY;
+                double dx = Math.cos(theta) * p.dxRef - Math.sin(theta) * p.dyRef;
+                double dy = Math.sin(theta) * p.dxRef + Math.cos(theta) * p.dyRef;
+                double gx2 = gx + dx;
+                double gy2 = gy + dy;
+                double th2 = theta + p.dthRef;
+
+                int ix2 = (int) Math.round(gx2 / DX);
+                int iy2 = (int) Math.round(gy2 / DY);
+                int kth2 = angleIndex(th2);
+                if (!isFree(ix2, iy2)) continue;
+
+                State s2 = new State(ix2, iy2, kth2);
+                double newG = g.get(cur.s) + p.length;
+                if (!g.containsKey(s2) || newG &lt; g.get(s2)) {
+                    g.put(s2, newG);
+                    parent.put(s2, cur.s);
+                    double f = newG + heuristic(s2, goal);
+                    open.add(new Node(s2, newG, f));
+                }
+            }
+        }
+        return null;
+    }
+
+    public static void main(String[] args) {
+        State start = new State(2, 2, angleIndex(0.0));
+        State goal = new State(40, 20, angleIndex(0.0));
+        List&lt;State&gt; path = astar(start, goal);
+        if (path != null) {
+            System.out.println("Found path of length " + path.size());
+        } else {
+            System.out.println("No path found.");
+        }
+    }
+}
+      </code></pre>
+      <p>
+        This Java code shows a direct translation of the lattice planning logic,
+        suitable for integration into larger robotics frameworks.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: MATLAB / Simulink Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. MATLAB / Simulink Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        MATLAB is frequently used in robotics for rapid prototyping. Below we show
+        a core MATLAB implementation of a lattice planner and outline how to
+        connect it to Simulink for executing the resulting trajectory.
+      </p>
+      <pre><code class="language-matlab">
+function demo_lattice_planner
+    % Grid parameters
+    DX = 1.0; DY = 1.0; N_THETA = 16;
+    NX = 50; NY = 30;
+    L = 2.0; V = 1.0; DT = 1.0;
+
+    occ = zeros(NX, NY);  % binary occupancy
+
+    start = [2, 2, angle_index(0.0, N_THETA)];
+    goal  = [40, 20, angle_index(0.0, N_THETA)];
+
+    prims = make_primitives(L, V, DT);
+
+    [path, cost] = astar_lattice(start, goal, prims, occ, DX, DY, N_THETA);
+    fprintf('Path length = %d, cost = %.3f\n', size(path,1), cost);
+
+    % To connect with Simulink:
+    % 1) Export the sequence of continuous poses for each primitive.
+    % 2) Use a 'From Workspace' block feeding a trajectory-following controller.
+
+end
+
+function kth = angle_index(theta, N_THETA)
+    theta = mod(theta + 2*pi, 2*pi);
+    kth = round(theta / (2*pi) * N_THETA);
+    kth = mod(kth, N_THETA);
+end
+
+function theta = angle_from_index(kth, N_THETA)
+    theta = 2*pi * kth / N_THETA;
+end
+
+function prims = make_primitives(L, V, DT)
+    steer = [-0.4, 0.0, 0.4];
+    prims = struct('dx_ref', {}, 'dy_ref', {}, 'dth_ref', {}, 'length', {});
+    for i = 1:numel(steer)
+        phi = steer(i);
+        kappa = tan(phi) / L;
+        if abs(kappa) &lt; 1e-6
+            dx = V * DT; dy = 0.0; dth = 0.0;
+            len = V * DT;
+        else
+            dth = V * kappa * DT;
+            thEnd = dth;
+            dx = (1.0 / kappa) * sin(thEnd);
+            dy = -(1.0 / kappa) * (cos(thEnd) - 1.0);
+            len = abs(dth / kappa);
+        end
+        prims(i).dx_ref = dx;
+        prims(i).dy_ref = dy;
+        prims(i).dth_ref = dth;
+        prims(i).length = len;
+    end
+end
+
+function [path, total_cost] = astar_lattice(start, goal, prims, occ, DX, DY, N_THETA)
+    NX = size(occ,1); NY = size(occ,2);
+
+    function b = is_free(ix, iy)
+        b = (ix &gt;= 1) &amp;&amp; (ix &lt;= NX) &amp;&amp; (iy &gt;= 1) &amp;&amp; (iy &lt;= NY) ...
+            &amp;&amp; (occ(ix,iy) == 0);
+    end
+
+    function h = heuristic(s)
+        x = s(1) * DX; y = s(2) * DY;
+        xg = goal(1) * DX; yg = goal(2) * DY;
+        h = hypot(x - xg, y - yg);
+    end
+
+    % open set: columns [ix, iy, kth, g, f]
+    open = [start, 0.0, heuristic(start)];
+    gmap = containers.Map();
+    parent = containers.Map('KeyType','char','ValueType','char');
+
+    key_start = key_of(start);
+    gmap(key_start) = 0.0;
+
+    closed = containers.Map('KeyType','char','ValueType','logical');
+
+    while ~isempty(open)
+        % pick node with smallest f
+        [~, idx] = min(open(:,5));
+        curr = open(idx, 1:3);
+        gcurr = open(idx, 4);
+        open(idx,:) = [];
+
+        kcurr = key_of(curr);
+        if isKey(closed, kcurr), continue; end
+        closed(kcurr) = true;
+
+        if curr(1) == goal(1) &amp;&amp; curr(2) == goal(2)
+            % reconstruct path
+            path = curr;
+            while ~strcmp(kcurr, key_start)
+                p = str2num(parent(kcurr)); %#ok&lt;ST2NM&gt;
+                path = [p; path]; %#ok&lt;AGROW&gt;
+                kcurr = key_of(p);
+            end
+            total_cost = gcurr;
+            return;
+        end
+
+        theta = angle_from_index(curr(3), N_THETA);
+        for i = 1:numel(prims)
+            p = prims(i);
+            gx = curr(1) * DX; gy = curr(2) * DY;
+            dx = cos(theta)*p.dx_ref - sin(theta)*p.dy_ref;
+            dy = sin(theta)*p.dx_ref + cos(theta)*p.dy_ref;
+            gx2 = gx + dx; gy2 = gy + dy;
+            th2 = theta + p.dth_ref;
+            ix2 = round(gx2 / DX);
+            iy2 = round(gy2 / DY);
+            kth2 = angle_index(th2, N_THETA);
+            if ~is_free(ix2, iy2), continue; end
+            s2 = [ix2, iy2, kth2];
+
+            key2 = key_of(s2);
+            new_g = gcurr + p.length;
+            if ~isKey(gmap, key2) || new_g &lt; gmap(key2)
+                gmap(key2) = new_g;
+                parent(key2) = kcurr;
+                f = new_g + heuristic(s2);
+                open = [open; s2, new_g, f]; %#ok&lt;AGROW&gt;
+            end
+        end
+    end
+
+    path = [];
+    total_cost = inf;
+end
+
+function k = key_of(s)
+    % string key for map
+    k = sprintf('%d,%d,%d', s(1), s(2), s(3));
+end
+      </code></pre>
+      <p>
+        In Simulink, one would typically:
+      </p>
+      <ol>
+        <li>Generate a time-parameterized trajectory from the sequence of lattice states.</li>
+        <li>Feed it to a trajectory-tracking controller in Simulink using a <code>From Workspace</code> block.</li>
+        <li>Use the car-like kinematic model as the plant for closed-loop simulation.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Wolfram Mathematica Implementation Sketch -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Wolfram Mathematica Implementation Sketch</h2>
+    <div class="down-content">
+      <p>
+        Mathematica is convenient for symbolic manipulation of motion primitives
+        and quick prototyping of planning algorithms using its graph library.
+      </p>
+      <pre><code class="language-mathematica">
+(* Discretization parameters *)
+dx = 1.0; dy = 1.0; nTheta = 16;
+v = 1.0; L = 2.0; dt = 1.0;
+
+angleIndex[theta_] := Module[{th = Mod[theta + 2. Pi, 2. Pi]},
+  Mod[Round[th/(2. Pi) nTheta], nTheta]
+];
+
+angleFromIndex[k_] := 2. Pi k/nTheta;
+
+(* Reference motion primitives *)
+steerAngles = {-0.4, 0., 0.4};
+
+makePrimitive[phi_] := Module[{kappa, dth, thEnd, dxRef, dyRef, len},
+  kappa = Tan[phi]/L;
+  If[Abs[kappa] &lt; 10^-6,
+    dxRef = v dt; dyRef = 0.; dth = 0.; len = v dt,
+    dth = v kappa dt;
+    thEnd = dth;
+    dxRef = (1./kappa) Sin[thEnd];
+    dyRef = -(1./kappa) (Cos[thEnd] - 1.);
+    len = Abs[dth/kappa];
+  ];
+  &lt;&lt;|"dxRef" -&gt; dxRef, "dyRef" -&gt; dyRef, "dthRef" -&gt; dth, "len" -&gt; len|&gt;&gt;
+];
+
+primitives = makePrimitive /@ steerAngles;
+
+(* Successor generation from state {ix, iy, kth} *)
+successors[{ix_, iy_, kth_}] := Module[
+  {theta, gx, gy, succs},
+  theta = angleFromIndex[kth];
+  gx = ix dx; gy = iy dy;
+  succs = Table[
+    With[{p = primitives[[i]]},
+      Module[{dxg, dyg, gx2, gy2, th2, ix2, iy2, kth2},
+        dxg = Cos[theta] p["dxRef"] - Sin[theta] p["dyRef"];
+        dyg = Sin[theta] p["dxRef"] + Cos[theta] p["dyRef"];
+        gx2 = gx + dxg; gy2 = gy + dyg;
+        th2 = theta + p["dthRef"];
+        ix2 = Round[gx2/dx];
+        iy2 = Round[gy2/dy];
+        kth2 = angleIndex[th2];
+        { {ix2, iy2, kth2}, p["len"] }
+      ]
+    ],
+    {i, Length[primitives]}
+  ];
+  succs
+];
+
+heuristic[{ix_, iy_, _}, {gx_, gy_, _}] :=
+  Module[{x, y, xg, yg},
+    x = ix dx; y = iy dy;
+    xg = gx dx; yg = gy dy;
+    Sqrt[(x - xg)^2 + (y - yg)^2]
+  ];
+
+(* A* implemented with a simple loop and Association-based priority queue. *)
+astar[start_, goal_] := Module[
+  {open, g, parent, closed, popMin, pushNode, kStart, path},
+  open = Association[];
+  g = Association[];
+  parent = Association[];
+  closed = Association[];
+
+  kStart = start;
+  g[kStart] = 0.;
+  parent[kStart] = None;
+  open[kStart] = heuristic[start, goal];
+
+  popMin[] := Module[{kmin},
+    If[Length[open] == 0, Return[None]];
+    kmin = First@First@SortBy[Normal[open], Last];
+    open = KeyDrop[open, kmin];
+    kmin
+  ];
+
+  pushNode[s_, f_] := (open[s] = f);
+
+  While[Length[open] &gt; 0,
+    Module[{cur = popMin[], gcurr, s, th, succ},
+      If[cur === None, Break[]];
+      If[KeyExistsQ[closed, cur], Continue[]];
+      closed[cur] = True;
+      If[cur[[1 ;; 2]] === goal[[1 ;; 2]],
+        (* reconstruct path *)
+        path = {cur};
+        s = cur;
+        While[parent[s] =!= None,
+          s = parent[s];
+          path = Prepend[path, s];
+        ];
+        Return[{path, g[cur]}];
+      ];
+      gcurr = g[cur];
+      succ = successors[cur];
+      Do[
+        Module[{s2 = succ[[i, 1]], cost = succ[[i, 2]], key2, newg, f},
+          key2 = s2;
+          newg = gcurr + cost;
+          If[!KeyExistsQ[g, key2] || newg &lt; g[key2],
+            g[key2] = newg;
+            parent[key2] = cur;
+            f = newg + heuristic[s2, goal];
+            pushNode[key2, f];
+          ];
+        ],
+        {i, Length[succ]}
+      ];
+    ];
+  ];
+  { {}, Infinity }
+];
+
+start = {2, 2, angleIndex[0., nTheta]};
+goal = {40, 20, angleIndex[0., nTheta]};
+{path, cost} = astar[start, goal];
+Print["Path length: ", Length[path], "  Cost: ", cost];
+      </code></pre>
+      <p>
+        Mathematica’s <code>Graph</code> functions can also be used by explicitly
+        constructing the lattice as a weighted graph and applying built-in
+        shortest path algorithms, but the explicit A* implementation above
+        mirrors the algorithms from previous lessons.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Constant-Curvature Primitive Derivation).</strong>
+        For the car-like robot model in Section 3 with constant speed
+        <strong>\( v \)</strong> and constant steering angle
+        <strong>\( \phi \)</strong>, derive the endpoint formulas for
+        <strong>\( x(T_p), y(T_p), \theta(T_p) \)</strong> starting from
+        <strong>\( (x(0), y(0), \theta(0)) \)</strong>.
+      </p>
+      <p><strong>Solution.</strong>
+        We have curvature <strong>\( \kappa = \frac{\tan\phi}{L} \)</strong>.
+        The heading evolves as
+      </p>
+      <h4 class="mathJax">
+        \[
+        \dot{\theta}(t) = v \kappa \;\Rightarrow\;
+        \theta(t) = \theta(0) + v\kappa t,
+        \]
+      </h4>
+      <p>
+        so <strong>\( \theta(T_p) = \theta(0) + v\kappa T_p \)</strong>.
+        For position:
+      </p>
+      <h4 class="mathJax">
+        \[
+        \dot{x}(t) = v\cos\theta(t), \quad
+        \dot{y}(t) = v\sin\theta(t).
+        \]
+      </h4>
+      <p>
+        Substitute <strong>\( \theta(t) = \theta(0) + v\kappa t \)</strong> and integrate:
+      </p>
+      <h4 class="mathJax">
+        \[
+        x(T_p) - x(0) = \int_0^{T_p} v\cos(\theta(0) + v\kappa t)\, dt
+        = \frac{1}{\kappa}\big(\sin(\theta(0) + v\kappa T_p) - \sin(\theta(0))\big),
+        \]
+      </h4>
+      <h4 class="mathJax">
+        \[
+        y(T_p) - y(0) = \int_0^{T_p} v\sin(\theta(0) + v\kappa t)\, dt
+        = -\frac{1}{\kappa}\big(\cos(\theta(0) + v\kappa T_p) - \cos(\theta(0))\big).
+        \]
+      </h4>
+      <p>
+        Thus:
+      </p>
+      <h4 class="mathJax">
+        \[
+        \begin{aligned}
+        x(T_p) &= x(0) + \frac{1}{\kappa}\big(\sin(\theta(0) + v\kappa T_p) - \sin(\theta(0))\big), \\
+        y(T_p) &= y(0) - \frac{1}{\kappa}\big(\cos(\theta(0) + v\kappa T_p) - \cos(\theta(0))\big), \\
+        \theta(T_p) &= \theta(0) + v\kappa T_p,
+        \end{aligned}
+        \]
+      </h4>
+      <p>
+        which matches the formulas used in the code implementations.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Admissibility of Euclidean Heuristic).</strong>
+        Assume each motion primitive in the lattice has cost equal to its
+        Euclidean length in the workspace, i.e.,
+        <strong>\( c(e) = \|\Delta(x,y)\|_2 \)</strong> for edge
+        <strong>\( e \)</strong>. Show that the heuristic
+        <strong>\( h(v) = \) Euclidean distance in <em>(x,y)</em> to the goal</strong>
+        is admissible and consistent for A* on the lattice.
+      </p>
+      <p><strong>Solution.</strong>
+        Denote by <strong>\( d^*(v) \)</strong> the optimal discrete path cost
+        from vertex <strong>\( v \)</strong> to the goal. Any path from
+        <strong>\( v \)</strong> to the goal is a sequence of edges whose
+        Euclidean displacements sum to a vector whose norm is at least the
+        straight-line distance from <strong>\( v \)</strong> to goal. Thus
+      </p>
+      <h4 class="mathJax">
+        \[
+        d^*(v) \geq \text{EuclideanDistance}(v, \text{goal}) = h(v),
+        \]
+      </h4>
+      <p>
+        so <strong>\( h \)</strong> is admissible. For consistency, take any
+        edge <strong>\( (v,v') \)</strong> with cost
+        <strong>\( c(v,v') = \|\Delta(x,y)\| \)</strong>. By the triangle
+        inequality for the Euclidean norm:
+      </p>
+      <h4 class="mathJax">
+        \[
+        h(v) \leq c(v,v') + h(v'),
+        \]
+      </h4>
+      <p>
+        because the straight-line segment from <strong>\( v \)</strong> to the
+        goal cannot be longer than the segment from <strong>\( v \)</strong> to
+        <strong>\( v' \)</strong> plus the segment from <strong>\( v' \)</strong>
+        to the goal. Hence <strong>\( h \)</strong> is consistent.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Resolution Completeness Sketch).</strong>
+        Suppose the system dynamics are Lipschitz in state and control, and
+        there exists a feasible continuous trajectory from start to goal with
+        clearance at least <strong>\( \delta &gt; 0 \)</strong> from obstacles.
+        Argue informally that a lattice planner with sufficiently fine
+        discretization in space and heading will find a solution.
+      </p>
+      <p><strong>Solution.</strong>
+        Partition the continuous trajectory into segments of length at most
+        <strong>\( \ell \)</strong> such that within each segment the curvature
+        and heading variation are bounded (possible because of Lipschitz
+        continuity). Choose lattice spacings
+        <strong>\( \Delta x, \Delta y, \Delta\theta \)</strong> sufficiently
+        small so that for any state along the trajectory there exists a lattice
+        vertex within distance &lt; <strong>\( \delta/2 \)</strong>, and the
+        set of motion primitives is rich enough to approximate the local motion
+        over one segment up to error &lt; <strong>\( \delta/2 \)</strong>.
+      </p>
+      <p>
+        Then for each segment we can construct a primitive sequence starting and
+        ending at nearby lattice vertices that stays within
+        <strong>\( \delta \)</strong> of the original trajectory, thus remaining
+        collision-free. Concatenating these primitive sequences yields a discrete
+        lattice path from a vertex near the start to one near the goal, proving
+        resolution completeness at that discretization.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Complexity Estimate for Lattice Search).</strong>
+        Consider a rectangular region of size
+        <strong>\( W \times H \)</strong> with position grid steps
+        <strong>\( \Delta x, \Delta y \)</strong> and
+        <strong>\( N_\theta \)</strong> heading discretization. Assume each
+        lattice state has exactly <strong>\( b \)</strong> outgoing motion
+        primitives. Estimate the worst-case number of nodes expanded by Dijkstra’s
+        algorithm in terms of these parameters.
+      </p>
+      <p><strong>Solution.</strong>
+        The number of grid cells is approximately
+      </p>
+      <h4 class="mathJax">
+        \[
+        N_{\text{cells}} \approx \frac{W}{\Delta x} \cdot \frac{H}{\Delta y}.
+        \]
+      </h4>
+      <p>
+        For each cell there are <strong>\( N_\theta \)</strong> heading states,
+        so the total number of vertices is
+      </p>
+      <h4 class="mathJax">
+        \[
+        |V| \approx N_{\text{cells}} \cdot N_\theta
+        = \frac{W H}{\Delta x \Delta y} N_\theta.
+        \]
+      </h4>
+      <p>
+        In the worst case (no early termination), Dijkstra will insert each
+        vertex into the priority queue and relax all its outgoing edges
+        at least once, resulting in <strong>\( O(|V|) \)</strong> expansions
+        and <strong>\( O(b|V|) \)</strong> edge relaxations. Using a binary heap,
+        operations on the queue cost <strong>\( O(\log |V|) \)</strong>, so the
+        total worst-case complexity is
+      </p>
+      <h4 class="mathJax">
+        \[
+        O\big(|V|\log|V| + b|V|\log|V|\big) =
+        O\big(b|V|\log|V|\big),
+        \]
+      </h4>
+      <p>
+        which scales linearly with <strong>\( N_\theta \)</strong> and
+        inversely with <strong>\( \Delta x \Delta y \)</strong>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. Summary</h2>
+    <div class="down-content">
+      <p>
+        In this lesson we systematically constructed lattice planners that embed
+        robot kinematics and simple dynamics into graph search via motion
+        primitives. We defined state lattices, derived dynamically feasible
+        primitives for car-like robots, connected lattice search with heuristic
+        search theory, and discussed resolution completeness and complexity.
+        Multi-language implementations (Python, C++, Java, MATLAB/Simulink, and
+        Mathematica) demonstrated how these concepts translate into practical
+        planners that can be integrated with low-level controllers for high-DOF
+        robots.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 14: References (Theoretical Papers) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>14. References</h2>
+    <ol>
+      <li>
+        Dubins, L.E. (1957). On curves of minimal length with a constraint on
+        average curvature, and with prescribed initial and terminal positions
+        and tangents. <em>American Journal of Mathematics</em>, 79(3), 497–516.
+      </li>
+      <li>
+        Reeds, J.A., &amp; Shepp, L.A. (1990). Optimal paths for a car that goes
+        both forwards and backwards. <em>Pacific Journal of Mathematics</em>,
+        145(2), 367–393.
+      </li>
+      <li>
+        Pivtoraiko, M., &amp; Kelly, A. (2005). Efficient constrained
+        path planning via search in state lattices.
+        <em>Proceedings of the International Symposium on Artificial Intelligence,
+        Robotics and Automation in Space</em>.
+      </li>
+      <li>
+        Pivtoraiko, M., Knepper, R.A., &amp; Kelly, A. (2009).
+        Differentially constrained mobile robot motion planning in state lattices.
+        <em>Journal of Field Robotics</em>, 26(3), 308–333.
+      </li>
+      <li>
+        LaValle, S.M. (2006). <em>Planning Algorithms</em>. Cambridge University
+        Press. (see chapters on discretization and kinodynamic planning).
+      </li>
+      <li>
+        Howard, T.M., &amp; Kelly, A. (2007). Optimal rough terrain trajectory
+        generation for wheeled mobile robots. <em>International Journal of Robotics
+        Research</em>, 26(2), 141–166.
+      </li>
+      <li>
+        Kelly, A., Nagy, B., Stager, D., &amp; Unnikrishnan, R. (2007).
+        Nonholonomic motion planning for mobile robots.
+        <em>Robotics Institute Technical Report CMU-RI-TR-07-19</em>.
+      </li>
+    </ol>
+  </div>
+</section>
+
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter2/Lesson2.html">
+          Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter2/Lesson4.html">
+          Lesson 4: Completeness and Optimality Notions
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Advanced Robotics</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Configuration Spaces for Planning (Beyond Basics)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: C-Space as a Planning Construct (not kinematics derivation)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: Obstacles in C-Space and Topological Complexity
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Manifold Constraints in Planning (closed chains, tasks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Metrics and Distance Functions in High-DOF Spaces
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Practical C-Space Approximations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Graph Search for High-DOF Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Discrete Planning Formulations
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Heuristic Search (A*, D*, Anytime A*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="active-lesson" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Lattice Planners and Motion Primitives
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Completeness and Optimality Notions
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Scaling Search to Manipulators
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Sampling-Based Motion Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Probabilistic Completeness Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: PRM and Lazy-PRM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: RRT, RRT-Connect, and Bidirectional Trees
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Asymptotically Optimal Planners (RRT*, PRM*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Modern Variants (BIT*, FMT*, informed sampling)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson6.html" class="" data-chapter="Chapter3" data-lesson="Lesson6">
+                      Lesson 6: Lab: Implement RRT*/PRM for a 6-DOF Arm
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Optimization-Based Trajectory Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: Trajectory Optimization Problem Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: CHOMP / STOMP Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: TrajOpt and Sequential Convex Optimization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Direct Collocation / Shooting Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Handling Collision and Smoothness Constraints
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson6.html" class="" data-chapter="Chapter4" data-lesson="Lesson6">
+                      Lesson 6: Lab: Solve a Manipulator Trajectory via Collocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Kinodynamic and Underactuated Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Why Kinodynamic Planning is Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: State-Lattice and Motion-Primitive Approaches
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Sampling in State-Space (Kinodynamic RRT*)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Differential Constraints and Feasibility
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Planning with Velocity/Acceleration Limits
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Planning Under Uncertainty</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Sources of Uncertainty in Real Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Belief-Space Planning Idea
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Chance-Constrained Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: POMDPs for Robotics (concept + small examples)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Robust vs Risk-Sensitive Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Grasp Representation and Grasp Quality</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: Contact Models for Grasping (planning view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: Force Closure and Form Closure Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Grasp Wrench Space and Quality Metrics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Robust Grasping Under Uncertainty
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compute Grasp Scores on Objects
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Grasp Synthesis and Dexterous Manipulation Planning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Analytical vs Data-Driven Grasping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Antipodal and Multi-Finger Grasp Synthesis
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Re-grasp and In-Hand Manipulation Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Tactile-Aware Grasp Refinement
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Grasp Planning in Simulation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Task and Motion Planning (TAMP)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Symbolic Task Planning vs Geometric Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Hybrid State Spaces and Mode Switching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Sampling-Based TAMP (PDDLStream / similar ideas)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Optimization-Based TAMP
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Pick-and-Place with TAMP Pipeline
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Advanced Perception for Manipulation</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: 3D Object Pose Estimation from Point Clouds
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: Scene Flow and Object Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Semantic Segmentation for Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Affordances and Action-Conditioned Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Active Perception for Better Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson6.html" class="" data-chapter="Chapter10" data-lesson="Lesson6">
+                      Lesson 6: Lab: Pose Estimation + Grasp Execution Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: Learning from Demonstration (Imitation)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: Demonstration Types (teleop, kinesthetic, VR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: Behavior Cloning and Dataset Aggregation (DAgger)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: Inverse Reinforcement Learning Basics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Skill Segmentation and Library Building
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: Train an Imitation Policy for a Manipulation Task
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: Reinforcement Learning for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: MDPs for Continuous Control (robotics framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Policy Gradients and Actor–Critic Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Off-Policy RL (DDPG/TD3/SAC concepts)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Reward Design and Sparse-Reward Tricks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Safety-Constrained RL (concepts, not CBF control)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson6.html" class="" data-chapter="Chapter12" data-lesson="Lesson6">
+                      Lesson 6: Lab: RL Manipulation in Simulation + Transfer Test
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Sim-to-Real and Domain Adaptation (Advanced Methods)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Why Policies Fail in Reality
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Domain Randomization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Systematic Sim Calibration (conceptual, no ID math)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Residual Physics vs Pure Learning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Evaluate Transfer with Randomization
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Multi-Robot Coordination</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Centralized vs Decentralized Coordination
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Consensus and Formation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Distributed Task Allocation (auctions, market methods)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Collision Avoidance in Multi-Robot Teams
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Cooperative Manipulation / Team Task Allocation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Swarm Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Emergent Behavior and Local Rules
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Swarm Aggregation, Dispersion, and Coverage
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Collective Transport and Construction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Robustness and Scalability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Swarm Simulation with Simple Local Policies
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Formal Methods and Verification for Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Why Formal Guarantees Matter
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Temporal Logic Specifications (LTL/CTL intuition)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Automata-Based Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Reachability and Model Checking Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Correct-by-Construction Planning
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Deformable Object Manipulation (Rigid Robots)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: What Makes Deformables Hard
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: State Representations for Deformable Objects
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Planning with Partial Observability
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Learning-Based Deformable Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Case Studies: cloth folding, cable routing
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Benchmarking, Evaluation, and Reproducibility</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Planning and Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Dataset and Task Benchmark Design
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Failure Taxonomies and Stress Testing
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Reproducible Experimental Robotics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Reading and Writing Research-Grade Evaluations
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Research Frontiers in Advanced Robotics</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Foundation Models / Vision-Language-Action Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Generalist vs Specialist Robot Policies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Long-Horizon Autonomy and Memory
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Embodied AI and World Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Open Problems and Proposal Workshop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project (Advanced Autonomy)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Selection and Literature Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: System Architecture and Method Choice
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Implementation Sprint + Mid-Review
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Experimental Validation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Paper
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>

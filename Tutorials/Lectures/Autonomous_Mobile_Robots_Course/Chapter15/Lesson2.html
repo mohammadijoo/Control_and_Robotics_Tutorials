@@ -1,0 +1,2142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="author" content="Abolfazl Mohammadijoo" />
+    <title>Chapter 15: Local Motion Generation (Mobile-Specific) - Lesson 2: Stanley Controller for Ground Vehicles | Autonomous Mobile Robots</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700" rel="stylesheet" />
+    <link rel="icon" type="image/png" href="../../../assets/images/cat.png" />
+
+    <!-- CDN CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.theme.default.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+
+    <!-- Project CSS -->
+    <link rel="stylesheet" href="../../../assets/css/main.css" />
+    <link rel="stylesheet" href="../../../assets/css/owl.css" />
+    <link rel="stylesheet" href="../../../assets/css/styles.css" />
+  </head>
+
+  <body class="is-preload">
+    <!-- Wrapper -->
+    <div id="wrapper">
+      <div id="main">
+        <div class="inner">
+            <!-- Header -->
+            <header id="header">
+              <div class="logo">
+                <img
+                  src="../../../assets/images/cat.png"
+                  style="width: 50px; margin-top: -20px"
+                  alt="CaaT Academy"
+                />
+                <a href="https://mohammadijoo.github.io/" target="_blank">CaaT Academy</a>
+              </div>
+            </header>
+<!-- Header -->
+<!-- Page Heading -->
+<div class="page-heading">
+  <div class="container-fluid text-center">
+    <h1>Chapter 15: Local Motion Generation (Mobile-Specific)</h1>
+    <h3><strong>Lesson 2: Stanley Controller for Ground Vehicles</strong></h3>
+    <p>
+      This lesson studies the Stanley steering controller as a
+      geometric–feedback path-tracking law for car-like (Ackermann) ground
+      vehicles. We derive the controller from the kinematic bicycle model,
+      define a precise signed cross-track error and heading error, and analyze
+      local stability via linearization and Routh–Hurwitz conditions. We then
+      cover implementation details (nearest-point projection on a polyline,
+      feedforward from path curvature, saturation and low-speed regularization),
+      and provide reference implementations in Python, C++, Java,
+      MATLAB/Simulink, and Wolfram Mathematica.
+    </p>
+  </div>
+</div>
+
+<!-- Section 1: Conceptual Overview -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>1. Conceptual Overview</h2>
+    <div class="down-content">
+      <p>
+        In Chapter 15, we assume a global planner has already produced a
+        collision-free reference path (a sequence of waypoints or a smooth
+        curve). The <em>local motion generation</em> block must produce feasible
+        controls that keep the vehicle close to the path under nonholonomic
+        constraints. The Stanley controller outputs a steering angle by
+        combining: <strong> \( e_\psi \):</strong> heading error to the path
+        tangent, and <strong> \( e_y \):</strong> signed cross-track error
+        (lateral displacement).
+      </p>
+      <p>
+        The key idea is: (i) point the vehicle toward the path (heading
+        correction), and (ii) add an additional steering component proportional
+        to lateral error, normalized by speed so the controller does not become
+        overly aggressive at high velocity.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  A["Inputs: reference path + current state (x,y,psi,v)"] --> B["Nearest point on path (projection)"]
+  B --> C["Compute errors: e_y (signed), e_psi = psi_ref - psi"]
+  C --> D["Compute steering: delta = delta_ff + e_psi + atan(k*e_y/(v+v0))"]
+  D --> E["Saturate delta to +/- delta_max; apply rate limits if needed"]
+  E --> F["Vehicle update (bicycle kinematics)"]
+  F --> A
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Kinematic Bicycle Model and Tracking Errors -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>2. Kinematic Bicycle Model and Tracking Errors</h2>
+    <div class="down-content">
+      <p>
+        For low-to-moderate speeds on high-friction surfaces, a widely used
+        control-oriented model is the kinematic bicycle model with wheelbase
+        <strong> \( L \):</strong> and steering angle
+        <strong> \( \delta \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \dot x = v \cos\psi,\quad \dot y = v \sin\psi,\quad \dot\psi =
+        \frac{v}{L}\tan\delta \]
+      </h4>
+
+      <p>
+        The reference path is represented as a polyline
+        <strong> \( \{(x_i^{ref},y_i^{ref})\}_{i=1}^N \):</strong> or a smooth
+        curve parameterized by arc-length <strong> \( s \):</strong> with
+        tangent heading <strong> \( \psi_{ref}(s) \):</strong> and curvature
+        <strong> \( \kappa_{ref}(s) \):</strong>
+      </p>
+
+      <p>
+        At each control cycle, we find the closest point on the path
+        (projection). Let that point be
+        <strong> \( \mathbf{p}_{ref} = (x_{ref},y_{ref}) \):</strong> and let
+        the unit tangent be
+        <strong> \( \mathbf{t} = (\cos\psi_{ref},\sin\psi_{ref}) \):</strong>
+      </p>
+
+      <p>
+        We define the <strong>heading error</strong> (note the sign convention
+        is important for stability):
+        <strong> \( e_\psi \):</strong>
+      </p>
+      <h4 class="mathJax">
+        \[ e_\psi \triangleq \mathrm{wrap}(\psi_{ref} - \psi) \in (-\pi,\pi] \]
+      </h4>
+
+      <p>
+        We define the <strong>signed</strong> cross-track error using the 2D
+        cross product (scalar) between the path tangent and the vector from the
+        closest path point to the vehicle. Let
+        <strong> \( \mathbf{v} = (x-x_{ref},\; y-y_{ref}) \):</strong>
+        then compute
+        <strong> \( c \):</strong>
+      </p>
+
+      <h4 class="mathJax">\[ c \triangleq t_x v_y - t_y v_x \]</h4>
+
+      <p>
+        The sign of <strong> \( c \):</strong> indicates whether the vehicle is
+        to the left or right of the path direction. The signed lateral error is
+      </p>
+
+      <h4 class="mathJax">
+        \[ e_y \triangleq \mathrm{sign}(c)\,\|\mathbf{v}\|_2 \]
+      </h4>
+
+      <p>
+        These definitions are coordinate-free and work for any path segment
+        (straight or curved) as long as the tangent is well-defined.
+      </p>
+
+      <div class="diagram-wrapper">
+        <pre class="mermaid">
+flowchart TD
+  N["Nearest point n=(x_ref,y_ref)"] --> V["v = p - n"]
+  T["Tangent t=(cos(psi_ref), sin(psi_ref))"] --> C["c = t_x*v_y - t_y*v_x"]
+  V --> C
+  C --> S["sign(e_y)=sign(c)"]
+  S --> EY["e_y = sign * ||v||"]
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Stanley Control Law -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>3. Stanley Control Law</h2>
+    <div class="down-content">
+      <p>
+        The Stanley controller (popularized by the Stanford DARPA Grand
+        Challenge vehicle) uses a sum of a heading correction and a nonlinear
+        cross-track term. A practical AMR version also adds a curvature
+        feedforward term (when the reference provides curvature).
+      </p>
+
+      <p>
+        Let <strong> \( k &gt; 0 \):</strong> be the cross-track gain and
+        <strong> \( v_0 &gt; 0 \):</strong> a low-speed softening constant. The
+        steering command is:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \delta = \delta_{ff} + e_\psi +
+        \arctan\!\left(\frac{k\,e_y}{v+v_0}\right) \]
+      </h4>
+
+      <p>The feedforward term tracks the curvature of the reference path:</p>
+
+      <h4 class="mathJax">
+        \[ \kappa = \frac{\tan\delta}{L} \quad\Rightarrow\quad \delta_{ff} =
+        \arctan(L\,\kappa_{ref}) \]
+      </h4>
+
+      <p>
+        The term
+        <strong> \( \arctan\left(\frac{k e_y}{v+v_0}\right) \):</strong> behaves
+        like a proportional action for small errors but saturates to
+        <strong> \( \pm \frac{\pi}{2} \):</strong> for large
+        <strong> \( |e_y| \):</strong> which improves robustness when the
+        vehicle starts far from the path. The division by
+        <strong> \( v+v_0 \):</strong> is essential; otherwise the same lateral
+        error would cause excessive steering at high speed.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Local Stability via Linearization (Straight Path) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>4. Local Stability via Linearization (Straight Path)</h2>
+    <div class="down-content">
+      <p>
+        To establish a rigorous baseline, consider a straight reference path
+        along the x-axis with
+        <strong> \( \psi_{ref}=0 \):</strong> and
+        <strong> \( \kappa_{ref}=0 \):</strong> so
+        <strong> \( \delta_{ff}=0 \):</strong> and the nearest-point projection
+        yields approximately <strong> \( e_y \approx y \):</strong>
+        for small deviation.
+      </p>
+
+      <p>
+        With our sign convention
+        <strong> \( e_\psi = \psi_{ref} - \psi = -\psi \):</strong> we get:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \dot e_y = \dot y = v\sin\psi = -v\sin e_\psi, \qquad \dot e_\psi =
+        -\dot\psi = -\frac{v}{L}\tan\delta \]
+      </h4>
+
+      <p>
+        For small errors (local analysis), use approximations
+        <strong> \( \sin e_\psi \approx e_\psi \):</strong>
+        and
+        <strong> \( \tan\delta \approx \delta \):</strong>
+        and linearize the Stanley law:
+      </p>
+
+      <h4 class="mathJax">
+        \[ \delta = e_\psi + \arctan\!\left(\frac{k e_y}{v+v_0}\right) \approx
+        e_\psi + \frac{k}{v+v_0}e_y \]
+      </h4>
+
+      <p>
+        The linearized closed-loop error dynamics become
+        <strong> \( \dot{\mathbf{e} } = \mathbf{A}\mathbf{e} \):</strong>
+        for <strong> \( \mathbf{e}=[e_y,\; e_\psi]^T \):</strong>
+      </p>
+
+      <h4 class="mathJax">
+        \[ \begin{aligned} \dot e_y &\approx -v\,e_\psi,\\ \dot e_\psi &\approx
+        -\frac{v}{L}\,e_\psi - \frac{v}{L}\,\frac{k}{v+v_0}\,e_y \end{aligned}
+        \]
+      </h4>
+
+      <p>
+        Therefore
+        <strong>
+          \( \mathbf{A} = \begin{bmatrix} 0 & -v \\ -\frac{v k}{L(v+v_0)} &
+          -\frac{v}{L} \end{bmatrix} \):</strong
+        >
+        has trace
+        <strong> \( \mathrm{tr}(\mathbf{A}) = -\frac{v}{L} &lt; 0 \):</strong>
+        and determinant
+        <strong>
+          \( \det(\mathbf{A}) = \frac{v^2 k}{L(v+v_0)} &gt; 0 \):</strong
+        >
+        for <strong> \( v&gt;0 \):</strong> and <strong> \( k&gt;0 \):</strong>
+        By the 2nd-order Routh–Hurwitz criterion, both eigenvalues have negative
+        real part, so the equilibrium
+        <strong> \( (e_y,e_\psi)=(0,0) \):</strong> is locally exponentially
+        stable.
+      </p>
+
+      <p>
+        <strong>Interpretation.</strong> The heading error term provides damping
+        (negative diagonal term in <strong> \( \mathbf{A} \):</strong>), while
+        the cross-track term couples <strong> \( e_y \):</strong> into the
+        heading dynamics to steer back toward the path. Increasing
+        <strong> \( k \):</strong> increases the coupling and can reduce lateral
+        error, but too large <strong> \( k \):</strong> can cause oscillation
+        once actuator limits and discrete-time sampling are considered.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Implementation Details in AMR Navigation Stacks -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>5. Implementation Details in AMR Navigation Stacks</h2>
+    <div class="down-content">
+      <p>
+        In practice, your local controller sits below the local planner (Chapter
+        15 Lessons 3–4) and consumes a short horizon of the global path, usually
+        expressed in the robot base frame or the map frame. A standard loop is:
+      </p>
+      <ul>
+        <li>
+          Transform the path into the controller frame (typically
+          <strong> \( \{x,y\} \):</strong> in the map frame; yaw from
+          localization).
+        </li>
+        <li>
+          Find the closest point on the path and estimate its tangent heading
+          <strong> \( \psi_{ref} \):</strong> (polyline segment direction).
+        </li>
+        <li>
+          Compute <strong> \( e_y \):</strong> and
+          <strong> \( e_\psi \):</strong> with the sign conventions in Section
+          2.
+        </li>
+        <li>
+          Compute <strong> \( \delta \):</strong> using the Stanley law, apply
+          steering saturation and (optionally) rate limits.
+        </li>
+        <li>
+          Command speed <strong> \( v \):</strong> from a velocity profile; the
+          controller is most reliable when <strong> \( v \):</strong> does not
+          drop near zero (use <strong> \( v_0 \):</strong>).
+        </li>
+      </ul>
+
+      <p>
+        <strong>Saturation and rate limits.</strong> Real steering systems have
+        bounds and dynamics. A common refinement is to pass the computed
+        steering through a first-order actuator model
+        <strong>
+          \( \dot\delta_{act} = \frac{1}{\tau}(\delta - \delta_{act})
+          \):</strong
+        >
+        and enforce <strong> \( |\delta_{act}| \le \delta_{max} \):</strong> and
+        <strong> \( |\dot\delta_{act}| \le \dot\delta_{max} \):</strong>
+        to avoid unrealistic oscillations.
+      </p>
+
+      <p>
+        <strong>Nearest-point computation.</strong> For short local horizons,
+        brute force scanning is often acceptable. For long paths, use a spatial
+        index (k-d tree) or incremental search starting from the last nearest
+        index.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Python Implementation (Simulation + Plot) -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>6. Python Implementation (Simulation + Plot)</h2>
+    <div class="down-content">
+      <p>
+        This implementation uses NumPy for geometry and Matplotlib for plots. It
+        demonstrates: (i) projection to the nearest polyline segment, (ii)
+        signed cross-track error via a 2D cross product, and (iii) curvature
+        feedforward (optional).
+      </p>
+
+      <h3>Chapter15_Lesson2.py</h3>
+      <pre><code class="language-python">
+&quot;&quot;&quot;
+Chapter15_Lesson2.py
+Stanley Controller for Ground Vehicles (kinematic bicycle model)
+- Path: polyline (x_ref, y_ref)
+- Control: delta = delta_ff + e_psi + atan2(k * e_y, v + v0)
+Author: Abolfazl Mohammadijoo (educational example)
+&quot;&quot;&quot;
+
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import Tuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def wrap_angle(a: float) -&gt; float:
+    &quot;&quot;&quot;Wrap angle to (-pi, pi].&quot;&quot;&quot;
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+@dataclass
+class State:
+    x: float
+    y: float
+    psi: float  # yaw (rad)
+    v: float    # forward speed (m/s)
+
+
+@dataclass
+class StanleyParams:
+    L: float = 2.7                 # wheelbase (m)
+    k: float = 1.2                 # cross-track gain
+    v0: float = 0.5                # softening speed (m/s) to avoid divide-by-zero
+    max_steer: float = math.radians(30.0)  # steering saturation (rad)
+
+
+def _nearest_point_on_polyline(px: float, py: float, x_ref: np.ndarray, y_ref: np.ndarray) -&gt; Tuple[int, float, float, float]:
+    &quot;&quot;&quot;
+    Return:
+      idx: segment index i such that nearest point lies on segment i-&gt;i+1 (or endpoint)
+      nx, ny: nearest point coordinates
+      t: projection parameter in [0,1] on that segment
+    &quot;&quot;&quot;
+    x1 = x_ref[:-1]
+    y1 = y_ref[:-1]
+    x2 = x_ref[1:]
+    y2 = y_ref[1:]
+    dx = x2 - x1
+    dy = y2 - y1
+    denom = dx*dx + dy*dy
+    denom = np.where(denom &lt; 1e-12, 1e-12, denom)
+
+    t = ((px - x1)*dx + (py - y1)*dy) / denom
+    t = np.clip(t, 0.0, 1.0)
+
+    projx = x1 + t*dx
+    projy = y1 + t*dy
+    d2 = (px - projx)**2 + (py - projy)**2
+
+    i = int(np.argmin(d2))
+    return i, float(projx[i]), float(projy[i]), float(t[i])
+
+
+def _segment_heading(i: int, x_ref: np.ndarray, y_ref: np.ndarray) -&gt; float:
+    dx = float(x_ref[i+1] - x_ref[i])
+    dy = float(y_ref[i+1] - y_ref[i])
+    return math.atan2(dy, dx)
+
+
+def _curvature_at_index(i: int, x_ref: np.ndarray, y_ref: np.ndarray) -&gt; float:
+    &quot;&quot;&quot;
+    Discrete curvature estimate around point i using finite differences on indices.
+    Robust enough for educational demos; for production, compute curvature vs arc-length.
+    &quot;&quot;&quot;
+    n = len(x_ref)
+    i0 = max(0, i-1)
+    i1 = i
+    i2 = min(n-1, i+1)
+    x0, y0 = x_ref[i0], y_ref[i0]
+    x1, y1 = x_ref[i1], y_ref[i1]
+    x2, y2 = x_ref[i2], y_ref[i2]
+
+    # Approx derivatives w.r.t index (not arc length)
+    x_p = (x2 - x0) * 0.5
+    y_p = (y2 - y0) * 0.5
+    x_pp = x2 - 2.0*x1 + x0
+    y_pp = y2 - 2.0*y1 + y0
+
+    denom = (x_p*x_p + y_p*y_p)**1.5
+    if denom &lt; 1e-9:
+        return 0.0
+    kappa = (x_p*y_pp - y_p*x_pp) / denom
+    return float(kappa)
+
+
+def stanley_control(state: State, x_ref: np.ndarray, y_ref: np.ndarray, params: StanleyParams) -&gt; Tuple[float, dict]:
+    &quot;&quot;&quot;
+    Compute Stanley steering command.
+    Convention:
+      e_psi = psi_ref - psi   (desired minus actual)
+      e_y   = signed cross-track error (positive if vehicle is left of path tangent)
+    &quot;&quot;&quot;
+    i, nx, ny, _ = _nearest_point_on_polyline(state.x, state.y, x_ref, y_ref)
+    psi_ref = _segment_heading(i, x_ref, y_ref)
+    e_psi = wrap_angle(psi_ref - state.psi)
+
+    # Signed lateral error via 2D cross product between tangent and (vehicle - nearest)
+    tx = math.cos(psi_ref)
+    ty = math.sin(psi_ref)
+    vx = state.x - nx
+    vy = state.y - ny
+    cross = tx*vy - ty*vx  # &gt;0 =&gt; vehicle left of tangent
+    e_y = math.copysign(math.hypot(vx, vy), cross)
+
+    # Optional feedforward from reference curvature
+    kappa_ref = _curvature_at_index(i, x_ref, y_ref)
+    delta_ff = math.atan(params.L * kappa_ref)
+
+    # Stanley feedback term
+    delta_fb = e_psi + math.atan2(params.k * e_y, state.v + params.v0)
+
+    delta = delta_ff + delta_fb
+    delta = max(-params.max_steer, min(params.max_steer, delta))
+
+    info = {
+        &quot;i&quot;: i,
+        &quot;nx&quot;: nx,
+        &quot;ny&quot;: ny,
+        &quot;psi_ref&quot;: psi_ref,
+        &quot;e_psi&quot;: e_psi,
+        &quot;e_y&quot;: e_y,
+        &quot;kappa_ref&quot;: kappa_ref,
+        &quot;delta_ff&quot;: delta_ff,
+        &quot;delta_fb&quot;: delta_fb,
+    }
+    return delta, info
+
+
+def step_bicycle(state: State, delta: float, dt: float, L: float) -&gt; State:
+    x = state.x + state.v * math.cos(state.psi) * dt
+    y = state.y + state.v * math.sin(state.psi) * dt
+    psi = wrap_angle(state.psi + state.v / L * math.tan(delta) * dt)
+    return State(x=x, y=y, psi=psi, v=state.v)
+
+
+def make_s_path(n: int = 400) -&gt; Tuple[np.ndarray, np.ndarray]:
+    # A simple smooth polyline path
+    x = np.linspace(0.0, 50.0, n)
+    y = 2.5 * np.sin(0.18 * x) + 1.0 * np.sin(0.04 * x)
+    return x, y
+
+
+def main() -&gt; None:
+    x_ref, y_ref = make_s_path()
+
+    params = StanleyParams(L=2.7, k=1.4, v0=0.5, max_steer=math.radians(32))
+    dt = 0.02
+    T = 25.0
+    steps = int(T / dt)
+
+    state = State(x=-2.0, y=3.5, psi=math.radians(-10), v=6.0)
+
+    xs, ys, psis, deltas = [], [], [], []
+    eys, epsis = [], []
+
+    for _ in range(steps):
+        delta, info = stanley_control(state, x_ref, y_ref, params)
+        state = step_bicycle(state, delta, dt, params.L)
+
+        xs.append(state.x)
+        ys.append(state.y)
+        psis.append(state.psi)
+        deltas.append(delta)
+        eys.append(info[&quot;e_y&quot;])
+        epsis.append(info[&quot;e_psi&quot;])
+
+    # Plots
+    plt.figure(figsize=(9, 5))
+    plt.plot(x_ref, y_ref, label=&quot;reference path&quot;)
+    plt.plot(xs, ys, label=&quot;vehicle trajectory&quot;)
+    plt.axis(&quot;equal&quot;)
+    plt.grid(True)
+    plt.legend()
+    plt.title(&quot;Stanley Controller: path tracking (kinematic bicycle)&quot;)
+    plt.xlabel(&quot;x [m]&quot;)
+    plt.ylabel(&quot;y [m]&quot;)
+
+    t = np.linspace(0.0, T, steps)
+    plt.figure(figsize=(9, 4))
+    plt.plot(t, eys, label=&quot;e_y [m]&quot;)
+    plt.plot(t, np.degrees(epsis), label=&quot;e_psi [deg]&quot;)
+    plt.grid(True)
+    plt.legend()
+    plt.title(&quot;Tracking errors&quot;)
+    plt.xlabel(&quot;time [s]&quot;)
+
+    plt.figure(figsize=(9, 4))
+    plt.plot(t, np.degrees(deltas), label=&quot;delta [deg]&quot;)
+    plt.grid(True)
+    plt.legend()
+    plt.title(&quot;Steering command&quot;)
+    plt.xlabel(&quot;time [s]&quot;)
+
+    plt.show()
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+      </code></pre>
+
+      <h3>Chapter15_Lesson2_Ex1.py</h3>
+      <pre><code class="language-python">
+&quot;&quot;&quot;
+Chapter15_Lesson2_Ex1.py
+Exercise: Gain sweep for Stanley controller (RMS cross-track error vs gain k)
+This script reuses a simplified Stanley implementation to sweep k and plot RMS(e_y).
+
+Author: Abolfazl Mohammadijoo (educational example)
+&quot;&quot;&quot;
+
+from __future__ import annotations
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def wrap_angle(a: float) -&gt; float:
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def make_s_path(n: int = 400):
+    x = np.linspace(0.0, 50.0, n)
+    y = 2.5 * np.sin(0.18 * x) + 1.0 * np.sin(0.04 * x)
+    return x, y
+
+
+def nearest_segment(px, py, x_ref, y_ref):
+    x1 = x_ref[:-1]; y1 = y_ref[:-1]
+    x2 = x_ref[1:];  y2 = y_ref[1:]
+    dx = x2 - x1; dy = y2 - y1
+    denom = dx*dx + dy*dy
+    denom = np.where(denom &lt; 1e-12, 1e-12, denom)
+    t = ((px - x1)*dx + (py - y1)*dy) / denom
+    t = np.clip(t, 0.0, 1.0)
+    projx = x1 + t*dx
+    projy = y1 + t*dy
+    d2 = (px - projx)**2 + (py - projy)**2
+    i = int(np.argmin(d2))
+    return i, float(projx[i]), float(projy[i])
+
+
+def segment_heading(i, x_ref, y_ref):
+    return math.atan2(float(y_ref[i+1] - y_ref[i]), float(x_ref[i+1] - x_ref[i]))
+
+
+def simulate(k_gain: float, v: float = 6.0, v0: float = 0.5, L: float = 2.7, dt: float = 0.02, T: float = 18.0):
+    x_ref, y_ref = make_s_path()
+    steps = int(T/dt)
+    x, y, psi = -2.0, 3.5, math.radians(-10)
+    eys = []
+    for _ in range(steps):
+        i, nx, ny = nearest_segment(x, y, x_ref, y_ref)
+        psi_ref = segment_heading(i, x_ref, y_ref)
+        e_psi = wrap_angle(psi_ref - psi)
+        tx, ty = math.cos(psi_ref), math.sin(psi_ref)
+        vx, vy = x - nx, y - ny
+        cross = tx*vy - ty*vx
+        e_y = math.copysign(math.hypot(vx, vy), cross)
+        delta = e_psi + math.atan2(k_gain * e_y, v + v0)
+        delta = max(-math.radians(32), min(math.radians(32), delta))
+        # bicycle step
+        x += v * math.cos(psi) * dt
+        y += v * math.sin(psi) * dt
+        psi = wrap_angle(psi + v/L * math.tan(delta) * dt)
+        eys.append(e_y)
+    eys = np.asarray(eys)
+    rms = float(np.sqrt(np.mean(eys**2)))
+    return rms
+
+
+def main():
+    ks = np.linspace(0.2, 4.0, 20)
+    rms = [simulate(k) for k in ks]
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(ks, rms, marker=&quot;o&quot;)
+    plt.grid(True)
+    plt.xlabel(&quot;k (cross-track gain)&quot;)
+    plt.ylabel(&quot;RMS(e_y) [m]&quot;)
+    plt.title(&quot;Stanley gain sweep (educational)&quot;)
+    plt.show()
+
+    best = ks[int(np.argmin(rms))]
+    print(&quot;Best k in sweep:&quot;, best)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: C++ Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>7. C++ Implementation</h2>
+    <div class="down-content">
+      <p>
+        The following single-file C++ example runs a kinematic simulation and
+        reports RMS cross-track error. In a robotics stack, the same
+        <strong> \( stanley\_control \):</strong> function would be called
+        inside a real-time control node (e.g., ROS2), and the steering angle
+        would be published as an Ackermann drive command.
+      </p>
+
+      <h3>Chapter15_Lesson2.cpp</h3>
+      <pre><code class="language-cpp">
+// Chapter15_Lesson2.cpp
+// Stanley Controller for Ground Vehicles (kinematic bicycle model, educational)
+//
+// Build (example):
+//   g++ -O2 -std=c++17 Chapter15_Lesson2.cpp -o stanley
+//
+// Notes:
+// - For ROS2 integration, compute psi_ref and e_y from nav_msgs::msg::Path
+//   and publish ackermann_msgs::msg::AckermannDriveStamped steering_angle.
+
+#include &lt;cmath&gt;
+#include &lt;iostream&gt;
+#include &lt;limits&gt;
+#include &lt;vector&gt;
+
+static double wrap_angle(double a) {
+    const double pi = 3.14159265358979323846;
+    a = std::fmod(a + pi, 2.0 * pi);
+    if (a &lt; 0) a += 2.0 * pi;
+    return a - pi;
+}
+
+struct State {
+    double x{0.0};
+    double y{0.0};
+    double psi{0.0}; // yaw [rad]
+    double v{0.0};   // speed [m/s]
+};
+
+struct Params {
+    double L{2.7};
+    double k{1.4};
+    double v0{0.5};
+    double max_steer{30.0 * M_PI / 180.0};
+};
+
+static void make_s_path(std::vector&lt;double&gt;&amp; xr, std::vector&lt;double&gt;&amp; yr, int n = 400) {
+    xr.resize(n);
+    yr.resize(n);
+    const double x0 = 0.0, x1 = 50.0;
+    for (int i = 0; i &lt; n; ++i) {
+        double x = x0 + (x1 - x0) * (static_cast&lt;double&gt;(i) / (n - 1));
+        xr[i] = x;
+        yr[i] = 2.5 * std::sin(0.18 * x) + 1.0 * std::sin(0.04 * x);
+    }
+}
+
+static int nearest_point_index(double px, double py, const std::vector&lt;double&gt;&amp; xr, const std::vector&lt;double&gt;&amp; yr) {
+    // Brute-force nearest vertex (simple). For production, project onto segments / k-d tree.
+    double best = std::numeric_limits&lt;double&gt;::infinity();
+    int best_i = 0;
+    for (int i = 0; i &lt; static_cast&lt;int&gt;(xr.size()); ++i) {
+        double dx = px - xr[i];
+        double dy = py - yr[i];
+        double d2 = dx*dx + dy*dy;
+        if (d2 &lt; best) { best = d2; best_i = i; }
+    }
+    return best_i;
+}
+
+static double heading_from_path(int i, const std::vector&lt;double&gt;&amp; xr, const std::vector&lt;double&gt;&amp; yr) {
+    int n = static_cast&lt;int&gt;(xr.size());
+    int j = std::min(i + 1, n - 1);
+    int k = std::max(i - 1, 0);
+    double dx = xr[j] - xr[k];
+    double dy = yr[j] - yr[k];
+    return std::atan2(dy, dx);
+}
+
+static double stanley_control(const State&amp; s,
+                              const std::vector&lt;double&gt;&amp; xr,
+                              const std::vector&lt;double&gt;&amp; yr,
+                              const Params&amp; p,
+                              double&amp; e_y_out,
+                              double&amp; e_psi_out) {
+
+    int i = nearest_point_index(s.x, s.y, xr, yr);
+    double psi_ref = heading_from_path(i, xr, yr);
+
+    // Convention: e_psi = psi_ref - psi (desired minus actual)
+    double e_psi = wrap_angle(psi_ref - s.psi);
+
+    // Signed cross-track: positive if vehicle is left of the path tangent
+    double tx = std::cos(psi_ref);
+    double ty = std::sin(psi_ref);
+    double vx = s.x - xr[i];
+    double vy = s.y - yr[i];
+    double cross = tx * vy - ty * vx;
+    double e_y = std::copysign(std::hypot(vx, vy), cross);
+
+    double delta = e_psi + std::atan2(p.k * e_y, s.v + p.v0);
+    if (delta &gt; p.max_steer) delta = p.max_steer;
+    if (delta &lt; -p.max_steer) delta = -p.max_steer;
+
+    e_y_out = e_y;
+    e_psi_out = e_psi;
+    return delta;
+}
+
+static State step_bicycle(const State&amp; s, double delta, double dt, double L) {
+    State ns = s;
+    ns.x += s.v * std::cos(s.psi) * dt;
+    ns.y += s.v * std::sin(s.psi) * dt;
+    ns.psi = wrap_angle(s.psi + s.v / L * std::tan(delta) * dt);
+    return ns;
+}
+
+int main() {
+    std::vector&lt;double&gt; xr, yr;
+    make_s_path(xr, yr);
+
+    Params p;
+    const double dt = 0.02;
+    const double T  = 25.0;
+    const int steps = static_cast&lt;int&gt;(T / dt);
+
+    State s;
+    s.x = -2.0;
+    s.y = 3.5;
+    s.psi = -10.0 * M_PI / 180.0;
+    s.v = 6.0;
+
+    double sum_sq = 0.0;
+    for (int k = 0; k &lt; steps; ++k) {
+        double e_y = 0.0, e_psi = 0.0;
+        double delta = stanley_control(s, xr, yr, p, e_y, e_psi);
+        s = step_bicycle(s, delta, dt, p.L);
+        sum_sq += e_y * e_y;
+    }
+
+    double rms = std::sqrt(sum_sq / steps);
+    std::cout &lt;&lt; &quot;Done. RMS cross-track error e_y: &quot; &lt;&lt; rms &lt;&lt; &quot; m\n&quot;;
+    std::cout &lt;&lt; &quot;Final state: x=&quot; &lt;&lt; s.x &lt;&lt; &quot;, y=&quot; &lt;&lt; s.y
+              &lt;&lt; &quot;, psi=&quot; &lt;&lt; s.psi &lt;&lt; &quot;\n&quot;;
+    return 0;
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Java Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>8. Java Implementation</h2>
+    <div class="down-content">
+      <p>
+        Java is often used in educational simulators or embedded middleware. The
+        code below mirrors the C++ structure and keeps dependencies minimal.
+      </p>
+
+      <h3>Chapter15_Lesson2.java</h3>
+      <pre><code class="language-java">
+// Chapter15_Lesson2.java
+// Stanley Controller for Ground Vehicles (kinematic bicycle model, educational)
+//
+// Compile:
+//   javac Chapter15_Lesson2.java
+// Run:
+//   java Chapter15_Lesson2
+
+import java.util.Arrays;
+
+public class Chapter15_Lesson2 {
+
+    static double wrapAngle(double a) {
+        double pi = Math.PI;
+        a = (a + pi) % (2.0 * pi);
+        if (a &lt; 0) a += 2.0 * pi;
+        return a - pi;
+    }
+
+    static class State {
+        double x, y, psi, v;
+        State(double x, double y, double psi, double v) {
+            this.x = x; this.y = y; this.psi = psi; this.v = v;
+        }
+    }
+
+    static class Params {
+        double L = 2.7;
+        double k = 1.4;
+        double v0 = 0.5;
+        double maxSteer = Math.toRadians(30.0);
+    }
+
+    static void makeSPath(double[] xr, double[] yr) {
+        int n = xr.length;
+        double x0 = 0.0, x1 = 50.0;
+        for (int i = 0; i &lt; n; i++) {
+            double x = x0 + (x1 - x0) * (double)i / (double)(n - 1);
+            xr[i] = x;
+            yr[i] = 2.5 * Math.sin(0.18 * x) + 1.0 * Math.sin(0.04 * x);
+        }
+    }
+
+    static int nearestIndex(double px, double py, double[] xr, double[] yr) {
+        double best = Double.POSITIVE_INFINITY;
+        int bestI = 0;
+        for (int i = 0; i &lt; xr.length; i++) {
+            double dx = px - xr[i];
+            double dy = py - yr[i];
+            double d2 = dx*dx + dy*dy;
+            if (d2 &lt; best) { best = d2; bestI = i; }
+        }
+        return bestI;
+    }
+
+    static double headingFromPath(int i, double[] xr, double[] yr) {
+        int n = xr.length;
+        int j = Math.min(i + 1, n - 1);
+        int k = Math.max(i - 1, 0);
+        double dx = xr[j] - xr[k];
+        double dy = yr[j] - yr[k];
+        return Math.atan2(dy, dx);
+    }
+
+    static double stanleyControl(State s, double[] xr, double[] yr, Params p, double[] outErr) {
+        int i = nearestIndex(s.x, s.y, xr, yr);
+        double psiRef = headingFromPath(i, xr, yr);
+
+        // Convention: ePsi = psiRef - psi
+        double ePsi = wrapAngle(psiRef - s.psi);
+
+        // Signed lateral error via 2D cross product
+        double tx = Math.cos(psiRef), ty = Math.sin(psiRef);
+        double vx = s.x - xr[i], vy = s.y - yr[i];
+        double cross = tx*vy - ty*vx;
+        double eY = Math.copySign(Math.hypot(vx, vy), cross);
+
+        double delta = ePsi + Math.atan2(p.k * eY, s.v + p.v0);
+        delta = Math.max(-p.maxSteer, Math.min(p.maxSteer, delta));
+
+        outErr[0] = eY;
+        outErr[1] = ePsi;
+        return delta;
+    }
+
+    static State stepBicycle(State s, double delta, double dt, double L) {
+        double x = s.x + s.v * Math.cos(s.psi) * dt;
+        double y = s.y + s.v * Math.sin(s.psi) * dt;
+        double psi = wrapAngle(s.psi + s.v / L * Math.tan(delta) * dt);
+        return new State(x, y, psi, s.v);
+    }
+
+    public static void main(String[] args) {
+        int n = 400;
+        double[] xr = new double[n];
+        double[] yr = new double[n];
+        makeSPath(xr, yr);
+
+        Params p = new Params();
+        double dt = 0.02, T = 25.0;
+        int steps = (int)(T / dt);
+
+        State s = new State(-2.0, 3.5, Math.toRadians(-10.0), 6.0);
+
+        double sumSq = 0.0;
+        double[] err = new double[2];
+        for (int k = 0; k &lt; steps; k++) {
+            double delta = stanleyControl(s, xr, yr, p, err);
+            s = stepBicycle(s, delta, dt, p.L);
+            sumSq += err[0] * err[0];
+        }
+
+        double rms = Math.sqrt(sumSq / steps);
+        System.out.println(&quot;Done. RMS cross-track error eY: &quot; + rms + &quot; m&quot;);
+        System.out.println(&quot;Final state: x=&quot; + s.x + &quot;, y=&quot; + s.y + &quot;, psi=&quot; + s.psi);
+    }
+}
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: MATLAB/Simulink Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>9. MATLAB/Simulink Implementation</h2>
+    <div class="down-content">
+      <p>
+        The MATLAB script below runs the same bicycle simulation. For a Simulink
+        implementation, place the bicycle kinematics in an integrator loop and
+        implement the Stanley law in a MATLAB Function block that outputs
+        <strong> \( \delta \):</strong> from the current state and the
+        (short-horizon) reference path.
+      </p>
+
+      <h3>Chapter15_Lesson2.m</h3>
+      <pre><code class="language-matlab">
+% Chapter15_Lesson2.m
+% Stanley Controller for Ground Vehicles (kinematic bicycle model, educational)
+%
+% Run:
+%   Chapter15_Lesson2
+%
+% This script:
+%   1) builds a smooth reference path (polyline)
+%   2) tracks it using Stanley steering control
+%   3) plots trajectory and tracking errors
+
+function Chapter15_Lesson2
+    % Reference path
+    n = 400;
+    xr = linspace(0, 50, n);
+    yr = 2.5*sin(0.18*xr) + 1.0*sin(0.04*xr);
+
+    % Parameters
+    p.L = 2.7;
+    p.k = 1.4;
+    p.v0 = 0.5;
+    p.maxSteer = deg2rad(32);
+
+    dt = 0.02;  T = 25.0;
+    steps = floor(T/dt);
+
+    % State: [x;y;psi], constant speed v
+    x = -2.0; y = 3.5; psi = deg2rad(-10);
+    v = 6.0;
+
+    xs = zeros(steps,1);
+    ys = zeros(steps,1);
+    eys = zeros(steps,1);
+    epsis = zeros(steps,1);
+    deltas = zeros(steps,1);
+
+    for k = 1:steps
+        [delta, e_y, e_psi] = stanley_control(x, y, psi, v, xr, yr, p);
+        % Bicycle step
+        x = x + v*cos(psi)*dt;
+        y = y + v*sin(psi)*dt;
+        psi = wrap_angle(psi + v/p.L * tan(delta) * dt);
+
+        xs(k) = x; ys(k) = y;
+        eys(k) = e_y; epsis(k) = e_psi;
+        deltas(k) = delta;
+    end
+
+    % Plots
+    figure; plot(xr, yr, 'LineWidth', 1.5); hold on;
+    plot(xs, ys, 'LineWidth', 1.5);
+    axis equal; grid on;
+    legend('reference path','vehicle trajectory');
+    title('Stanley Controller: path tracking');
+
+    t = linspace(0, T, steps);
+    figure; plot(t, eys, 'LineWidth', 1.5); hold on;
+    plot(t, rad2deg(epsis), 'LineWidth', 1.5);
+    grid on; legend('e_y [m]','e_\psi [deg]');
+    title('Tracking errors');
+
+    figure; plot(t, rad2deg(deltas), 'LineWidth', 1.5);
+    grid on; legend('\delta [deg]');
+    title('Steering command');
+end
+
+function [delta, e_y, e_psi] = stanley_control(x, y, psi, v, xr, yr, p)
+    % Find nearest path index (simple vertex scan)
+    d2 = (xr - x).^2 + (yr - y).^2;
+    [~, i] = min(d2);
+
+    % Estimate reference heading using neighbors
+    i0 = max(i-1, 1);
+    i2 = min(i+1, numel(xr));
+    psi_ref = atan2(yr(i2)-yr(i0), xr(i2)-xr(i0));
+
+    % Convention: e_psi = psi_ref - psi
+    e_psi = wrap_angle(psi_ref - psi);
+
+    % Signed cross-track via 2D cross product
+    tx = cos(psi_ref); ty = sin(psi_ref);
+    vx = x - xr(i);   vy = y - yr(i);
+    cross = tx*vy - ty*vx;
+    e_y = sign_safe(cross) * hypot(vx, vy);
+
+    delta = e_psi + atan2(p.k * e_y, v + p.v0);
+    delta = min(max(delta, -p.maxSteer), p.maxSteer);
+end
+
+function s = sign_safe(a)
+    if a &gt;= 0, s = 1; else, s = -1; end
+end
+
+function a = wrap_angle(a)
+    a = mod(a + pi, 2*pi) - pi;
+end
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Wolfram Mathematica Implementation -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>10. Wolfram Mathematica Implementation</h2>
+    <div class="down-content">
+      <p>
+        This Mathematica script demonstrates closed-loop tracking of a straight
+        path using <strong> \( NDSolve \):</strong> and verifies local stability
+        by inspecting eigenvalues of the linearized system matrix.
+      </p>
+
+      <h3>Chapter15_Lesson2.nb</h3>
+      <pre><code class="language-mathematica">
+(* Chapter15_Lesson2.nb
+   Stanley Controller for Ground Vehicles (Mathematica code cells; paste into a notebook)
+   Educational demonstration: straight-path tracking stability + simple simulation.
+*)
+
+ClearAll[&quot;Global`*&quot;];
+
+(* Kinematic bicycle model *)
+L = 2.7;
+v = 6.0;
+
+(* Reference path: straight line along x-axis =&gt; y_ref=0, psi_ref=0 *)
+psiRef[t_] := 0;
+
+(* Error convention: ePsi = psiRef - psi *)
+ePsi[psi_] := psiRef[t] - psi;
+
+(* Stanley steering law for straight path:
+   delta = ePsi + ArcTan[k*eY/(v+v0)]
+   Here eY is lateral position y (signed), since y_ref=0.
+*)
+k = 1.4;
+v0 = 0.5;
+maxSteer = 32 Degree;
+
+deltaLaw[y_, psi_] := Module[{d},
+  d = ePsi[psi] + ArcTan[k*y/(v + v0)];
+  Clip[d, {-maxSteer, maxSteer}]
+];
+
+(* Closed-loop dynamics for straight path *)
+eqns = {
+  x'[t] == v Cos[psi[t]],
+  y'[t] == v Sin[psi[t]],
+  psi'[t] == v/L Tan[ deltaLaw[y[t], psi[t]] ],
+  x[0] == -2, y[0] == 3.5, psi[0] == -10 Degree
+};
+
+sol = NDSolve[eqns, {x, y, psi}, {t, 0, 25}][[1]];
+
+(* Plots *)
+Show[
+ Plot[Evaluate[y[t] /. sol], {t, 0, 25}, PlotRange -&gt; All, AxesLabel -&gt; {&quot;t&quot;,&quot;y(t)&quot;}],
+ PlotLabel -&gt; &quot;Lateral position y(t) under Stanley control (straight path)&quot;
+]
+
+Show[
+ ParametricPlot[Evaluate[{x[t], y[t]} /. sol], {t, 0, 25}, AxesLabel -&gt; {&quot;x&quot;,&quot;y&quot;}, PlotRange -&gt; All],
+ Graphics[{Red, Dashed, Line[{ {-5, 0}, {55, 0} }]}],
+ PlotLabel -&gt; &quot;Trajectory and reference line y=0&quot;
+]
+
+(* Small-angle linearization around y=0, ePsi=0:
+   eYdot ≈ -v ePsi
+   ePsidot ≈ -(v/L) ePsi - (k/L) eY
+   Check eigenvalues of A = { {0,-v},{-k/L,-v/L} }
+*)
+A = { {0, -v}, {-k/L, -v/L} };
+Eigenvalues[A]
+      </code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Problems and Solutions -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>11. Problems and Solutions</h2>
+    <div class="down-content">
+      <p>
+        <strong>Problem 1 (Error Dynamics for a Straight Path):</strong>
+        Consider a straight reference path along the x-axis with
+        <strong> \( \psi_{ref}=0 \):</strong> and constant speed
+        <strong> \( v&gt;0 \):</strong> using the kinematic bicycle model. Using
+        the convention <strong> \( e_\psi = \psi_{ref} - \psi \):</strong> and
+        <strong> \( e_y = y \):</strong> derive
+        <strong> \( \dot e_y \):</strong> and
+        <strong> \( \dot e_\psi \):</strong> exactly (no small-angle
+        approximations).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        From <strong> \( \dot y = v\sin\psi \):</strong> and
+        <strong> \( e_\psi=-\psi \):</strong> we have
+        <strong> \( \dot e_y = \dot y = v\sin\psi = -v\sin e_\psi \):</strong>
+        and since <strong> \( \dot\psi = \frac{v}{L}\tan\delta \):</strong> we
+        get
+        <strong>
+          \( \dot e_\psi = -\dot\psi = -\frac{v}{L}\tan\delta \):</strong
+        >
+        which matches Section 4.
+      </p>
+
+      <p>
+        <strong>Problem 2 (Linear Stability and Routh–Hurwitz):</strong>
+        Linearize the closed-loop system around
+        <strong> \( (e_y,e_\psi)=(0,0) \):</strong> for the Stanley law
+        <strong>
+          \( \delta = e_\psi + \arctan\left(\frac{k e_y}{v+v_0}\right)
+          \):</strong
+        >
+        and prove stability using trace/determinant (Routh–Hurwitz).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        Using <strong> \( \sin e_\psi \approx e_\psi \):</strong>,
+        <strong> \( \tan\delta \approx \delta \):</strong>, and
+        <strong> \( \arctan(z) \approx z \):</strong> near zero yields
+      </p>
+      <h4 class="mathJax">
+        \[ \dot e_y \approx -v e_\psi, \qquad \dot e_\psi \approx
+        -\frac{v}{L}e_\psi - \frac{v}{L}\frac{k}{v+v_0}e_y \]
+      </h4>
+      <p>
+        Thus
+        <strong>
+          \( \mathbf{A} = \begin{bmatrix} 0 & -v \\ -\frac{v k}{L(v+v_0)} &
+          -\frac{v}{L} \end{bmatrix} \):</strong
+        >
+        has
+        <strong> \( \mathrm{tr}(\mathbf{A}) = -\frac{v}{L} &lt; 0 \):</strong>
+        and
+        <strong>
+          \( \det(\mathbf{A}) = \frac{v^2 k}{L(v+v_0)} &gt; 0 \):</strong
+        >
+        for <strong> \( v&gt;0 \):</strong>, <strong> \( k&gt;0 \):</strong>.
+        For a 2nd-order LTI system, these conditions imply both eigenvalues have
+        negative real part, hence local exponential stability.
+      </p>
+
+      <p>
+        <strong>Problem 3 (Curvature Feedforward):</strong>
+        Assume the reference path is a circle of radius
+        <strong> \( R \):</strong> so
+        <strong> \( \kappa_{ref} = 1/R \):</strong> and the vehicle travels at
+        constant speed. Derive a feedforward steering
+        <strong> \( \delta_{ff} \):</strong> that yields zero steady-state
+        heading error if the vehicle were exactly on the path.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        For the kinematic bicycle, path curvature is
+        <strong> \( \kappa = \tan\delta/L \):</strong>. Setting
+        <strong> \( \kappa = \kappa_{ref} = 1/R \):</strong> gives
+        <strong> \( \tan\delta_{ff} = L/R \):</strong> hence
+        <strong> \( \delta_{ff} = \arctan(L/R) \):</strong>. With this term, if
+        <strong> \( e_y=0 \):</strong> and <strong> \( e_\psi=0 \):</strong>,
+        then <strong> \( \delta=\delta_{ff} \):</strong>
+        produces the desired curvature.
+      </p>
+
+      <p>
+        <strong>Problem 4 (Choosing k from Linear Poles):</strong>
+        Using the linearized model in Problem 2, approximate the characteristic
+        polynomial of <strong> \( \mathbf{A} \):</strong> and choose
+        <strong> \( k \):</strong> such that the real parts of both eigenvalues
+        are less than <strong> \( -\alpha \):</strong> for a desired rate
+        <strong> \( \alpha&gt;0 \):</strong> (ignore actuator limits).
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        The characteristic polynomial of <strong> \( \mathbf{A} \):</strong> is
+      </p>
+      <h4 class="mathJax">
+        \[ \lambda^2 - (\mathrm{tr}\,\mathbf{A})\lambda + \det(\mathbf{A}) = 0
+        \quad\Rightarrow\quad \lambda^2 + \frac{v}{L}\lambda + \frac{v^2
+        k}{L(v+v_0)} = 0 \]
+      </h4>
+      <p>
+        A sufficient (conservative) way to enforce
+        <strong> \( \Re(\lambda) \le -\alpha \):</strong> is to match the
+        polynomial to
+        <strong>
+          \( (\lambda+\alpha)^2 = \lambda^2 + 2\alpha\lambda + \alpha^2
+          \):</strong
+        >
+        which suggests choosing
+        <strong> \( \frac{v}{L} \approx 2\alpha \):</strong> (fixed by
+        speed/geometry) and
+        <strong> \( \frac{v^2 k}{L(v+v_0)} \approx \alpha^2 \):</strong>.
+        Solving for <strong> \( k \):</strong> gives
+      </p>
+      <h4 class="mathJax">\[ k \approx \frac{L(v+v_0)}{v^2}\,\alpha^2 \]</h4>
+      <p>
+        In reality, you validate <strong> \( k \):</strong> under discrete-time
+        sampling and steering saturation (and often use gain scheduling vs
+        speed).
+      </p>
+
+      <p>
+        <strong>Problem 5 (Saturation Region for Cross-Track Term):</strong>
+        Suppose the steering is limited to
+        <strong> \( |\delta| \le \delta_{max} \):</strong> and assume
+        <strong> \( e_\psi \approx 0 \):</strong> (vehicle roughly aligned).
+        Find the maximum <strong> \( |e_y| \):</strong> such that the
+        cross-track term alone does not saturate.
+      </p>
+      <p>
+        <strong>Solution:</strong>
+        With <strong> \( e_\psi \approx 0 \):</strong> and
+        <strong> \( \delta_{ff}=0 \):</strong>, saturation is avoided if
+        <strong>
+          \( \left|\arctan\left(\frac{k e_y}{v+v_0}\right)\right| \le
+          \delta_{max} \):</strong
+        >
+        which is equivalent to
+        <strong>
+          \( \left|\frac{k e_y}{v+v_0}\right| \le \tan\delta_{max} \):</strong
+        >. Therefore
+      </p>
+      <h4 class="mathJax">\[ |e_y| \le \frac{v+v_0}{k}\tan\delta_{max} \]</h4>
+      <p>
+        This bound illustrates why very large <strong> \( k \):</strong> can be
+        counterproductive when steering is limited.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Summary -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>12. Summary</h2>
+    <div class="down-content">
+      <p>
+        We formulated Stanley path tracking for a car-like ground vehicle by
+        defining the signed cross-track error <strong> \( e_y \):</strong> and
+        heading error <strong> \( e_\psi \):</strong> relative to the path
+        tangent. The control law
+        <strong>
+          \( \delta = \delta_{ff} + e_\psi + \arctan\left(\frac{k
+          e_y}{v+v_0}\right) \):</strong
+        >
+        combines heading correction with a speed-normalized lateral term and
+        supports curvature feedforward. Local stability on straight paths
+        follows from linearization and Routh–Hurwitz. Implementation hinges on
+        robust nearest-point projection, consistent sign conventions, and
+        handling saturation and low-speed behavior.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 13: References -->
+<section class="simple-post">
+  <div class="container-fluid">
+    <h2>13. References</h2>
+    <ol>
+      <li>
+        Thrun, S., Montemerlo, M., Dahlkamp, H., Stavens, D., Aron, A., Diebel,
+        J., et al. (2006). Stanley: The robot that won the DARPA Grand
+        Challenge. <em>Journal of Field Robotics</em>, 23(9), 661–692.
+      </li>
+      <li>
+        Hoffmann, G.M., Tomlin, C.J., Montemerlo, M., &amp; Thrun, S. (2007).
+        Autonomous automobile trajectory tracking for off-road driving:
+        Controller design, experimental validation and racing.
+        <em>Proceedings of the American Control Conference</em>, 2296–2301.
+      </li>
+      <li>
+        Rajamani, R. (2012). Lateral vehicle dynamics and control (2nd ed.).
+        <em>Springer</em>. (Chapters on path tracking and steering control.)
+      </li>
+      <li>
+        Snider, J.M. (2009). Automatic steering methods for autonomous
+        automobile path tracking.
+        <em>Robotics Institute, Carnegie Mellon University</em> (technical
+        report).
+      </li>
+      <li>
+        Coulter, R.C. (1992). Implementation of the pure pursuit path tracking
+        algorithm.
+        <em>Carnegie Mellon University Robotics Institute</em> (technical
+        report).
+      </li>
+      <li>
+        Kong, J., Pfeiffer, M., Schildbach, G., &amp; Borrelli, F. (2015).
+        Kinematic and dynamic vehicle models for autonomous driving control
+        design.
+        <em>IEEE Intelligent Vehicles Symposium</em>, 1094–1099.
+      </li>
+      <li>
+        Paden, B., Čáp, M., Yong, S.Z., Yershov, D., &amp; Frazzoli, E. (2016).
+        A survey of motion planning and control techniques for self-driving
+        urban vehicles.
+        <em>IEEE Transactions on Intelligent Vehicles</em>, 1(1), 33–55.
+      </li>
+      <li>
+        Kritayakirana, K., &amp; Gerdes, J.C. (2012). Using the centre of
+        percussion to design steering controllers for race cars.
+        <em>Vehicle System Dynamics</em>, 50(1), 33–51.
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="simple-post">
+  <!-- Navigation Buttons -->
+  <div class="container-fluid mt-5 mb-5 text-center">
+    <div class="row">
+      <div class="col-sm-6 border-rectangle-button">
+        <h1><i class="fa fa-arrow-left mr-1"></i> Previous</h1>
+        <a href="../Chapter15/Lesson1.html">
+          Lesson 1: Pure Pursuit and Geometric Path Tracking
+        </a>
+      </div>
+      <div class="col-sm-6 border-rectangle-button">
+        <h1>Next<i class="fa fa-arrow-right ml-2"></i></h1>
+        <a href="../Chapter15/Lesson3.html">
+          Lesson 3: Dynamic Window Approach (DWA)
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+        </div>
+      </div>
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <div class="inner">
+          <!-- Search Box -->
+          <section id="search" class="alt">
+            <form method="get" action="#">
+              <input
+                type="text"
+                name="search"
+                id="search"
+                placeholder="Search..."
+              />
+            </form>
+          </section>
+
+          <!-- Menu -->
+          <nav id="menu">
+            <ul>
+              <li><h3>Autonomous Mobile Robots</h3></li>
+              <br />
+              <li>
+                <span class="opener">Chapter 1: Mobile Robot Modeling Scope and Assumptions</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter1/Lesson1.html" class="" data-chapter="Chapter1" data-lesson="Lesson1">
+                      Lesson 1: What Makes Mobility Different from Manipulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson2.html" class="" data-chapter="Chapter1" data-lesson="Lesson2">
+                      Lesson 2: State Variables for Mobile Robots (pose, velocity, uncertainty)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson3.html" class="" data-chapter="Chapter1" data-lesson="Lesson3">
+                      Lesson 3: Environment Representations for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson4.html" class="" data-chapter="Chapter1" data-lesson="Lesson4">
+                      Lesson 4: Sensing–Estimation–Navigation Pipeline
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter1/Lesson5.html" class="" data-chapter="Chapter1" data-lesson="Lesson5">
+                      Lesson 5: Typical AMR Failure Modes (drift, slip, occlusion)
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 2: Wheeled Locomotion Kinematics (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter2/Lesson1.html" class="" data-chapter="Chapter2" data-lesson="Lesson1">
+                      Lesson 1: Rolling Constraints and Instantaneous Motion
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson2.html" class="" data-chapter="Chapter2" data-lesson="Lesson2">
+                      Lesson 2: Differential Drive Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson3.html" class="" data-chapter="Chapter2" data-lesson="Lesson3">
+                      Lesson 3: Car-Like / Ackermann Steering Kinematics
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson4.html" class="" data-chapter="Chapter2" data-lesson="Lesson4">
+                      Lesson 4: Omnidirectional Bases (mecanum, Swedish wheels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter2/Lesson5.html" class="" data-chapter="Chapter2" data-lesson="Lesson5">
+                      Lesson 5: Kinematic Calibration of Wheel Parameters
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 3: Nonholonomic Motion and Feasibility for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter3/Lesson1.html" class="" data-chapter="Chapter3" data-lesson="Lesson1">
+                      Lesson 1: Nonholonomic Constraints in Wheeled Robots (applied view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson2.html" class="" data-chapter="Chapter3" data-lesson="Lesson2">
+                      Lesson 2: Curvature and Turning Radius Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson3.html" class="" data-chapter="Chapter3" data-lesson="Lesson3">
+                      Lesson 3: Feasible Path Families for Car-Like Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson4.html" class="" data-chapter="Chapter3" data-lesson="Lesson4">
+                      Lesson 4: Motion Primitives for Ground Vehicles (conceptual use)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter3/Lesson5.html" class="" data-chapter="Chapter3" data-lesson="Lesson5">
+                      Lesson 5: Feasibility Checks for Candidate Paths
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 4: Mobile Robot Dynamics (Applied)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter4/Lesson1.html" class="" data-chapter="Chapter4" data-lesson="Lesson1">
+                      Lesson 1: When Dynamics Matter for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson2.html" class="" data-chapter="Chapter4" data-lesson="Lesson2">
+                      Lesson 2: Slip, Skid, and Terrain Interaction Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson3.html" class="" data-chapter="Chapter4" data-lesson="Lesson3">
+                      Lesson 3: Simple Dynamic Models for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson4.html" class="" data-chapter="Chapter4" data-lesson="Lesson4">
+                      Lesson 4: Stability and Tip-Over Risk (vehicle view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter4/Lesson5.html" class="" data-chapter="Chapter4" data-lesson="Lesson5">
+                      Lesson 5: Parameter Effects on Real Navigation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 5: Odometry and Dead Reckoning</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter5/Lesson1.html" class="" data-chapter="Chapter5" data-lesson="Lesson1">
+                      Lesson 1: Wheel Odometry Computation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson2.html" class="" data-chapter="Chapter5" data-lesson="Lesson2">
+                      Lesson 2: IMU Integration for Ground Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson3.html" class="" data-chapter="Chapter5" data-lesson="Lesson3">
+                      Lesson 3: Drift Sources and Bias Accumulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson4.html" class="" data-chapter="Chapter5" data-lesson="Lesson4">
+                      Lesson 4: Practical Odometry Filtering
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter5/Lesson5.html" class="" data-chapter="Chapter5" data-lesson="Lesson5">
+                      Lesson 5: Lab: Characterizing Odometry Error
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 6: Probabilistic Robotics Foundations</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter6/Lesson1.html" class="" data-chapter="Chapter6" data-lesson="Lesson1">
+                      Lesson 1: Belief as a Probability Distribution Over Pose
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson2.html" class="" data-chapter="Chapter6" data-lesson="Lesson2">
+                      Lesson 2: Bayes Filters for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson3.html" class="" data-chapter="Chapter6" data-lesson="Lesson3">
+                      Lesson 3: Motion Models vs Sensor Models
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson4.html" class="" data-chapter="Chapter6" data-lesson="Lesson4">
+                      Lesson 4: Independence Assumptions and Their Limits
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter6/Lesson5.html" class="" data-chapter="Chapter6" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a Basic Bayes Filter Loop
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 7: Kalman-Filter Localization for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter7/Lesson1.html" class="" data-chapter="Chapter7" data-lesson="Lesson1">
+                      Lesson 1: EKF Localization Pipeline (mobile framing)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson2.html" class="" data-chapter="Chapter7" data-lesson="Lesson2">
+                      Lesson 2: UKF Localization and When It Helps
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson3.html" class="" data-chapter="Chapter7" data-lesson="Lesson3">
+                      Lesson 3: Consistency and Linearization Pitfalls
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson4.html" class="" data-chapter="Chapter7" data-lesson="Lesson4">
+                      Lesson 4: Tuning Process/Measurement Noise for AMR
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter7/Lesson5.html" class="" data-chapter="Chapter7" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF/UKF with Wheel + IMU + GPS
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 8: Particle-Filter Localization</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter8/Lesson1.html" class="" data-chapter="Chapter8" data-lesson="Lesson1">
+                      Lesson 1: Monte Carlo Localization (MCL) Intuition
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson2.html" class="" data-chapter="Chapter8" data-lesson="Lesson2">
+                      Lesson 2: Importance Sampling and Resampling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson3.html" class="" data-chapter="Chapter8" data-lesson="Lesson3">
+                      Lesson 3: Sensor Likelihoods for LiDAR and Vision
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson4.html" class="" data-chapter="Chapter8" data-lesson="Lesson4">
+                      Lesson 4: Degeneracy, Kidnapped Robot Problem
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter8/Lesson5.html" class="" data-chapter="Chapter8" data-lesson="Lesson5">
+                      Lesson 5: Lab: Implement MCL on a Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 9: Mapping Representations for Mobile Robots</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter9/Lesson1.html" class="" data-chapter="Chapter9" data-lesson="Lesson1">
+                      Lesson 1: Occupancy Grid Mapping
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson2.html" class="" data-chapter="Chapter9" data-lesson="Lesson2">
+                      Lesson 2: Log-Odds Updates and Bayesian Cells
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson3.html" class="" data-chapter="Chapter9" data-lesson="Lesson3">
+                      Lesson 3: Feature-Based Mapping (landmarks)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson4.html" class="" data-chapter="Chapter9" data-lesson="Lesson4">
+                      Lesson 4: Elevation and Traversability Maps (outdoor AMR)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter9/Lesson5.html" class="" data-chapter="Chapter9" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build a 2D Occupancy Grid from LiDAR
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 10: Scan Matching and Registration</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter10/Lesson1.html" class="" data-chapter="Chapter10" data-lesson="Lesson1">
+                      Lesson 1: Point-Cloud / Scan Registration Goals
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson2.html" class="" data-chapter="Chapter10" data-lesson="Lesson2">
+                      Lesson 2: ICP Variants for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson3.html" class="" data-chapter="Chapter10" data-lesson="Lesson3">
+                      Lesson 3: Correlative Scan Matching
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson4.html" class="" data-chapter="Chapter10" data-lesson="Lesson4">
+                      Lesson 4: Robustness to Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter10/Lesson5.html" class="" data-chapter="Chapter10" data-lesson="Lesson5">
+                      Lesson 5: Lab: ICP-Based Motion Estimation
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 11: SLAM I — Filter-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter11/Lesson1.html" class="" data-chapter="Chapter11" data-lesson="Lesson1">
+                      Lesson 1: The SLAM Problem Formulation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson2.html" class="" data-chapter="Chapter11" data-lesson="Lesson2">
+                      Lesson 2: EKF-SLAM (structure and limitations)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson3.html" class="" data-chapter="Chapter11" data-lesson="Lesson3">
+                      Lesson 3: FastSLAM and Rao–Blackwellization
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson4.html" class="" data-chapter="Chapter11" data-lesson="Lesson4">
+                      Lesson 4: Data Association Challenges
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter11/Lesson5.html" class="" data-chapter="Chapter11" data-lesson="Lesson5">
+                      Lesson 5: Lab: EKF-SLAM in a Small World
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 12: SLAM II — Graph-Based SLAM</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter12/Lesson1.html" class="" data-chapter="Chapter12" data-lesson="Lesson1">
+                      Lesson 1: Pose Graphs and Factor Graphs
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson2.html" class="" data-chapter="Chapter12" data-lesson="Lesson2">
+                      Lesson 2: Loop Closure Detection Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson3.html" class="" data-chapter="Chapter12" data-lesson="Lesson3">
+                      Lesson 3: Pose Graph Optimization (nonlinear least squares view)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson4.html" class="" data-chapter="Chapter12" data-lesson="Lesson4">
+                      Lesson 4: Handling Outliers (robust kernels)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter12/Lesson5.html" class="" data-chapter="Chapter12" data-lesson="Lesson5">
+                      Lesson 5: Lab: Build and Optimize a Pose Graph
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 13: Visual and Visual–Inertial SLAM (AMR Focus)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter13/Lesson1.html" class="" data-chapter="Chapter13" data-lesson="Lesson1">
+                      Lesson 1: Visual Odometry for Mobile Robots
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson2.html" class="" data-chapter="Chapter13" data-lesson="Lesson2">
+                      Lesson 2: Feature-Based vs Direct Methods
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson3.html" class="" data-chapter="Chapter13" data-lesson="Lesson3">
+                      Lesson 3: Visual–Inertial Fusion Pipelines
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson4.html" class="" data-chapter="Chapter13" data-lesson="Lesson4">
+                      Lesson 4: Scale, Lighting, and Motion Blur Issues
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter13/Lesson5.html" class="" data-chapter="Chapter13" data-lesson="Lesson5">
+                      Lesson 5: Lab: Run a VIO/Visual SLAM Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 14: Navigation Architecture for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter14/Lesson1.html" class="" data-chapter="Chapter14" data-lesson="Lesson1">
+                      Lesson 1: Global–Local–Reactive Navigation Layers
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson2.html" class="" data-chapter="Chapter14" data-lesson="Lesson2">
+                      Lesson 2: Costmaps and Inflation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson3.html" class="" data-chapter="Chapter14" data-lesson="Lesson3">
+                      Lesson 3: Behavior Trees / State Machines for Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson4.html" class="" data-chapter="Chapter14" data-lesson="Lesson4">
+                      Lesson 4: Recovery Behaviors and Fault Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter14/Lesson5.html" class="" data-chapter="Chapter14" data-lesson="Lesson5">
+                      Lesson 5: Lab: Assemble a Full Navigation Stack
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 15: Local Motion Generation (Mobile-Specific)</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter15/Lesson1.html" class="" data-chapter="Chapter15" data-lesson="Lesson1">
+                      Lesson 1: Pure Pursuit and Geometric Path Tracking
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson2.html" class="active-lesson" data-chapter="Chapter15" data-lesson="Lesson2">
+                      Lesson 2: Stanley Controller for Ground Vehicles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson3.html" class="" data-chapter="Chapter15" data-lesson="Lesson3">
+                      Lesson 3: Dynamic Window Approach (DWA)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson4.html" class="" data-chapter="Chapter15" data-lesson="Lesson4">
+                      Lesson 4: Timed-Elastic-Band (TEB) Local Planning
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter15/Lesson5.html" class="" data-chapter="Chapter15" data-lesson="Lesson5">
+                      Lesson 5: Lab: Compare Local Planners in Dense Obstacles
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 16: Obstacle Avoidance in Dynamic Environments</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter16/Lesson1.html" class="" data-chapter="Chapter16" data-lesson="Lesson1">
+                      Lesson 1: Sensing Dynamic Obstacles
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson2.html" class="" data-chapter="Chapter16" data-lesson="Lesson2">
+                      Lesson 2: Velocity Obstacles and Reciprocal Avoidance
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson3.html" class="" data-chapter="Chapter16" data-lesson="Lesson3">
+                      Lesson 3: Socially Aware Navigation Concepts
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson4.html" class="" data-chapter="Chapter16" data-lesson="Lesson4">
+                      Lesson 4: Prediction-Aware Local Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter16/Lesson5.html" class="" data-chapter="Chapter16" data-lesson="Lesson5">
+                      Lesson 5: Lab: Navigate Through Moving Crowds
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 17: Exploration and Active Mapping</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter17/Lesson1.html" class="" data-chapter="Chapter17" data-lesson="Lesson1">
+                      Lesson 1: Frontier-Based Exploration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson2.html" class="" data-chapter="Chapter17" data-lesson="Lesson2">
+                      Lesson 2: Information Gain and Entropy Reduction
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson3.html" class="" data-chapter="Chapter17" data-lesson="Lesson3">
+                      Lesson 3: Next-Best-View Strategies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson4.html" class="" data-chapter="Chapter17" data-lesson="Lesson4">
+                      Lesson 4: Exploration Under Limited Battery/Time
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter17/Lesson5.html" class="" data-chapter="Chapter17" data-lesson="Lesson5">
+                      Lesson 5: Lab: Autonomous Exploration in Unknown Map
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 18: Outdoor and Field AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter18/Lesson1.html" class="" data-chapter="Chapter18" data-lesson="Lesson1">
+                      Lesson 1: GPS/RTK Integration in Navigation
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson2.html" class="" data-chapter="Chapter18" data-lesson="Lesson2">
+                      Lesson 2: Traversability and Terrain Classification
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson3.html" class="" data-chapter="Chapter18" data-lesson="Lesson3">
+                      Lesson 3: Long-Range Localization Drift Handling
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson4.html" class="" data-chapter="Chapter18" data-lesson="Lesson4">
+                      Lesson 4: Weather/Lighting Effects on Perception
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter18/Lesson5.html" class="" data-chapter="Chapter18" data-lesson="Lesson5">
+                      Lesson 5: Case Study: Agricultural / Delivery Robots
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 19: Benchmarking and Evaluation for AMR</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter19/Lesson1.html" class="" data-chapter="Chapter19" data-lesson="Lesson1">
+                      Lesson 1: Metrics for Localization and SLAM
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson2.html" class="" data-chapter="Chapter19" data-lesson="Lesson2">
+                      Lesson 2: Metrics for Navigation Robustness
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson3.html" class="" data-chapter="Chapter19" data-lesson="Lesson3">
+                      Lesson 3: Standard Datasets and Simulated Benchmarks
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson4.html" class="" data-chapter="Chapter19" data-lesson="Lesson4">
+                      Lesson 4: Stress Testing and Ablation Studies
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter19/Lesson5.html" class="" data-chapter="Chapter19" data-lesson="Lesson5">
+                      Lesson 5: Lab: Full-System Evaluation Report
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <span class="opener">Chapter 20: Capstone Project — Full AMR Autonomy</span>
+                <ul>
+                  <li>
+                    <a href="../Chapter20/Lesson1.html" class="" data-chapter="Chapter20" data-lesson="Lesson1">
+                      Lesson 1: Problem Definition and Environment Setup
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson2.html" class="" data-chapter="Chapter20" data-lesson="Lesson2">
+                      Lesson 2: Sensor Suite Selection (given hardware)
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson3.html" class="" data-chapter="Chapter20" data-lesson="Lesson3">
+                      Lesson 3: Localization + Mapping Integration
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson4.html" class="" data-chapter="Chapter20" data-lesson="Lesson4">
+                      Lesson 4: Navigation Stack Deployment
+                    </a>
+                  </li>
+                  <li>
+                    <a href="../Chapter20/Lesson5.html" class="" data-chapter="Chapter20" data-lesson="Lesson5">
+                      Lesson 5: Final Demo + Research-Style Writeup
+                    </a>
+                  </li>
+                </ul>
+              </li>
+              <br />
+              <li>
+                <a href="https://www.youtube.com/@abolfazlmohammadijoo" target="_blank"><i class="fa fa-youtube mr-2" style="font-size: 2rem"></i>Youtube Channel</a>
+              </li>
+            </ul>
+          </nav>
+
+          <!-- Similar Tutorials -->
+          <div class="featured-posts">
+            <div class="heading">
+              <h2>Similar Tutorials</h2>
+            </div>
+            <div class="owl-carousel owl-theme">
+              <a href="https://github.com/mohammadijoo/Machine_Learning_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Machine_Learning_Tutorials.jpg"
+                    alt="Machine Learning Tutorials"
+                  />
+                  <p>Machine Learning Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Control_and_Robotics_Tutorials" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Control_and_Robotics_Tutorials.jpg"
+                    alt="Control and Robotics Tutorials"
+                  />
+                  <p>Control and Robotics Tutorials</p>
+                </div>
+              </a>
+              <a href="https://github.com/mohammadijoo/Design_Patterns_Kit" target="_blank">
+                <div class="featured-item">
+                  <img
+                    src="../../../assets/images/Design_Patterns_Tutorials.jpg"
+                    alt="Design Patterns Tutorials"
+                  />
+                  <p>Design Patterns Tutorials</p>
+                </div>
+              </a>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <footer id="footer">
+            <a href="https://mohammadijoo.github.io/" target="_blank">
+              <div class="">
+                <img
+                  src="../../../assets/images/Abolfazl_Mohammadijoo.jpg"
+                  alt="Abolfazl Mohammadijoo"
+                  style="width: 100px"
+                />
+              </div>
+            </a>
+            <p class="copyright">
+              © Abolfazl Mohammadijoo — Control &amp; Robotics Tutorials.<br />
+              Licensed for non-commercial educational use only.<br />
+              Commercial use requires permission.
+            </p>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- CDN JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/matlab.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/mathematica.min.js"></script>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelectorAll("pre code").forEach((block) => {
+          hljs.highlightElement(block);
+        });
+      });
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-MML-AM_CHTML"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+
+    <!-- Project JavaScript -->
+    <script src="../../../assets/js/browser.min.js"></script>
+    <script src="../../../assets/js/breakpoints.min.js"></script>
+    <script src="../../../assets/js/transition.js"></script>
+    <script src="../../../assets/js/owl-carousel.js"></script>
+    <script src="../../../assets/js/custom.js"></script>
+    <script src="../../../assets/js/copy_code.js"></script>
+    <script src="../../../assets/js/menu_lesson_highlight.js"></script>
+  </body>
+</html>
